@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 56
-        versionName = "0.6-step41-unified-audio-macro-voices"
+        versionCode = 57
+        versionName = "0.6-step42-learn-play-dream"
     }
 
     compileOptions {

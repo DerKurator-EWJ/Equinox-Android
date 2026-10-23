@@ -56,7 +56,8 @@ class AdaptiveAudioQuantizer(private val context: Context) {
         val acceptanceRadius: Double,
         val codebookSize: Int,
         val familiarity: Double,
-        val debugText: String
+        val debugText: String,
+        val recognized: Boolean = true
     )
 
     data class Stats(
@@ -108,7 +109,7 @@ class AdaptiveAudioQuantizer(private val context: Context) {
     }
 
     @Synchronized
-    fun quantize(frame: ShortArray): Result {
+    fun quantize(frame: ShortArray, learn: Boolean = true): Result {
         val f = extractFeatures(frame)
         if (f.silent) {
             return Result(
@@ -120,11 +121,11 @@ class AdaptiveAudioQuantizer(private val context: Context) {
                 acceptanceRadius = 0.0,
                 codebookSize = prototypes.size,
                 familiarity = 0.0,
-                debugText = "Stille"
+                debugText = "Stille",
+                recognized = false
             )
         }
 
-        acceptedFrames++
         var nearest: Prototype? = null
         var nearestDistance = Double.POSITIVE_INFINITY
         for (p in candidatePrototypes(f.values)) {
@@ -140,6 +141,25 @@ class AdaptiveAudioQuantizer(private val context: Context) {
         val creationRadius = if (p == null) 0.0 else creationRadius(p)
         val create = p == null || nearestDistance > creationRadius
 
+        // Step 42 PLAY path: classify only against the existing codebook. Novel input is
+        // deliberately left unrecognized instead of being forced into the nearest identity.
+        if (!learn) {
+            val recognized = p != null && !create
+            return Result(
+                id = p?.id ?: ID_BASE - 1,
+                activity = f.rms.coerceIn(0.0, 1.0),
+                silent = false,
+                created = false,
+                matchDistance = if (p == null) 1.0 else nearestDistance,
+                acceptanceRadius = radius,
+                codebookSize = prototypes.size,
+                familiarity = p?.let { familiarity(it) } ?: 0.0,
+                debugText = if (recognized) "PLAY reuse · ${f.debug}" else "PLAY unbekannt · ${f.debug}",
+                recognized = recognized
+            )
+        }
+
+        acceptedFrames++
         val chosen: Prototype
         val usedDistance: Double
         val usedRadius: Double
@@ -185,7 +205,8 @@ class AdaptiveAudioQuantizer(private val context: Context) {
                 append(" · ").append(f.debug)
                 if (!create) append(" · d ").append("%.3f".format(usedDistance)).append("/r ").append("%.3f".format(usedRadius))
                 append(" · fam ").append("%.2f".format(familiarity(chosen)))
-            }
+            },
+            recognized = true
         )
     }
 

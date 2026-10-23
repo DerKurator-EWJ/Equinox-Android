@@ -19,6 +19,7 @@ data class VisualObservation(
     val centerX: Double = 0.5,
     val centerY: Double = 0.5,
     val familiarity: Double = 0.0,
+    val recognized: Boolean = true,
     val x0: Double = 0.0,
     val y0: Double = 0.0,
     val x1: Double = 1.0,
@@ -58,7 +59,8 @@ data class VisualFrameResult(
 class VisualGridAnalyzer(
     private val quantizer: AdaptiveVisualQuantizer,
     private val onFrame: (VisualFrameResult) -> Unit,
-    private val onVideoFrame: ((VideoFrameSnapshot) -> Unit)? = null
+    private val onVideoFrame: ((VideoFrameSnapshot) -> Unit)? = null,
+    private val learningEnabled: () -> Boolean = { true }
 ) : ImageAnalysis.Analyzer {
 
     companion object {
@@ -168,6 +170,7 @@ class VisualGridAnalyzer(
             val workStartNs = System.nanoTime()
 
             val observations = ArrayList<VisualObservation>()
+            val learnNow = learningEnabled()
             val queue = PriorityQueue<Region>(compareByDescending<Region> { it.priority }.thenBy { it.depth })
 
             // The base lattice guarantees whole-frame coverage before detail is allocated.
@@ -195,7 +198,7 @@ class VisualGridAnalyzer(
             while (queue.isNotEmpty() && processed < effectivePatchBudget) {
                 val region = queue.remove()
                 val sample = sampleRegion(region, yPlane, uPlane, vPlane)
-                val q = quantizer.quantize(sample.features, sample.rgb)
+                val q = quantizer.quantize(sample.features, sample.rgb, learn = learnNow)
                 val noveltyRatio = if (q.created || q.acceptanceRadius <= 1e-9) 2.0 else q.matchDistance / q.acceptanceRadius
 
                 val cx = (region.x0 + region.x1) * 0.5 / width.coerceAtLeast(1).toDouble()
@@ -210,6 +213,7 @@ class VisualGridAnalyzer(
                     centerX = cx.coerceIn(0.0, 1.0),
                     centerY = cy.coerceIn(0.0, 1.0),
                     familiarity = q.familiarity,
+                    recognized = q.recognized,
                     x0 = region.x0.toDouble() / width.coerceAtLeast(1).toDouble(),
                     y0 = region.y0.toDouble() / height.coerceAtLeast(1).toDouble(),
                     x1 = region.x1.toDouble() / width.coerceAtLeast(1).toDouble(),
@@ -257,7 +261,7 @@ class VisualGridAnalyzer(
 
             // Step 38: collapse fully refined quadtree parents and spatially couple adjacent,
             // near-identical leaf regions before they enter the persistent learning stream.
-            val spatial = SpatialVisualCoupler.couple(observations)
+            val spatial = SpatialVisualCoupler.couple(observations.filter { it.recognized })
 
             val elapsedMs = (System.nanoTime() - workStartNs) / 1_000_000L
             // Device-speed adaptation: faster hardware automatically resolves more regions.

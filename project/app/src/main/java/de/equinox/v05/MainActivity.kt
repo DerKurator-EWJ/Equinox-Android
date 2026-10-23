@@ -82,6 +82,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var captureRecorder: UnifiedCaptureRecorder
     private lateinit var captureButton: TextView
     private lateinit var productAudioButton: TextView
+    private lateinit var productModeButton: TextView
+    private lateinit var cognitiveModeStatus: TextView
     private lateinit var captureStatus: TextView
     private val capturePermissionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
@@ -274,6 +276,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         memory = MemoryModel(this)
+        memory.setCognitiveMode(CognitiveMode.PLAY)
         outputBridge = EngineOutputBridge(memory)
         cameraExecutor = Executors.newSingleThreadExecutor()
         displayPrefsStore = DisplayPrefsStore(this)
@@ -336,6 +339,18 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(233, 211, 143))
             gravity = Gravity.CENTER
         }
+        productModeButton = TextView(this).apply {
+            text = "PLAY"
+            textSize = 11f
+            letterSpacing = 0.06f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(145, 230, 210))
+            background = roundedBackground(Color.argb(64, 255, 255, 255), 18f)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "PLAY oder DREAM"
+            attachPressMotion(this)
+        }
         productAudioButton = TextView(this).apply {
             text = "♪"
             textSize = 21f
@@ -370,8 +385,9 @@ class MainActivity : ComponentActivity() {
         }
         controlBar.addView(realityLabel, LinearLayout.LayoutParams(dp(58), dp(48)))
         controlBar.addView(blendSlider, LinearLayout.LayoutParams(0, dp(48), 1f))
-        controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(78), dp(48)))
-        controlBar.addView(productAudioButton, LinearLayout.LayoutParams(dp(54), dp(48)))
+        controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(72), dp(48)))
+        controlBar.addView(productModeButton, LinearLayout.LayoutParams(dp(58), dp(48)))
+        controlBar.addView(productAudioButton, LinearLayout.LayoutParams(dp(50), dp(48)))
         controlBar.addView(captureButton, LinearLayout.LayoutParams(dp(54), dp(48)))
         controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(54), dp(48)))
         val controlBarParams = FrameLayout.LayoutParams(
@@ -456,7 +472,7 @@ class MainActivity : ComponentActivity() {
         })
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 41 — UNIFIED AUDIO / MACRO VOICES", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 42 — LEARN / PLAY / DREAM", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
         captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Unified Audio AAC", 12f, 4).apply {
@@ -563,6 +579,9 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+        productModeButton.setOnClickListener {
+            if (memory.cognitiveMode() == CognitiveMode.DREAM) enterPlayMode() else startDreamPlayback()
+        }
         productAudioButton.setOnClickListener { toggleContinuousOrchestra() }
         captureButton.setOnClickListener {
             if (captureRecorder.isRecording()) {
@@ -583,18 +602,34 @@ class MainActivity : ComponentActivity() {
 
         setContentView(rootFrame)
         showSettingsSection(AppPage.LIVE)
+        syncCognitiveModeUi()
         closeSettingsOverlay()
     }
 
     private fun buildLivePage() {
-        livePage.addView(label("LIVE — EXTERNE WELT", 20f, 18).apply {
+        livePage.addView(label("INPUT / LEARN", 20f, 18).apply {
             setTextColor(Color.rgb(105, 225, 235))
         })
         livePage.addView(label(
-            "Mikrofon und Kamera erzeugen Input. Der Output ist nur eine Projektion des aktuellen Core-Zustands und schreibt selbst nichts zurück.",
+            "Sensoren sind ein Werkzeug hinter den Settings. LEARN schreibt neue Erfahrung; PLAY erkennt nur bereits Bekanntes. DREAM nimmt keinen externen Input an.",
             12f,
             6
         ).apply { setTextColor(Color.LTGRAY) })
+
+        cognitiveModeStatus = label("Modus: PLAY · Sensoren read-only", 14f, 8).apply {
+            setTextColor(Color.rgb(145, 230, 210))
+        }
+        livePage.addView(cognitiveModeStatus)
+        val cognitiveRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        cognitiveRow.addView(Button(this).apply {
+            text = "LEARN · SCHREIBEN"
+            setOnClickListener { enterLearnMode() }
+        }, weightedButtonParams())
+        cognitiveRow.addView(Button(this).apply {
+            text = "PLAY · READ-ONLY"
+            setOnClickListener { enterPlayMode() }
+        }, weightedButtonParams())
+        livePage.addView(cognitiveRow, buttonParams(8))
 
         audioEncoderStatus = label("Audio-Encoder: ${audioEncoderMode.label}", 14f, 12).apply {
             setTextColor(Color.rgb(145, 210, 255))
@@ -648,7 +683,7 @@ class MainActivity : ComponentActivity() {
         livePage.addView(adaptiveVisualQuantizerStatus)
 
         cameraButton = Button(this).apply {
-            text = "KAMERA-LERNEN STARTEN"
+            text = "KAMERA STARTEN"
             setOnClickListener { ensureCameraPermissionAndStart() }
         }
         cameraStopButton = Button(this).apply {
@@ -861,6 +896,9 @@ class MainActivity : ComponentActivity() {
             setOnClickListener {
                 if (running) stopAudio()
                 stopCameraLearning()
+                stopHybridPlayback(clear = false)
+                memory.setCognitiveMode(CognitiveMode.PLAY)
+                syncCognitiveModeUi()
                 val ok = memory.memoryPlaybackStep()
                 memoryModeStatus.text = if (ok) "MEMORY: Einzelschritt" else "MEMORY: noch keine gelernten Makros"
                 refreshMemoryPage()
@@ -890,6 +928,9 @@ class MainActivity : ComponentActivity() {
                 stopMemoryPlayback(clear = false)
                 stopAudio()
                 stopCameraLearning()
+                stopHybridPlayback(clear = false)
+                memory.setCognitiveMode(CognitiveMode.DREAM)
+                syncCognitiveModeUi()
                 val ok = memory.autonomousDreamStep()
                 dreamModeStatus.text = if (ok) "DREAM: Einzelschritt" else "DREAM: noch keine gelernten Makros"
                 refreshMemoryPage()
@@ -898,7 +939,7 @@ class MainActivity : ComponentActivity() {
         }, weightedButtonParams())
         dreamRow.addView(Button(this).apply {
             text = "DREAM STOP"
-            setOnClickListener { stopDreamPlayback(clear = false) }
+            setOnClickListener { enterPlayMode() }
         }, weightedButtonParams())
         memoryPage.addView(dreamRow, buttonParams(6))
 
@@ -1078,6 +1119,8 @@ class MainActivity : ComponentActivity() {
         stopDreamPlayback(clear = true)
         if (hybridPlaybackRunning) stopHybridPlayback(clear = true)
         if (unifiedAudio.isRunning()) unifiedAudio.stop()
+        memory.setCognitiveMode(CognitiveMode.PLAY)
+        syncCognitiveModeUi()
     }
 
     /** Reloads only learned identity; UI/display preferences remain untouched. */
@@ -1595,7 +1638,48 @@ class MainActivity : ComponentActivity() {
         refreshGraph()
     }
 
+    private fun enterLearnMode() {
+        stopDreamPlayback(clear = false)
+        stopMemoryPlayback(clear = false)
+        stopHybridPlayback(clear = false)
+        memory.setCognitiveMode(CognitiveMode.LEARN)
+        syncCognitiveModeUi()
+        refreshGraph()
+    }
+
+    private fun enterPlayMode(stopInternalPlayback: Boolean = true) {
+        if (stopInternalPlayback) {
+            stopDreamPlayback(clear = false)
+            stopMemoryPlayback(clear = false)
+            stopHybridPlayback(clear = false)
+        }
+        memory.setCognitiveMode(CognitiveMode.PLAY)
+        syncCognitiveModeUi()
+        refreshGraph()
+    }
+
+    private fun syncCognitiveModeUi() {
+        val mode = memory.cognitiveMode()
+        if (::productModeButton.isInitialized) {
+            productModeButton.text = mode.label
+            productModeButton.setTextColor(when (mode) {
+                CognitiveMode.LEARN -> Color.rgb(105, 225, 235)
+                CognitiveMode.PLAY -> Color.rgb(145, 230, 210)
+                CognitiveMode.DREAM -> Color.rgb(255, 176, 112)
+            })
+        }
+        if (::cognitiveModeStatus.isInitialized) {
+            cognitiveModeStatus.text = when (mode) {
+                CognitiveMode.LEARN -> "Modus: LEARN · Sensoren schreiben neue Erfahrung"
+                CognitiveMode.PLAY -> "Modus: PLAY · Sensoren aktivieren nur Bekanntes"
+                CognitiveMode.DREAM -> "Modus: DREAM · nur interne read-only Aktivierung"
+            }
+        }
+        refreshSensorUiState()
+    }
+
     private fun startHybridPlayback() {
+        enterPlayMode(stopInternalPlayback = false)
         if (!memory.hasLearnedMacros()) {
             hybridModeStatus.text = "HYBRID: noch keine gelernten Makros"
             return
@@ -1645,18 +1729,20 @@ class MainActivity : ComponentActivity() {
         if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio: AUS"
         if (::startButton.isInitialized) startButton.isEnabled = !running
         if (::stopButton.isInitialized) stopButton.isEnabled = running
-        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · Lernen adaptiv coarse→fine · Video adaptiv" else "Kamera: AUS"
+        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · ${memory.cognitiveMode().label} · coarse→fine" else "Kamera: AUS"
         if (::cameraButton.isInitialized) cameraButton.isEnabled = !cameraRunning
         if (::cameraStopButton.isInitialized) cameraStopButton.isEnabled = cameraRunning
     }
 
     private fun startMemoryPlayback() {
+        enterPlayMode(stopInternalPlayback = false)
         if (!memory.hasLearnedMacros()) {
             memoryModeStatus.text = "MEMORY: noch keine gelernten Makros"
             return
         }
         stopAudio()
         stopCameraLearning()
+        stopHybridPlayback(clear = false)
         unifiedAudio.stop()
         stopContinuousOrchestra()
         stopDreamPlayback(clear = false)
@@ -1689,9 +1775,12 @@ class MainActivity : ComponentActivity() {
         }
         stopAudio()
         stopCameraLearning()
+        stopHybridPlayback(clear = false)
         unifiedAudio.stop()
         stopContinuousOrchestra()
         stopMemoryPlayback(clear = false)
+        memory.setCognitiveMode(CognitiveMode.DREAM)
+        syncCognitiveModeUi()
         dreamPlaybackRunning = true
         dreamModeStatus.text = "DREAM: RUN · read-only autonome Exploration"
         uiHandler.removeCallbacks(dreamLoop)
@@ -1943,6 +2032,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startAudio() {
         if (running) return
+        if (memory.cognitiveMode() == CognitiveMode.DREAM) enterPlayMode()
         stopMemoryPlayback(clear = true)
 
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -2036,13 +2126,13 @@ class MainActivity : ComponentActivity() {
                     val fftHz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
                     val fftId = AudioQuantizer.idForHz(fftHz)
                     val direct = DirectAudioQuantizer.quantize(analysisFrame)
-                    val adaptive = adaptiveQuantizer.quantize(analysisFrame)
+                    val adaptive = adaptiveQuantizer.quantize(analysisFrame, learn = memory.cognitiveMode() == CognitiveMode.LEARN)
 
                     fun feed(mode: AudioEncoderMode) {
                         when (mode) {
                             AudioEncoderMode.FFT_FREQUENCY -> memory.observe(fftId, fftHz)
                             AudioEncoderMode.DIRECT_PATTERN -> if (!direct.silent) memory.observeDirectAudio(direct.id)
-                            AudioEncoderMode.ADAPTIVE_PATTERN -> if (!adaptive.silent) memory.observeAdaptiveAudio(adaptive.id)
+                            AudioEncoderMode.ADAPTIVE_PATTERN -> if (!adaptive.silent && adaptive.recognized) memory.observeAdaptiveAudio(adaptive.id)
                         }
                     }
                     // Feed the selected stream last so the momentary LIVE working set remains
@@ -2052,7 +2142,7 @@ class MainActivity : ComponentActivity() {
                     encoderBenchmark.recordTriple(
                         fftId,
                         if (direct.silent) null else direct.id,
-                        if (adaptive.silent) null else adaptive.id
+                        if (adaptive.silent || !adaptive.recognized) null else adaptive.id
                     )
 
                     when (selectedEncoder) {
@@ -2098,8 +2188,8 @@ class MainActivity : ComponentActivity() {
                             strengthText = "PCM-Aktivität RMS: %.5f".format(direct.activity)
                         }
                         AudioEncoderMode.ADAPTIVE_PATTERN -> {
-                            val adaptive = adaptiveQuantizer.quantize(analysisFrame)
-                            if (!adaptive.silent) memory.observeAdaptiveAudio(adaptive.id)
+                            val adaptive = adaptiveQuantizer.quantize(analysisFrame, learn = memory.cognitiveMode() == CognitiveMode.LEARN)
+                            if (!adaptive.silent && adaptive.recognized) memory.observeAdaptiveAudio(adaptive.id)
                             primaryText = if (adaptive.silent) "Adaptive-ID: Stille — nicht gelernt" else "Adaptive-ID: ${adaptive.debugText}"
                             idText = if (adaptive.silent) "Adaptive Pattern-ID: —" else "Adaptive Pattern-ID: ${adaptive.id}"
                             strengthText = "PCM-Aktivität RMS: %.5f · Codebook ${adaptive.codebookSize}".format(adaptive.activity)
@@ -2118,7 +2208,7 @@ class MainActivity : ComponentActivity() {
                 var didConsolidate = false
                 val now = System.currentTimeMillis()
                 val interval = selectedIntervalMs()
-                if (now - lastConsolidationMs >= interval) {
+                if (memory.cognitiveMode() == CognitiveMode.LEARN && now - lastConsolidationMs >= interval) {
                     val result = memory.consolidate()
                     lastConsolidationMs = now
                     lastConsolidationSummary = consolidationSummary(result)
@@ -2156,6 +2246,7 @@ class MainActivity : ComponentActivity() {
 
     private fun startCameraLearning() {
         if (cameraRunning) return
+        if (memory.cognitiveMode() == CognitiveMode.DREAM) enterPlayMode()
         stopMemoryPlayback(clear = true)
 
         val providerFuture = ProcessCameraProvider.getInstance(this)
@@ -2186,7 +2277,7 @@ class MainActivity : ComponentActivity() {
                             runOnUiThread {
                                 if (settingsOpen) {
                                     cameraFrames.text =
-                                        "Visuelle Frames: $visualFrameCount · Gelernt $visualObservationCount · Samples ${result.sampledRegions} · Leaves ${result.spatialLeafRegions} → gekoppelt ${result.spatialCoupledRegions} (-${"%.0f".format(result.spatialCouplingRatio * 100.0)}%) · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)} · Analyse ${result.analysisCostMs}ms · Video ${result.videoSampleCostMs}ms/${result.videoIntervalMs}ms"
+                                        "Visuelle Frames: $visualFrameCount · Core $visualObservationCount · ${memory.cognitiveMode().label} · Samples ${result.sampledRegions} · Leaves ${result.spatialLeafRegions} → gekoppelt ${result.spatialCoupledRegions} (-${"%.0f".format(result.spatialCouplingRatio * 100.0)}%) · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)} · Analyse ${result.analysisCostMs}ms · Video ${result.videoSampleCostMs}ms/${result.videoIntervalMs}ms"
                                     updateLiveLatencyStatus()
                                     adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
                                     if (visualFrameCount % 2L == 0L) updateMemoryStats()
@@ -2198,7 +2289,8 @@ class MainActivity : ComponentActivity() {
                             if (!cameraRunning) return@VisualGridAnalyzer
                             livePipeline.offerFrame(video)
                             scheduleLowLatencyRender()
-                        }
+                        },
+                        learningEnabled = { memory.cognitiveMode() == CognitiveMode.LEARN }
                     )
                 visualAnalyzer = visualAnalyzerInstance
                 visualAnalyzerInstance.setPerformanceProfile(performanceGovernor.snapshot().profile)
@@ -2207,7 +2299,7 @@ class MainActivity : ComponentActivity() {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
                 cameraRunning = true
-                cameraStatus.text = "Kamera: AKTIV · Lernen adaptiv coarse→fine · Video adaptiv"
+                cameraStatus.text = "Kamera: AKTIV · ${memory.cognitiveMode().label} · coarse→fine"
                 cameraButton.isEnabled = false
                 cameraStopButton.isEnabled = true
                 refreshSensorUiState()
@@ -2329,7 +2421,8 @@ class MainActivity : ComponentActivity() {
         adaptiveQuantizer.updateStructureContext(s.adaptiveAudioMacros, s.macroRelations)
         adaptiveVisualQuantizer.updateStructureContext(s.adaptiveVisualMacros, s.crossModalMacros)
         val levelText = if (s.levelCounts.isEmpty()) "noch keine" else s.levelCounts.entries.joinToString(" · ") { "${AbstractionTier.labelForMacroDepth(it.key)}:${it.value}" }
-        return "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
+        return "Cognitive Mode: ${memory.cognitiveMode().label} · ${if (memory.cognitiveMode() == CognitiveMode.LEARN) "PERSISTENT WRITES AN" else "READ-ONLY"}\n" +
+            "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
             "Audio-Alphabete: FFT ${s.fftAudioCodes} Q/${s.fftAudioMacros} M · Direct ${s.directAudioCodes} Q/${s.directAudioMacros} M · Adaptive ${s.adaptiveAudioCodes} Q/${s.adaptiveAudioMacros} M\n" +
             "Vision: adaptive ${s.adaptiveVisualCodes} Q/${s.adaptiveVisualMacros} M · visuell gesamt ${s.visualPersistentCodes} Q\n" +
             "Crossmodal: ${s.crossModalMacros} Makros · ${s.crossModalCandidates} Kandidaten · Aktivierungen ${s.crossModalActivations} · stärkster Kandidat ${s.strongestCrossModalSupport}/4\n" +

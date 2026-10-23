@@ -39,7 +39,8 @@ class AdaptiveVisualQuantizer(private val context: Context) {
         val acceptanceRadius: Double,
         val codebookSize: Int,
         val displayColor: Int,
-        val familiarity: Double
+        val familiarity: Double,
+        val recognized: Boolean = true
     )
 
     data class Stats(
@@ -84,9 +85,8 @@ class AdaptiveVisualQuantizer(private val context: Context) {
     }
 
     @Synchronized
-    fun quantize(features: DoubleArray, packedRgb: Int): Result {
+    fun quantize(features: DoubleArray, packedRgb: Int, learn: Boolean = true): Result {
         require(features.size == 7) { "AdaptiveVisualQuantizer expects 7 features" }
-        acceptedPatches++
 
         var nearest: Prototype? = null
         var nearestDistance = Double.POSITIVE_INFINITY
@@ -103,6 +103,23 @@ class AdaptiveVisualQuantizer(private val context: Context) {
         val creationRadius = if (p == null) 0.0 else creationRadius(p)
         val create = p == null || nearestDistance > creationRadius
 
+        // Step 42 PLAY path: nearest-neighbour recognition without changing the codebook.
+        // Novel appearance stays unknown so PLAY cannot silently teach the visual alphabet.
+        if (!learn) {
+            val recognized = p != null && !create
+            return Result(
+                id = p?.id ?: ID_BASE - 1,
+                created = false,
+                matchDistance = if (p == null) 1.0 else nearestDistance,
+                acceptanceRadius = radius,
+                codebookSize = prototypes.size,
+                displayColor = p?.displayColor ?: packedRgb,
+                familiarity = p?.let { familiarity(it) } ?: 0.0,
+                recognized = recognized
+            )
+        }
+
+        acceptedPatches++
         val chosen: Prototype
         val usedDistance: Double
         val usedRadius: Double
@@ -140,7 +157,8 @@ class AdaptiveVisualQuantizer(private val context: Context) {
             acceptanceRadius = usedRadius,
             codebookSize = prototypes.size,
             displayColor = chosen.displayColor,
-            familiarity = familiarity(chosen)
+            familiarity = familiarity(chosen),
+            recognized = true
         )
     }
 

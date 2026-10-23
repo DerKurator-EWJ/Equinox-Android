@@ -46,7 +46,7 @@ private const val CROSSMODAL_WINDOW_NS = 900_000_000L
 private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
 
 /**
- * v0.6 Step 41
+ * v0.6 Step 42
  *
  * Keeps the active working set, indexed lazy retrieval, structural tiers,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -72,8 +72,9 @@ private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
  * format unchanged but exposes deterministic acoustic macro-voice signatures reconstructed
  * recursively from the actual audio children for the single unified output engine.
  * The coincidence clock is runtime-only and is never persisted into the learned identities.
- * External observations can still update long-term memory; Memory mode only
- * activates already learned macros and relations.
+ * Step 42 makes runtime intent explicit: LEARN is the only mode allowed to mutate
+ * learned memory/codebook-linked evidence, PLAY lets real sensors activate only already
+ * learned identities and hierarchy paths, and DREAM accepts only internal read-only traversal.
  *
  * Operational definitions used here:
  * - A_i = current/live activation of macro i
@@ -496,6 +497,10 @@ class MemoryModel(context: Context) {
     // The core never scans every relation just to react to a live event.
     private val relationIndex = mutableMapOf<Int, MutableSet<Long>>()
 
+    // Step 42 cognitive mode is runtime-only and intentionally not part of a memory profile.
+    private var cognitiveMode = CognitiveMode.PLAY
+    private var readOnlyEvents = 0L
+
     // Momentary state is intentionally NOT persisted.
     private val activeWorking = mutableMapOf<Int, WorkingMacro>()
 
@@ -559,6 +564,9 @@ class MemoryModel(context: Context) {
 
     // One short active stream per modality and abstraction source level.
     private val rolling = mutableMapOf<String, ArrayDeque<Int>>()
+    // PLAY owns a separate transient recognition stream so read-only sensor traffic cannot
+    // contaminate LEARN candidate windows or non-overlap accounting.
+    private val readOnlyRolling = mutableMapOf<String, ArrayDeque<Int>>()
     private val previousActiveMacro = mutableMapOf<String, Int>()
 
     // Step 13 adaptive hierarchy state. Positions are per stream so accepted macro spans
@@ -595,7 +603,33 @@ class MemoryModel(context: Context) {
     init { load() }
 
     @Synchronized
+    fun setCognitiveMode(mode: CognitiveMode) {
+        if (cognitiveMode == mode) return
+        cognitiveMode = mode
+        readOnlyRolling.clear()
+        pendingPredictionsByStream.clear()
+        previousActiveMacro.clear()
+        recentSensorMacros.values.forEach { it.clear() }
+        activeWorking.clear()
+        memoryPlaybackCursor = null
+        hybridPlaybackCursor = null
+        dreamPlaybackCursor = null
+        currentExchanges.clear()
+        currentPredictions.clear()
+    }
+
+    @Synchronized
+    fun cognitiveMode(): CognitiveMode = cognitiveMode
+
+    private fun workingClock(): Long = observations + readOnlyEvents
+
+    @Synchronized
     fun observe(id: Int, hz: Double) {
+        if (!cognitiveMode.acceptsExternalActivation) return
+        if (cognitiveMode == CognitiveMode.PLAY) {
+            if (quants[id]?.modality == "audio") observeReadOnlyToken(0, "audio", id)
+            return
+        }
         observations++
         val code = quants[id]
         if (code == null) {
@@ -620,6 +654,11 @@ class MemoryModel(context: Context) {
      */
     @Synchronized
     fun observeDirectAudio(id: Int) {
+        if (!cognitiveMode.acceptsExternalActivation) return
+        if (cognitiveMode == CognitiveMode.PLAY) {
+            if (quants[id]?.modality == "audio_direct") observeReadOnlyToken(0, "audio_direct", id)
+            return
+        }
         observations++
         val code = quants[id]
         if (code == null) {
@@ -638,6 +677,11 @@ class MemoryModel(context: Context) {
     /** Adaptive FFT-free audio identity from the learned Step-12 codebook. */
     @Synchronized
     fun observeAdaptiveAudio(id: Int) {
+        if (!cognitiveMode.acceptsExternalActivation) return
+        if (cognitiveMode == CognitiveMode.PLAY) {
+            if (quants[id]?.modality == "audio_adaptive") observeReadOnlyToken(0, "audio_adaptive", id)
+            return
+        }
         observations++
         val code = quants[id]
         if (code == null) {
@@ -655,6 +699,11 @@ class MemoryModel(context: Context) {
 
     @Synchronized
     fun observeVisual(id: Int, packedRgb: Int) {
+        if (!cognitiveMode.acceptsExternalActivation) return
+        if (cognitiveMode == CognitiveMode.PLAY) {
+            if (quants[id]?.modality == "vision") observeReadOnlyToken(0, "vision", id)
+            return
+        }
         observations++
         val code = quants[id]
         if (code == null) {
@@ -674,6 +723,11 @@ class MemoryModel(context: Context) {
     /** Step 18 adaptive visual identity. IDs are learned by AdaptiveVisualQuantizer. */
     @Synchronized
     fun observeAdaptiveVisual(id: Int, packedRgb: Int) {
+        if (!cognitiveMode.acceptsExternalActivation) return
+        if (cognitiveMode == CognitiveMode.PLAY) {
+            if (quants[id]?.modality == "vision_adaptive") observeReadOnlyToken(0, "vision_adaptive", id)
+            return
+        }
         observations++
         val code = quants[id]
         if (code == null) {
@@ -700,6 +754,91 @@ class MemoryModel(context: Context) {
     @Synchronized
     fun beginAdaptiveVisualFrame() {
         rolling.keys.filter { it.startsWith("vision_adaptive|") }.toList().forEach { rolling.remove(it) }
+        readOnlyRolling.keys.filter { it.startsWith("vision_adaptive|") }.toList().forEach { readOnlyRolling.remove(it) }
+    }
+
+    /** Step 42 PLAY recognition: external input may activate only already learned structure. */
+    private fun observeReadOnlyToken(streamLevel: Int, modality: String, tokenId: Int) {
+        readOnlyEvents++
+        feedTokenReadOnly(streamLevel, modality, tokenId)
+    }
+
+    private fun feedTokenReadOnly(streamLevel: Int, modality: String, tokenId: Int) {
+        if (cognitiveMode != CognitiveMode.PLAY) return
+        val key = streamKey(streamLevel, modality)
+        val horizon = AdaptiveScalePolicy.patternHorizon(macros.size, workingClock())
+        val buffer = readOnlyRolling.getOrPut(key) { ArrayDeque() }
+        buffer.addLast(tokenId)
+        while (buffer.size > horizon) buffer.removeFirst()
+        val current = buffer.toList()
+        if (current.size < MIN_PATTERN_LENGTH) return
+
+        val probe = hierarchyRouter.probe(
+            sourceLevel = streamLevel,
+            modality = modality,
+            current = current,
+            maxAllowedSpan = current.size
+        )
+        var match = probe.match?.let { macros[it.macroId] }
+        if (match == null) {
+            for (length in current.size downTo MIN_PATTERN_LENGTH) {
+                val signature = probe.checkedSignatures[length] ?: patternSignature(streamLevel, modality, current.takeLast(length))
+                match = macroBySignature[signature]?.let { macros[it] }
+                if (match != null) break
+            }
+        }
+        val macro = match ?: return
+        activateMacroReadOnly(macro)
+        // A recognized macro is itself the token presented to the next learned abstraction stream.
+        feedTokenReadOnly(macro.level, macro.modality, macro.id)
+    }
+
+    private fun activateMacroReadOnly(macro: MacroCode) {
+        decayAndPruneWorkingSet()
+        currentExchanges.clear()
+        currentPredictions.clear()
+
+        val now = workingClock()
+        val live = activeWorking.getOrPut(macro.id) {
+            WorkingMacro(0.0, 0.0, now, false)
+        }
+        live.actual = 1.0
+        live.lastTouchedObservation = now
+        live.retrieved = false
+        hybridPlaybackCursor = macro.id
+        lastHybridSeedId = macro.id
+
+        val retrieved = retrieveNeighborsIntoWorkingSet(macro.id, macro.modality)
+        val predictions = predictNextIntoWorkingSet(macro)
+        currentPredictions.addAll(predictions)
+
+        val localIds = LinkedHashSet<Int>()
+        localIds += macro.id
+        localIds.addAll(retrieved)
+        localIds.addAll(predictions.map { it.targetId })
+        val exchangeValues = ArrayList<Double>()
+        for (otherId in localIds) {
+            if (otherId == macro.id) continue
+            val value = calculateTransientOverexchange(macro.id, otherId) ?: continue
+            exchangeValues += abs(value)
+        }
+
+        // Existing cross-modal joints may light up only when all of their learned members are
+        // simultaneously present as real PLAY activations. No support/evidence is incremented.
+        crossModalMemberIndex[macro.id].orEmpty().forEach { jointId ->
+            val joint = macros[jointId] ?: return@forEach
+            if (joint.tokens.isNotEmpty() && joint.tokens.all { child -> (activeWorking[child]?.actual ?: 0.0) >= 0.12 }) {
+                val state = activeWorking.getOrPut(joint.id) { WorkingMacro(0.0, 0.0, now, false) }
+                state.actual = max(state.actual, 0.88)
+                state.lastTouchedObservation = now
+                state.retrieved = false
+            }
+        }
+
+        lastRetrievedCount = retrieved.size
+        lastExchangePairs = exchangeValues.size
+        lastMeanAbsExchange = if (exchangeValues.isEmpty()) 0.0 else exchangeValues.average()
+        enforceAdaptiveWorkingSet()
     }
 
     /**
@@ -924,12 +1063,12 @@ class MemoryModel(context: Context) {
             WorkingMacro(
                 actual = 0.0,
                 expected = 0.0,
-                lastTouchedObservation = observations,
+                lastTouchedObservation = workingClock(),
                 retrieved = false
             )
         }
         liveState.actual = 1.0
-        liveState.lastTouchedObservation = observations
+        liveState.lastTouchedObservation = workingClock()
         liveState.retrieved = false
 
         // Persist only an observed macro-to-macro transition. Index it immediately,
@@ -1130,13 +1269,13 @@ class MemoryModel(context: Context) {
             WorkingMacro(
                 actual = 0.0,
                 expected = 0.0,
-                lastTouchedObservation = observations,
+                lastTouchedObservation = workingClock(),
                 retrieved = false
             )
         }
         state.actual = max(state.actual, 0.92)
         state.expected = max(state.expected, supportConfidence * 0.25)
-        state.lastTouchedObservation = observations
+        state.lastTouchedObservation = workingClock()
         state.retrieved = false
         crossModalActivations++
 
@@ -1349,12 +1488,12 @@ class MemoryModel(context: Context) {
             WorkingMacro(
                 actual = 0.0,
                 expected = 0.0,
-                lastTouchedObservation = observations,
+                lastTouchedObservation = workingClock(),
                 retrieved = true
             )
         }
         state.expected = max(state.expected, expected.coerceIn(0.0, 1.0))
-        state.lastTouchedObservation = observations
+        state.lastTouchedObservation = workingClock()
         if (state.actual < 0.5) state.retrieved = true
 
         // Retrieval is read-only: do not recursively activate or rewrite macro history.
@@ -1425,7 +1564,7 @@ class MemoryModel(context: Context) {
             state.expected *= EXPECTATION_DECAY
             state.exchangeBias *= 0.90
 
-            val age = observations - state.lastTouchedObservation
+            val age = workingClock() - state.lastTouchedObservation
             if (age > ACTIVE_TTL_OBSERVATIONS ||
                 (state.actual < 0.01 && state.expected < 0.01 && abs(state.exchangeBias) < 0.01)
             ) {
@@ -1440,7 +1579,7 @@ class MemoryModel(context: Context) {
             .map { entry ->
                 val state = entry.value
                 val score = (state.actual * 2.0 + state.expected + abs(state.exchangeBias) * 0.5 -
-                    (observations - state.lastTouchedObservation).coerceAtLeast(0L) * 0.01).coerceAtLeast(0.0)
+                    (workingClock() - state.lastTouchedObservation).coerceAtLeast(0L) * 0.01).coerceAtLeast(0.0)
                 entry to score
             }
             .sortedByDescending { it.second }
@@ -1464,6 +1603,7 @@ class MemoryModel(context: Context) {
         baseRelationThreshold: Long = 10L,
         minSequenceHits: Long = 6L
     ): ConsolidationResult {
+        if (cognitiveMode != CognitiveMode.LEARN) return ConsolidationResult(0, 0, 0, 0)
         // minHits/baseRelationThreshold remain in the signature for UI/API compatibility.
         // Step 02 promotes only recurring patterns; quant symbols never need promotion.
         if (macroFrozen) {
@@ -1626,7 +1766,7 @@ class MemoryModel(context: Context) {
      */
     @Synchronized
     fun memoryPlaybackStep(): Boolean {
-        if (macros.isEmpty()) return false
+        if (cognitiveMode != CognitiveMode.PLAY || macros.isEmpty()) return false
 
         decayAndPruneWorkingSet()
         currentExchanges.clear()
@@ -1637,7 +1777,7 @@ class MemoryModel(context: Context) {
             WorkingMacro(
                 actual = 0.0,
                 expected = 0.0,
-                lastTouchedObservation = observations,
+                lastTouchedObservation = workingClock(),
                 retrieved = true
             )
         }
@@ -1645,7 +1785,7 @@ class MemoryModel(context: Context) {
         // an external sensor observation. Memory mode never calls observe()/feedToken().
         seedState.actual = max(seedState.actual, 0.86)
         seedState.expected = max(seedState.expected, 0.16)
-        seedState.lastTouchedObservation = observations
+        seedState.lastTouchedObservation = workingClock()
         seedState.retrieved = true
 
         val retrieved = retrieveNeighborsIntoWorkingSet(seed.id, seed.modality)
@@ -1688,7 +1828,7 @@ class MemoryModel(context: Context) {
      */
     @Synchronized
     fun autonomousDreamStep(): Boolean {
-        if (macros.isEmpty()) return false
+        if (cognitiveMode != CognitiveMode.DREAM || macros.isEmpty()) return false
 
         decayAndPruneWorkingSet()
         currentExchanges.clear()
@@ -1699,14 +1839,14 @@ class MemoryModel(context: Context) {
             WorkingMacro(
                 actual = 0.0,
                 expected = 0.0,
-                lastTouchedObservation = observations,
+                lastTouchedObservation = workingClock(),
                 retrieved = true
             )
         }
         // In DREAM, actual means "foreground of the internal projection", never sensor truth.
         seedState.actual = max(seedState.actual, 0.82)
         seedState.expected = max(seedState.expected, 0.18)
-        seedState.lastTouchedObservation = observations
+        seedState.lastTouchedObservation = workingClock()
         seedState.retrieved = true
 
         val retrieved = retrieveNeighborsIntoWorkingSet(seed.id, seed.modality)
@@ -1889,7 +2029,7 @@ class MemoryModel(context: Context) {
      */
     @Synchronized
     fun hybridPlaybackStep(): Boolean {
-        if (macros.isEmpty()) return false
+        if (cognitiveMode != CognitiveMode.PLAY || macros.isEmpty()) return false
 
         decayAndPruneWorkingSet()
         currentExchanges.clear()
@@ -1946,6 +2086,7 @@ class MemoryModel(context: Context) {
         currentPredictions.clear()
         pendingPredictionsByStream.clear()
         previousActiveMacro.clear()
+        readOnlyRolling.clear()
         lastRetrievedCount = 0
         lastRecallCandidates = 0
         lastRecallSelected = 0
@@ -2483,6 +2624,7 @@ class MemoryModel(context: Context) {
         hybridPlaybackSteps = 0L
         lastHybridSeedId = 0
         rolling.clear()
+        readOnlyRolling.clear()
         previousActiveMacro.clear()
         hierarchyStreamPositions.clear()
         hierarchyCoveredUntil.clear()
@@ -2574,6 +2716,7 @@ class MemoryModel(context: Context) {
         hybridPlaybackSteps = 0L
         lastHybridSeedId = 0
         rolling.clear()
+        readOnlyRolling.clear()
         previousActiveMacro.clear()
         hierarchyStreamPositions.clear()
         hierarchyCoveredUntil.clear()
@@ -3130,6 +3273,18 @@ class MemoryModel(context: Context) {
      */
     @Synchronized
     fun runMemoryCompetition(force: Boolean = true): MemoryCompetitionResult {
+        if (cognitiveMode != CognitiveMode.LEARN) {
+            return MemoryCompetitionResult(
+                runs = competitionRuns,
+                macrosExamined = 0,
+                macrosPruned = 0,
+                relationsPruned = 0,
+                candidatesPruned = 0,
+                protectedMacros = 0,
+                pressuredGroups = 0,
+                remainingMacros = macros.size
+            )
+        }
         val result = runMemoryCompetitionInternal(force)
         if (result.macrosPruned > 0 || result.relationsPruned > 0 || result.candidatesPruned > 0) {
             save()

@@ -1,9 +1,15 @@
-# Equinox v0.6 Step 41 — Unified Audio + Audio Macro Voices
+# Equinox v0.6 Step 42 — Learn / Play / Dream Separation
 
-Current project state through Step 41.
+Current project state through Step 42.
 
-Step 38 spatial compression, Step 39 hierarchical routing and Step 40 recall/prediction hardening remain intact. Step 41 collapses all hardware audio output into one `UnifiedAudioEngine` and reconstructs each audio macro's acoustic voice recursively from its actual learned constituents instead of using abstraction tier as a pitch rule.
+Step 38 spatial compression, Step 39 hierarchical routing, Step 40 recall/prediction hardening and Step 41 unified audio/macro voices remain intact.
 
-The product surface now exposes one primary audio control. Memory/LAB previews and recording use the same engine and synthesis model.
+Step 42 introduces an explicit runtime contract:
 
-See `README_STEP38.md` through `README_STEP41.md` for the implementation history.
+- **LEARN** writes new experience,
+- **PLAY** lets live input activate only already learned knowledge,
+- **DREAM** is internal read-only activation.
+
+Adaptive audio/visual codebooks also have true read-only classification paths, so PLAY does not silently teach the encoder. Learning controls stay under Settings; the persistent unified canvas remains the product surface.
+
+See `README_STEP38.md` through `README_STEP42.md` for the recent implementation history.
