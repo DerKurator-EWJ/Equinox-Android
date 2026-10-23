@@ -51,7 +51,7 @@ class MainActivity : Activity() {
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
-            fillViewport = true
+            isFillViewport = true
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -73,7 +73,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 04 — RELATIONAL TISSUE", 18f, 16).apply {
+        root.addView(label("STEP 05 — MACRO NODES", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -99,7 +99,7 @@ class MainActivity : Activity() {
         refreshGraph()
 
         root.addView(label(
-            "Punkte = persistente Codes · Kurven = gerichtete Relationen · stärkere Wiederholung = stärkere Krümmung",
+            "Kreise = Mikrocodes · orange Felder = Makrocodes · orange Kurven = Makro-/Mitgliedsrelationen",
             12f,
             12
         ).apply { setTextColor(Color.LTGRAY) })
@@ -120,12 +120,24 @@ class MainActivity : Activity() {
         val consolidateButton = Button(this).apply {
             text = "JETZT KONSOLIDIEREN"
             setOnClickListener {
-                val n = memory.consolidate()
-                memoryStats.text = memoryText() + "\nGerade gespeichert: $n neue Codes"
+                val result = memory.consolidate()
+                memoryStats.text = memoryText() + "\nNeu: ${result.microPromoted} Mikro · ${result.macroPromoted} Makro"
                 refreshGraph()
             }
         }
         root.addView(consolidateButton, buttonParams(8))
+
+        val macroFreezeButton = Button(this).apply {
+            fun refreshText() { text = if (memory.isMacroFrozen()) "MAKRO-ERZEUGUNG: GEFROREN" else "MAKRO-ERZEUGUNG: AKTIV" }
+            refreshText()
+            setOnClickListener {
+                memory.setMacroFrozen(!memory.isMacroFrozen())
+                refreshText()
+                memoryStats.text = memoryText()
+                refreshGraph()
+            }
+        }
+        root.addView(macroFreezeButton, buttonParams(8))
 
         val resetButton = Button(this).apply {
             text = "GEDÄCHTNIS LÖSCHEN"
@@ -303,8 +315,9 @@ class MainActivity : Activity() {
 
     private fun memoryText(): String {
         val s = memory.stats()
-        return "Gedächtnis: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
-            "Beobachtungen: ${s.observations} | stärkstes Gewicht: ${s.strongestWeight}"
+        return "Mikro: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
+            "Makro: ${s.macroCodes} Codes | ${s.macroRelations} Relationen | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
+            "Beobachtungen: ${s.observations} | stärkstes Mikrogewicht: ${s.strongestWeight}"
     }
 
     private fun stopAudio() {

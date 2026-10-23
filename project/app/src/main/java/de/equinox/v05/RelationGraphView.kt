@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.RectF
 import android.view.View
 import kotlin.math.PI
 import kotlin.math.cos
@@ -26,6 +27,11 @@ class RelationGraphView(context: Context) : View(context) {
         strokeCap = Paint.Cap.ROUND
     }
     private val nodePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val macroOutline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        color = Color.WHITE
+    }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
@@ -47,25 +53,22 @@ class RelationGraphView(context: Context) : View(context) {
         val nodes = snapshot.nodes
         if (nodes.isEmpty()) return
 
-        // Initial coordinates are only a deterministic seed for the renderer.
-        // The relation graph then relaxes them; the model itself stores no x/y.
         val n = nodes.size
         for ((index, node) in nodes.withIndex()) {
             val angle = 2.0 * PI * index / max(1, n)
-            val radius = 0.34f + ((node.id * 37 and 7) * 0.012f)
+            val baseRadius = if (node.isMacro) 0.24f else 0.38f
+            val jitter = ((node.id * 37 and 7) * 0.010f)
             positions[node.id] = P(
-                0.5f + cos(angle).toFloat() * radius,
-                0.5f + sin(angle).toFloat() * radius
+                0.5f + cos(angle).toFloat() * (baseRadius + jitter),
+                0.5f + sin(angle).toFloat() * (baseRadius + jitter)
             )
         }
 
-        // Lightweight force relaxation based only on graph relations.
-        repeat(90) {
+        repeat(95) {
             val dx = mutableMapOf<Int, Float>()
             val dy = mutableMapOf<Int, Float>()
             nodes.forEach { dx[it.id] = 0f; dy[it.id] = 0f }
 
-            // Repulsion keeps unrelated codes apart.
             for (i in nodes.indices) {
                 for (j in i + 1 until nodes.size) {
                     val a = positions[nodes[i].id] ?: continue
@@ -75,7 +78,7 @@ class RelationGraphView(context: Context) : View(context) {
                     val d2 = max(0.0025f, vx * vx + vy * vy)
                     val d = sqrt(d2)
                     vx /= d; vy /= d
-                    val f = 0.00035f / d2
+                    val f = 0.00034f / d2
                     dx[nodes[i].id] = dx.getValue(nodes[i].id) + vx * f
                     dy[nodes[i].id] = dy.getValue(nodes[i].id) + vy * f
                     dx[nodes[j].id] = dx.getValue(nodes[j].id) - vx * f
@@ -83,7 +86,6 @@ class RelationGraphView(context: Context) : View(context) {
                 }
             }
 
-            // Stronger relations pull codes closer together.
             val strongest = max(1L, snapshot.edges.maxOfOrNull { it.weight } ?: 1L)
             for (edge in snapshot.edges) {
                 val a = positions[edge.fromId] ?: continue
@@ -92,8 +94,9 @@ class RelationGraphView(context: Context) : View(context) {
                 val vy = b.y - a.y
                 val d = max(0.001f, sqrt(vx * vx + vy * vy))
                 val normalized = edge.weight.toFloat() / strongest.toFloat()
-                val desired = 0.29f - 0.16f * normalized
-                val f = (d - desired) * (0.005f + 0.012f * normalized)
+                val desired = if (edge.isMacro) 0.15f else 0.28f - 0.14f * normalized
+                val spring = if (edge.isMacro) 0.022f else 0.006f + 0.012f * normalized
+                val f = (d - desired) * spring
                 val ux = vx / d; val uy = vy / d
                 dx[edge.fromId] = dx.getValue(edge.fromId) + ux * f
                 dy[edge.fromId] = dy.getValue(edge.fromId) + uy * f
@@ -125,7 +128,6 @@ class RelationGraphView(context: Context) : View(context) {
         }
 
         val strongestEdge = max(1L, snapshot.edges.maxOfOrNull { it.weight } ?: 1L)
-
         for (edge in snapshot.edges.asReversed()) {
             val a = positions[edge.fromId] ?: continue
             val b = positions[edge.toId] ?: continue
@@ -137,18 +139,22 @@ class RelationGraphView(context: Context) : View(context) {
             val dy = y2 - y1
             val dist = max(1f, sqrt(dx * dx + dy * dy))
 
-            // kappa(w) = 1 - exp(-0.08 w): repeated interaction bends the visual relation.
             val kappa = (1.0 - exp(-0.08 * edge.weight.toDouble())).toFloat()
             val sign = if (((edge.fromId * 31 + edge.toId) and 1) == 0) 1f else -1f
             val nx = -dy / dist
             val ny = dx / dist
-            val bend = min(dist * 0.48f, 18f + dist * 0.36f * kappa) * sign
+            val bendScale = if (edge.isMacro) 0.22f else 0.36f
+            val bend = min(dist * 0.48f, 18f + dist * bendScale * kappa) * sign
             val cx = (x1 + x2) * 0.5f + nx * bend
             val cy = (y1 + y2) * 0.5f + ny * bend
 
             val norm = edge.weight.toFloat() / strongestEdge.toFloat()
-            edgePaint.strokeWidth = 1.5f + 7f * sqrt(norm)
-            edgePaint.color = Color.argb((55 + 190 * norm).toInt().coerceIn(0, 255), 70, 220, 205)
+            edgePaint.strokeWidth = if (edge.isMacro) 2.5f + 8f * sqrt(norm) else 1.2f + 6f * sqrt(norm)
+            edgePaint.color = if (edge.isMacro) {
+                Color.argb((100 + 155 * norm).toInt().coerceIn(0, 255), 255, 180, 70)
+            } else {
+                Color.argb((45 + 175 * norm).toInt().coerceIn(0, 255), 70, 220, 205)
+            }
 
             val path = Path().apply {
                 moveTo(x1, y1)
@@ -163,19 +169,29 @@ class RelationGraphView(context: Context) : View(context) {
             val x = pad + p.x * w
             val y = pad + p.y * h
             val normalized = node.weight.toFloat() / strongestNode.toFloat()
-            val radius = 11f + 20f * sqrt(normalized)
-            nodePaint.color = frequencyColor(node.representativeHz)
-            canvas.drawCircle(x, y, radius, nodePaint)
+            val radius = if (node.isMacro) 22f + 24f * sqrt(normalized) else 10f + 18f * sqrt(normalized)
 
-            textPaint.textSize = 20f
+            nodePaint.color = if (node.isMacro) Color.rgb(245, 155, 45) else frequencyColor(node.representativeHz)
+            if (node.isMacro) {
+                val rect = RectF(x - radius * 1.25f, y - radius, x + radius * 1.25f, y + radius)
+                canvas.drawRoundRect(rect, radius * 0.45f, radius * 0.45f, nodePaint)
+                canvas.drawRoundRect(rect, radius * 0.45f, radius * 0.45f, macroOutline)
+            } else {
+                canvas.drawCircle(x, y, radius, nodePaint)
+            }
+
+            textPaint.textSize = if (node.isMacro) 17f else 18f
             textPaint.color = Color.WHITE
-            canvas.drawText(node.id.toString(), x, y + 7f, textPaint)
+            val label = if (node.isMacro) "M${node.id - MACRO_ID_BASE_FOR_VIEW}" else node.id.toString()
+            canvas.drawText(label, x, y + 6f, textPaint)
         }
 
-        infoPaint.textSize = 22f
+        val microCount = snapshot.nodes.count { !it.isMacro }
+        val macroCount = snapshot.nodes.count { it.isMacro }
+        infoPaint.textSize = 21f
         infoPaint.color = Color.LTGRAY
         canvas.drawText(
-            "${snapshot.nodes.size} Codes · ${snapshot.edges.size} sichtbare Relationen",
+            "$microCount Mikro · $macroCount Makro · ${snapshot.edges.size} sichtbare Relationen",
             18f,
             height - 18f,
             infoPaint
@@ -187,8 +203,11 @@ class RelationGraphView(context: Context) : View(context) {
         val minHz = 55.0
         val maxHz = 7040.0
         val t = ((ln(hz / minHz) / ln(maxHz / minHz)).coerceIn(0.0, 1.0)).toFloat()
-        // HSV hue 10° -> 285° across logarithmic frequency range.
         val hue = 10f + 275f * t
         return Color.HSVToColor(floatArrayOf(hue, 0.75f, 1.0f))
+    }
+
+    companion object {
+        private const val MACRO_ID_BASE_FOR_VIEW = 1_000_000
     }
 }
