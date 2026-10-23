@@ -56,7 +56,8 @@ data class OrchestraScene(
     val tension: Double,
     val predictionDrive: Double,
     val crossmodalDrive: Double,
-    val relationDrive: Double
+    val relationDrive: Double,
+    val memoryBlend: Double
 ) {
     fun compactSummary(): String {
         if (voices.isEmpty()) return "0 Stimmen"
@@ -64,7 +65,7 @@ data class OrchestraScene(
         val sections = listOf("PULSE", "MOTIF", "HARMONY", "DRONE")
             .mapNotNull { key -> groups[key]?.takeIf { it > 0 }?.let { "$key:$it" } }
             .joinToString(" ")
-        return "${voices.size} Stimmen · $sections · ${tempoBpm.toInt()} BPM · T ${"%.2f".format(tension)}"
+        return "${voices.size} Stimmen · $sections · ${tempoBpm.toInt()} BPM · T ${"%.2f".format(tension)} · M ${(memoryBlend * 100).toInt()}%"
     }
 }
 
@@ -75,8 +76,11 @@ object GenerativeOrchestraSceneBuilder {
     fun build(
         sound: SonificationSnapshot,
         working: WorkingSetSnapshot,
-        maxVoices: Int = 9
+        maxVoices: Int = 9,
+        memoryBlend: Double = 0.35
     ): OrchestraScene {
+        val blend = memoryBlend.coerceIn(0.0, 1.0)
+        val realityWeight = 1.0 - blend
         val macroById = sound.macros.associateBy { it.id }
         val predictionsByTarget = working.predictions
             .groupBy { it.targetId }
@@ -88,11 +92,12 @@ object GenerativeOrchestraSceneBuilder {
         val active = working.nodes.asSequence()
             .filter { isAudio(it.modality) && macroById.containsKey(it.id) }
             .sortedByDescending { node ->
-                node.activation * 2.0 +
-                    node.expectation * 1.15 +
-                    abs(node.exchangeBias) * 0.45 +
-                    node.structuralRelevance * 0.90 +
-                    (predictionsByTarget[node.id] ?: 0.0) * 0.55
+                // Reality favours immediate sensor activation; Memory favours recalled / predicted structure.
+                node.activation * (0.85 + 1.55 * realityWeight) +
+                    node.expectation * (0.45 + 1.70 * blend) +
+                    abs(node.exchangeBias) * (0.30 + 0.35 * blend) +
+                    node.structuralRelevance * (0.45 + 0.85 * blend) +
+                    (predictionsByTarget[node.id] ?: 0.0) * (0.15 + 1.05 * blend)
             }
             .take(maxVoices)
             .map { node ->
@@ -101,12 +106,12 @@ object GenerativeOrchestraSceneBuilder {
                 val prediction = (predictionsByTarget[node.id] ?: 0.0).coerceIn(0.0, 1.0)
                 val cross = (crossmodalByAudio[node.id] ?: 0.0).coerceIn(0.0, 1.0)
                 val amp = (
-                    0.024 +
-                        node.activation * 0.078 +
-                        node.expectation * 0.038 +
-                        node.structuralRelevance * 0.052 +
-                        prediction * 0.018
-                    ).coerceIn(0.018, 0.165)
+                    0.020 +
+                        node.activation * (0.040 + 0.070 * realityWeight) +
+                        node.expectation * (0.018 + 0.060 * blend) +
+                        node.structuralRelevance * (0.028 + 0.046 * blend) +
+                        prediction * (0.008 + 0.034 * blend)
+                    ).coerceIn(0.014, 0.175)
 
                 OrchestraVoiceSpec(
                     id = node.id,
@@ -135,7 +140,7 @@ object GenerativeOrchestraSceneBuilder {
                     baseHz = fold(macro.hz * scale),
                     memberHz = macro.memberHz.map { fold(it * scale) }.distinctBy { (it * 4.0).toInt() }.take(4),
                     level = macro.abstractionLevel,
-                    amplitude = (0.018 + macro.structuralRelevance * 0.022).coerceAtMost(0.045),
+                    amplitude = ((0.008 + macro.structuralRelevance * 0.032) * blend).coerceAtMost(0.048),
                     activation = if (index == 0) 0.20 else 0.10,
                     expectation = 0.12,
                     exchangeBias = 0.0,
@@ -153,10 +158,10 @@ object GenerativeOrchestraSceneBuilder {
             .let { if (it.isEmpty()) 0.0 else (it.sum() / it.size).coerceIn(0.0, 2.5) }
         val predictionDrive = working.predictions
             .map { it.confidence }
-            .let { if (it.isEmpty()) 0.0 else (it.sum() / it.size).coerceIn(0.0, 1.0) }
+            .let { if (it.isEmpty()) 0.0 else ((it.sum() / it.size) * (0.20 + 0.80 * blend)).coerceIn(0.0, 1.0) }
         val crossDrive = working.crossModalLinks
             .map { it.confidence }
-            .let { if (it.isEmpty()) 0.0 else (it.sum() / it.size).coerceIn(0.0, 1.0) }
+            .let { if (it.isEmpty()) 0.0 else ((it.sum() / it.size) * (0.35 + 0.65 * blend)).coerceIn(0.0, 1.0) }
 
         val density = (voices.size / max(1.0, maxVoices.toDouble())).coerceIn(0.0, 1.0)
         val meanActivation = voices.map { it.activation }.let { if (it.isEmpty()) 0.0 else it.average() }
@@ -173,7 +178,8 @@ object GenerativeOrchestraSceneBuilder {
             tension = tension,
             predictionDrive = predictionDrive,
             crossmodalDrive = crossDrive,
-            relationDrive = relationDrive
+            relationDrive = relationDrive,
+            memoryBlend = blend
         )
     }
 
@@ -260,7 +266,7 @@ class GenerativeOrchestraSynth(private val sampleRate: Int = 48_000) {
                 rt.phaseC = advance(rt.phaseC, freq * (3.002 - exchange * 0.0015))
 
                 val env = sectionEnvelope(spec, beatPhase, halfBeatPhase, t)
-                val ghost = predictionGhost(spec, beatPhase)
+                val ghost = predictionGhost(spec, beatPhase) * (0.20 + 0.80 * scene.memoryBlend)
                 val brightness = (
                     0.08 + spec.level * 0.035 + spec.generality * 0.09 +
                         scene.crossmodalDrive * 0.08 + spec.crossmodalConfidence * 0.11 +
@@ -281,7 +287,7 @@ class GenerativeOrchestraSynth(private val sampleRate: Int = 48_000) {
                     )
 
                 val presence = (
-                    0.60 + spec.activation * 0.32 + spec.expectation * 0.18 +
+                    0.56 + spec.activation * (0.22 + 0.22 * (1.0 - scene.memoryBlend)) + spec.expectation * (0.08 + 0.20 * scene.memoryBlend) +
                         spec.relevance * 0.22 + spec.generality * 0.06
                     ).coerceIn(0.45, 1.34)
 

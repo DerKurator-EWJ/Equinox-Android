@@ -103,3 +103,7 @@ The visible LIVE surface now uses OpenGL ES 2.0. Camera pigment is uploaded as a
 
 ## Step 30 — Unified Canvas
 CANVAS and LIVE are no longer separate hot render surfaces. One persistent OpenGL canvas continuously blends Reality and Memory, while the generative orchestra reads the same active working state.
+
+
+## Step 31 — Unified Orchestra
+The Reality ↔ Memory blend is now shared by the single GPU canvas and the continuous generative orchestra. Audio is no longer conceptually a separate mode: the same live/recalled working state is rendered visually and acoustically with one continuous mix parameter.

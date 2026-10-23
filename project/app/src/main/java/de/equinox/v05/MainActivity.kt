@@ -245,6 +245,7 @@ class MainActivity : ComponentActivity() {
         surfaceVideo = GpuMemoryVideoView(this).apply {
             setModeLabel("UNIFIED")
             setMemoryBlend(0.35f)
+            continuousOrchestra.setMemoryBlend(0.35f)
             visibility = View.VISIBLE
         }
         rootFrame.addView(surfaceVideo, FrameLayout.LayoutParams(
@@ -316,7 +317,7 @@ class MainActivity : ComponentActivity() {
         ))
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 30 — UNIFIED CANVAS / REALITY ↔ MEMORY", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 31 — UNIFIED CANVAS + ORCHESTRA / REALITY ↔ MEMORY", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -374,6 +375,7 @@ class MainActivity : ComponentActivity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 val blend = progress.coerceIn(0, 100) / 100f
                 surfaceVideo.setMemoryBlend(blend)
+                continuousOrchestra.setMemoryBlend(blend)
                 memoryLabel.text = "MEMORY ${progress.coerceIn(0, 100)}%"
                 refreshGraph()
             }

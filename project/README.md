@@ -1,5 +1,3 @@
-# Equinox v0.6 — Step 30 Unified Canvas
+# Eq31_UnifiedOrchestra
 
-Open this folder directly in Android Studio.
-
-See `README_STEP30.md` for the changes in this step.
+Android Studio project for Equinox v0.6 Step 31. See `README_STEP31.md` and `README_V06.md`.
