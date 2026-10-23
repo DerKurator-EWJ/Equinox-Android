@@ -6,7 +6,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Equinox v0.5"
+        android:label="Equinox v0.6"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
         <activity

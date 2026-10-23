@@ -1,32 +1,44 @@
-# Equinox v0.6 — Step 16: Hybrid Mode
+# Equinox v0.6 — Step 17: Continuous Audio I/O
 
-Step 16 closes the first loop between **live perception** and **learned memory** without turning recalled material into fake experience.
+Step 17 closes the audio loop: microphone capture may continue while Equinox simultaneously synthesizes its current learned state through a streaming orchestra.
 
-## New in Step 16
+## New in Step 17
 
-- New fourth main page: **HYBRID** next to LIVE, MEMORY and LAB.
-- Microphone/camera remain real sensor input and are the only source of live **A-state**.
-- Every real macro activation re-anchors a runtime Hybrid cursor in the present.
-- Between sensor events, Hybrid mode may follow one already learned prediction/relation hop.
-- Recalled/predicted macros enter only as expectation / **B-state**.
-- Hybrid propagation is read-only: it does **not** increment observations, macro weights, candidate hits or transition counts.
-- Hybrid overexchange is transient and is not written into persistent exchange memory.
-- The bounded Working Set and existing local relation index are reused; no full-memory scan is added per Hybrid tick.
-- HYBRID has its own output canvas and direct sensor start/stop controls.
-- The orchestra can render the current Hybrid state, but Step 16 still stops microphone input before loudspeaker synthesis to avoid acoustic self-learning. Simultaneous audio I/O is reserved for Step 17.
+- **ContinuousOrchestraEngine** uses `AudioTrack.MODE_STREAM` at 48 kHz. It is oscillator-only: no sound library, samples or media assets.
+- LIVE and HYBRID now have a **CONTINUOUS ORCHESTRA START/STOP** control. Starting output no longer stops the microphone.
+- The orchestra is updated from the read-only `SonificationSnapshot` + `WorkingSetSnapshot`, so output remains separate from learning.
+- Up to six current audio macros become continuously synthesized voices. Activation, expectation, relevance, abstraction and overexchange affect amplitude, pitch drift and harmonic content.
+- **Android AcousticEchoCanceler** is attached to the active `AudioRecord` session when the device exposes it and is enabled only while Continuous I/O + feedback protection are active.
+- **AudioSelfOutputSuppressor** adds a second, Equinox-specific guard. Because the oscillator frequencies are known, it conservatively projects those current fundamentals/harmonics out of each microphone PCM frame before FFT, DIRECT or ADAPTIVE encoding.
+- The same cleaned PCM frame is fed to all three encoders during the parallel convergence benchmark, preserving the fair-comparison rule.
+- Feedback protection can be disabled from LIVE or HYBRID. Both controls are synchronized.
+- The UI reports the active voice count, AEC state and the most recent self-output suppression amount.
 
-## Runtime flow
+## Important limitation
 
-`live sensor -> quant/macro -> A-state -> memory lookup/prediction -> B-state -> transient overexchange -> canvas/orchestra`
+This is feedback **reduction**, not mathematically perfect source separation. Android AEC quality depends on the device/audio route, and the tonal self-filter can also attenuate an external sound that happens to occupy the same frequency as an Equinox voice. For clean learning while listening to the orchestra, wired/Bluetooth headphones remain the best practical test route.
 
-A new live macro always resets the Hybrid traversal anchor, so internal memory remains coupled to the current world instead of drifting indefinitely on its own.
+## Data semantics
 
-## Memory compatibility
+The audio output is still projection-only. Synthesized samples do not directly enter MemoryModel. Only microphone PCM is eligible for learning, after the optional feedback guard. No recalled/predicted macro becomes a real observation merely because the orchestra played it.
 
-The existing `equinox_v06_memory.json` remains compatible. Hybrid state is runtime-only. The format marker is updated to `60_16`; no destructive migration is required.
+## Compatibility
+
+- Application ID remains `de.equinox.v05` so this continues the same app line.
+- Existing `equinox_v06_memory.json` and the adaptive quantizer file remain compatible.
+- Version: `0.6-step17-continuous-audio-io`, versionCode 31.
 
 ## Build
 
-Open `Equinox_v06_Step16_HybridMode` directly in Android Studio and build the APK as usual.
+Open **Equinox_v06_Step17_ContinuousAudioIO** itself in Android Studio and use **Build > Build APK(s)**.
 
-A full Android Gradle build cannot be run in the generation environment because the Android SDK is unavailable. The changed Kotlin core and activity are checked separately with JVM/Android stubs before packaging.
+This environment does not contain the Android SDK, so the full Android Gradle APK build was not executed here. The new continuous engine and feedback suppressor were Kotlin-compiled against API-shaped stubs, and MainActivity was separately compile-checked against the existing Android/AndroidX stub harness.
+
+## Suggested phone test
+
+1. Install/update the app.
+2. Start AUDIO in LIVE and let a few audio macros activate.
+3. Start CONTINUOUS ORCHESTRA while the microphone stays active.
+4. Confirm `Audio: AKTIV` remains visible and the Continuous I/O status reports active voices.
+5. With feedback protection ON, check whether `SelfGuard` reports removed components while external speech/noise still changes the learned state.
+6. Repeat with headphones. That run is the cleaner reference for whether the orchestra is reacting to external input rather than recursively learning its own loudspeaker output.

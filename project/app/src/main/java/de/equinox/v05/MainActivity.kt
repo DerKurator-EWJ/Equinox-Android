@@ -6,6 +6,7 @@ import android.graphics.Color
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -85,6 +86,17 @@ class MainActivity : ComponentActivity() {
     private lateinit var outputBridge: EngineOutputBridge
     private val sonifier = Sonifier()
     private val orchestra = OrchestraSonifier()
+    private val continuousOrchestra = ContinuousOrchestraEngine()
+    private val selfOutputSuppressor = AudioSelfOutputSuppressor(SAMPLE_RATE)
+    private var echoCanceler: AcousticEchoCanceler? = null
+    @Volatile private var feedbackProtectionEnabled = true
+    @Volatile private var lastSelfOutputRemovedRatio = 0.0
+    @Volatile private var lastSelfOutputComponents = 0
+    private var feedbackUiSyncing = false
+    private lateinit var liveContinuousButton: Button
+    private lateinit var hybridContinuousButton: Button
+    private lateinit var liveFeedbackProtectionToggle: CheckBox
+    private lateinit var hybridFeedbackProtectionToggle: CheckBox
 
     private lateinit var sonificationStatus: TextView
     private lateinit var labOrchestraStatus: TextView
@@ -145,6 +157,7 @@ class MainActivity : ComponentActivity() {
             val ok = memory.hybridPlaybackStep()
             refreshHybridPage(ok)
             updateMemoryStats()
+            if (continuousOrchestra.isRunning()) pushContinuousOrchestraState()
             uiHandler.postDelayed(this, HYBRID_STEP_MS)
         }
     }
@@ -179,7 +192,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 16 — HYBRID MODE", 17f, 8).apply {
+        root.addView(label("STEP 17 — CONTINUOUS AUDIO I/O", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -308,19 +321,27 @@ class MainActivity : ComponentActivity() {
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(500)).apply { topMargin = dp(12) }
         )
 
-        liveOrchestraStatus = label("Live-Orchester: AUS", 13f, 10).apply {
+        liveOrchestraStatus = label("Continuous I/O: AUS", 13f, 10).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         livePage.addView(liveOrchestraStatus)
-        livePage.addView(Button(this).apply {
-            text = "AKTUELLEN STATE SPIELEN"
-            setOnClickListener {
-                if (running) stopAudio()
-                sonifier.stop()
-                val state = outputBridge.snapshot(maxSoundMacros = 12)
-                orchestra.play(state) { text -> runOnUiThread { liveOrchestraStatus.text = text } }
-            }
-        }, buttonParams(6))
+        liveFeedbackProtectionToggle = CheckBox(this).apply {
+            text = "Feedback-Schutz: Android AEC + Eigenklang-Filter"
+            isChecked = feedbackProtectionEnabled
+            setTextColor(Color.LTGRAY)
+            setOnCheckedChangeListener { _, checked -> setFeedbackProtection(checked) }
+        }
+        livePage.addView(liveFeedbackProtectionToggle)
+        liveContinuousButton = Button(this).apply {
+            text = "CONTINUOUS ORCHESTRA START"
+            setOnClickListener { toggleContinuousOrchestra() }
+        }
+        livePage.addView(liveContinuousButton, buttonParams(6))
+        livePage.addView(label(
+            "Mikrofon darf dabei weiterlaufen. Der Feedback-Schutz entfernt bekannte Syntheseanteile konservativ vor der Lernpipeline; mit Kopfhörern bleibt der Input am saubersten.",
+            11f,
+            4
+        ).apply { setTextColor(Color.GRAY) })
     }
 
     private fun buildHybridPage() {
@@ -385,21 +406,22 @@ class MainActivity : ComponentActivity() {
         }, weightedButtonParams())
         hybridPage.addView(row, buttonParams(10))
 
-        hybridOrchestraStatus = label("Hybrid-Orchester: AUS", 13f, 10).apply {
+        hybridOrchestraStatus = label("Continuous I/O: AUS", 13f, 10).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         hybridPage.addView(hybridOrchestraStatus)
-        hybridPage.addView(Button(this).apply {
-            text = "AKTUELLEN HYBRID-STATE SPIELEN"
-            setOnClickListener {
-                // Step 17 will add simultaneous microphone + synthesis. For now avoid
-                // teaching the microphone its own loudspeaker output.
-                if (running) stopAudio()
-                sonifier.stop()
-                val state = outputBridge.snapshot(maxSoundMacros = 12)
-                orchestra.play(state) { text -> runOnUiThread { hybridOrchestraStatus.text = text } }
-            }
-        }, buttonParams(6))
+        hybridFeedbackProtectionToggle = CheckBox(this).apply {
+            text = "Feedback-Schutz: Android AEC + Eigenklang-Filter"
+            isChecked = feedbackProtectionEnabled
+            setTextColor(Color.LTGRAY)
+            setOnCheckedChangeListener { _, checked -> setFeedbackProtection(checked) }
+        }
+        hybridPage.addView(hybridFeedbackProtectionToggle)
+        hybridContinuousButton = Button(this).apply {
+            text = "CONTINUOUS ORCHESTRA START"
+            setOnClickListener { toggleContinuousOrchestra() }
+        }
+        hybridPage.addView(hybridContinuousButton, buttonParams(6))
     }
 
     private fun buildMemoryPage() {
@@ -863,7 +885,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 16 ergänzt einen echten HYBRID-Modus. Reale Sensorereignisse bleiben der einzige A-State und re-ankern den Hybrid-Cursor. Zwischen Live-Ereignissen darf der Cursor read-only über gelernte Prediction/Relationen weiterlaufen. Diese interne Propagation erzeugt keine Beobachtungen, keine Makrogewichte und keine neuen Übergänge; sie verändert nur das momentane B-/Working-Set und den transienten Überaustausch.",
+            "Step 17 ergänzt echtes gleichzeitiges Audio-In/Output. Das Mikrofon darf weiter lernen, während ein MODE_STREAM-Orchester denselben momentanen Memory-State synthetisiert. Android-AEC wird verwendet, wenn verfügbar; zusätzlich projiziert ein konservativer Eigenklang-Filter die bekannten aktiven Oszillatorfrequenzen vor FFT/DIRECT/ADAPTIVE aus dem Mikrofonframe. Das ist Feedback-Schutz, keine perfekte akustische Trennung — Kopfhörer bleiben der sauberste Test.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -904,6 +926,7 @@ class MainActivity : ComponentActivity() {
                 stopCameraLearning()
                 sonifier.stop()
                 orchestra.stop()
+                stopContinuousOrchestra()
                 memory.clearMomentaryState()
                 livePage.visibility = View.GONE
                 hybridPage.visibility = View.GONE
@@ -984,6 +1007,7 @@ class MainActivity : ComponentActivity() {
         stopAudio()
         stopCameraLearning()
         sonifier.stop()
+        stopContinuousOrchestra()
         if (!memoryPlaybackRunning) {
             memoryPlaybackRunning = true
             memoryModeStatus.text = "MEMORY: RUN · nur gelerntes Gedächtnis"
@@ -1017,6 +1041,81 @@ class MainActivity : ComponentActivity() {
         if (::hybridCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridCanvas.setState(state)
         if (::memoryCanvas.isInitialized && memoryPage.visibility == View.VISIBLE) memoryCanvas.setState(state)
         if (::graphView.isInitialized && labPage.visibility == View.VISIBLE) graphView.setSnapshot(state.graph)
+    }
+
+    private fun toggleContinuousOrchestra() {
+        if (continuousOrchestra.isRunning()) {
+            stopContinuousOrchestra()
+        } else {
+            sonifier.stop()
+            orchestra.stop()
+            continuousOrchestra.start { text ->
+                runOnUiThread {
+                    updateContinuousOrchestraUi(text)
+                    updateEchoCancelerState()
+                }
+            }
+            pushContinuousOrchestraState()
+            updateEchoCancelerState()
+            updateContinuousOrchestraUi("Continuous I/O: STARTET …")
+        }
+    }
+
+    private fun stopContinuousOrchestra() {
+        if (continuousOrchestra.isRunning()) continuousOrchestra.stop()
+        updateEchoCancelerState()
+        updateContinuousOrchestraUi("Continuous I/O: AUS")
+    }
+
+    private fun pushContinuousOrchestraState() {
+        if (!continuousOrchestra.isRunning()) return
+        val sound = memory.sonificationSnapshot(maxMicro = 0, maxMacros = 12)
+        val working = memory.workingSetSnapshot()
+        continuousOrchestra.updateState(sound, working)
+    }
+
+    private fun updateContinuousOrchestraUi(text: String) {
+        val guard = if (feedbackProtectionEnabled) {
+            val aec = if (echoCanceler?.enabled == true) "AEC AN" else if (AcousticEchoCanceler.isAvailable()) "AEC bereit" else "AEC n/a"
+            " · $aec · SelfGuard ${lastSelfOutputComponents}/${"%.1f".format(lastSelfOutputRemovedRatio * 100.0)}%"
+        } else " · Feedback-Schutz AUS"
+        val full = text + guard
+        if (::liveOrchestraStatus.isInitialized) liveOrchestraStatus.text = full
+        if (::hybridOrchestraStatus.isInitialized) hybridOrchestraStatus.text = full
+        if (::liveContinuousButton.isInitialized) liveContinuousButton.text = if (continuousOrchestra.isRunning()) "CONTINUOUS ORCHESTRA STOP" else "CONTINUOUS ORCHESTRA START"
+        if (::hybridContinuousButton.isInitialized) hybridContinuousButton.text = if (continuousOrchestra.isRunning()) "CONTINUOUS ORCHESTRA STOP" else "CONTINUOUS ORCHESTRA START"
+    }
+
+    private fun setFeedbackProtection(enabled: Boolean) {
+        if (feedbackUiSyncing) return
+        feedbackProtectionEnabled = enabled
+        feedbackUiSyncing = true
+        try {
+            if (::liveFeedbackProtectionToggle.isInitialized && liveFeedbackProtectionToggle.isChecked != enabled) liveFeedbackProtectionToggle.isChecked = enabled
+            if (::hybridFeedbackProtectionToggle.isInitialized && hybridFeedbackProtectionToggle.isChecked != enabled) hybridFeedbackProtectionToggle.isChecked = enabled
+        } finally {
+            feedbackUiSyncing = false
+        }
+        updateEchoCancelerState()
+        updateContinuousOrchestraUi(if (continuousOrchestra.isRunning()) "Continuous I/O: AKTIV · ${continuousOrchestra.voiceCount()} Stimmen" else "Continuous I/O: AUS")
+    }
+
+    private fun setupEchoCanceler(recorder: AudioRecord) {
+        releaseEchoCanceler()
+        if (!AcousticEchoCanceler.isAvailable()) return
+        echoCanceler = try { AcousticEchoCanceler.create(recorder.audioSessionId) } catch (_: Exception) { null }
+        updateEchoCancelerState()
+    }
+
+    private fun updateEchoCancelerState() {
+        val shouldEnable = feedbackProtectionEnabled && continuousOrchestra.isRunning()
+        try { echoCanceler?.enabled = shouldEnable } catch (_: Exception) { }
+    }
+
+    private fun releaseEchoCanceler() {
+        try { echoCanceler?.enabled = false } catch (_: Exception) { }
+        try { echoCanceler?.release() } catch (_: Exception) { }
+        echoCanceler = null
     }
 
     private fun ensurePermissionAndStart() {
@@ -1076,6 +1175,7 @@ class MainActivity : ComponentActivity() {
         }
 
         audioRecord = recorder
+        setupEchoCanceler(recorder)
         running = true
         startButton.isEnabled = false
         stopButton.isEnabled = true
@@ -1102,6 +1202,18 @@ class MainActivity : ComponentActivity() {
                 if (!running || offset < FFT_SIZE) continue
 
                 frameCount++
+                val selfGuard = if (feedbackProtectionEnabled && continuousOrchestra.isRunning()) {
+                    selfOutputSuppressor.suppress(frame, continuousOrchestra.suppressionFrequencies())
+                } else null
+                val analysisFrame = selfGuard?.samples ?: frame
+                if (selfGuard != null) {
+                    lastSelfOutputRemovedRatio = selfGuard.removedRmsRatio
+                    lastSelfOutputComponents = selfGuard.removedComponents
+                } else {
+                    lastSelfOutputRemovedRatio = 0.0
+                    lastSelfOutputComponents = 0
+                }
+
                 var primaryText: String
                 var idText: String
                 var strengthText: String
@@ -1109,7 +1221,7 @@ class MainActivity : ComponentActivity() {
                 val parallelTest = parallelEncoderBenchmarkEnabled && encoderBenchmark.isActive()
                 if (parallelTest) {
                     // Fair hard test: all three encoders see the exact same PCM frame.
-                    val mags = Fft.magnitudes(frame)
+                    val mags = Fft.magnitudes(analysisFrame)
                     val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
                     val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
                     var bestBin = minBin
@@ -1119,8 +1231,8 @@ class MainActivity : ComponentActivity() {
                     }
                     val fftHz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
                     val fftId = AudioQuantizer.idForHz(fftHz)
-                    val direct = DirectAudioQuantizer.quantize(frame)
-                    val adaptive = adaptiveQuantizer.quantize(frame)
+                    val direct = DirectAudioQuantizer.quantize(analysisFrame)
+                    val adaptive = adaptiveQuantizer.quantize(analysisFrame)
 
                     fun feed(mode: AudioEncoderMode) {
                         when (mode) {
@@ -1159,7 +1271,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     when (selectedEncoder) {
                         AudioEncoderMode.FFT_FREQUENCY -> {
-                            val mags = Fft.magnitudes(frame)
+                            val mags = Fft.magnitudes(analysisFrame)
                             val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
                             val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
                             var bestBin = minBin
@@ -1175,20 +1287,28 @@ class MainActivity : ComponentActivity() {
                             strengthText = "FFT-Stärke: %.5f".format(bestMag)
                         }
                         AudioEncoderMode.DIRECT_PATTERN -> {
-                            val direct = DirectAudioQuantizer.quantize(frame)
+                            val direct = DirectAudioQuantizer.quantize(analysisFrame)
                             if (!direct.silent) memory.observeDirectAudio(direct.id)
                             primaryText = if (direct.silent) "Direktmuster: Stille — nicht gelernt" else "Direktmuster: ${direct.debugText}"
                             idText = if (direct.silent) "Pattern-ID: —" else "Pattern-ID: ${direct.id}"
                             strengthText = "PCM-Aktivität RMS: %.5f".format(direct.activity)
                         }
                         AudioEncoderMode.ADAPTIVE_PATTERN -> {
-                            val adaptive = adaptiveQuantizer.quantize(frame)
+                            val adaptive = adaptiveQuantizer.quantize(analysisFrame)
                             if (!adaptive.silent) memory.observeAdaptiveAudio(adaptive.id)
                             primaryText = if (adaptive.silent) "Adaptive-ID: Stille — nicht gelernt" else "Adaptive-ID: ${adaptive.debugText}"
                             idText = if (adaptive.silent) "Adaptive Pattern-ID: —" else "Adaptive Pattern-ID: ${adaptive.id}"
                             strengthText = "PCM-Aktivität RMS: %.5f · Codebook ${adaptive.codebookSize}".format(adaptive.activity)
                         }
                     }
+                }
+
+                if (selfGuard != null && selfGuard.removedComponents > 0) {
+                    strengthText += " · SelfGuard ${selfGuard.removedComponents} Komp. / ${"%.1f".format(selfGuard.removedRmsRatio * 100.0)}% RMS"
+                }
+
+                if (continuousOrchestra.isRunning() && frameCount % 2L == 0L) {
+                    pushContinuousOrchestraState()
                 }
 
                 var didConsolidate = false
@@ -1394,6 +1514,7 @@ class MainActivity : ComponentActivity() {
         running = false
         try { audioRecord?.stop() } catch (_: Exception) { }
         try { worker?.join(500) } catch (_: InterruptedException) { }
+        releaseEchoCanceler()
         try { audioRecord?.release() } catch (_: Exception) { }
         audioRecord = null
         worker = null
@@ -1446,6 +1567,8 @@ class MainActivity : ComponentActivity() {
         stopAudio()
         sonifier.stop()
         orchestra.stop()
+        stopContinuousOrchestra()
+        releaseEchoCanceler()
         super.onDestroy()
     }
 }
