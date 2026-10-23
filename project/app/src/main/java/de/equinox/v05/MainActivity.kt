@@ -701,6 +701,17 @@ class MainActivity : ComponentActivity() {
             }
         }, buttonParams(6))
 
+        labPage.addView(Button(this).apply {
+            text = "MEMORY COMPETITION JETZT"
+            setOnClickListener {
+                val r = memory.runMemoryCompetition(force = true)
+                lastConsolidationSummary = "Memory Competition: ${r.macrosExamined} geprüft · ${r.macrosPruned} Makros · ${r.relationsPruned} Relationen · ${r.candidatesPruned} Kandidaten entfernt · ${r.protectedMacros} geschützt"
+                updateConsolidationStatus()
+                updateMemoryStats()
+                refreshGraph()
+            }
+        }, buttonParams(6))
+
         sonificationStatus = label("Sonifikation: AUS", 13f, 12).apply { setTextColor(Color.rgb(255, 190, 90)) }
         labPage.addView(sonificationStatus)
         labPage.addView(Button(this).apply {
@@ -748,7 +759,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 13 lässt wiederkehrende Muster nicht mehr nur über einen festen Hit-Schwellwert wachsen. Ein Muster darf sich selbst zum Makro verdichten, wenn seine Wiederholung einen positiven geschätzten Kompressionsgewinn rechtfertigt. Nur nicht überlappende erkannte Makro-Spannen werden in die nächste Abstraktionsstufe emittiert; dadurch wird der rekursive Live-Strom mit Lernen tatsächlich kürzer.",
+            "Step 14 ergänzt die adaptive Hierarchie um Memory Competition. Makros wachsen nicht mehr nur an: Bei Konsolidierung konkurrieren veraltete Blatt-Makros innerhalb ihrer Modalität und Abstraktionsstufe um begrenzte Kapazität. Komponenten höherer Makros, aktive Kontexte und reife S+-Strukturen sind geschützt. Entfernte Muster können später neu gelernt werden, wenn wieder genug Evidenz auftaucht.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1164,6 +1175,7 @@ class MainActivity : ComponentActivity() {
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
             "Relevanz aktiv: Ø ${"%.3f".format(s.meanActiveRelevance)} | max ${"%.3f".format(s.highestActiveRelevance)} | Kontextentropie Ø ${"%.3f".format(s.meanActiveContextEntropy)} | Generalität max ${"%.3f".format(s.highestActiveGenerality)}\n" +
             "Adaptive Hierarchie: L0 ${s.hierarchyBaseInputTokens} Token | Makro-Emissionen ${s.hierarchyBaseMacroEmissions} | gespart ${s.hierarchyBaseSavedTokens} (${"%.1f".format(s.hierarchyBaseCompressionGain * 100.0)}%) | ØSpan ${"%.2f".format(s.hierarchyMeanAcceptedSpan)} | Auto-Makros ${s.hierarchyAutoPromotions}\n" +
+            "Memory Competition: Läufe ${s.competitionRuns} | entfernt gesamt ${s.competitionMacrosPruned} M/${s.competitionRelationsPruned} R/${s.competitionCandidatesPruned} K | letzter Lauf ${s.competitionLastPruned} entfernt · ${s.competitionLastProtected} geschützt · Druckgruppen ${s.competitionLastPressuredGroups}\n" +
             "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}"
     }
 
@@ -1171,7 +1183,8 @@ class MainActivity : ComponentActivity() {
         val levelPart = if (result.highestNewLevel > 0) " · höchste neue Ebene L${result.highestNewLevel}" else ""
         val templatePart = if (result.templatesDiscovered > 0) " · +${result.templatesDiscovered} Templates" else ""
         val classPart = if (result.substitutionClassesDiscovered > 0) " · +${result.substitutionClassesDiscovered} Substitutionsklassen" else ""
-        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten · davon ${result.sequencePromoted} Sequenzen$levelPart$templatePart$classPart"
+        val competitionPart = if (result.competitionPruned > 0) " · -${result.competitionPruned} schwache Blatt-Makros" else ""
+        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten · davon ${result.sequencePromoted} Sequenzen$levelPart$templatePart$classPart$competitionPart"
     }
 
     private fun setAudioEncoderMode(mode: AudioEncoderMode) {

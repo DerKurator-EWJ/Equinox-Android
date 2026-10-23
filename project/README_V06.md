@@ -1,86 +1,79 @@
-# Equinox v0.6 — Step 13: Adaptive Hierarchy / Compression
+# Equinox v0.6 — Step 14: Memory Competition / Forgetting
 
-Step 13 keeps the complete Step-12 system and changes how recurring structures become and feed higher abstraction levels.
+Step 14 keeps the complete Step-13 architecture and adds the first deliberate forgetting mechanism. The goal is not to delete old information arbitrarily; it is to stop the learned macro dictionary from growing monotonically forever.
 
-## 1. Promotion is now compression-driven
+## Core rule
 
-A temporary candidate of length `L` observed `H` times is evaluated approximately as:
+Only **leaf macros** are eligible for automatic removal. If a macro is used as a constituent of a higher macro, it is structurally protected. This preserves the recursive recipes needed to reconstruct learned abstractions.
 
-`rawCost = H * L`
+Competition is local to a `(modality, abstraction-level)` stream. A stream has:
 
-`compressedCost = H + dictionaryCost`
+- soft target: 320 macros
+- hard pressure threshold: 384 macros
+- at most 128 removals in one maintenance pass
 
-`gain = (rawCost - compressedCost) / rawCost`
+When a stream is under pressure, the lowest-utility eligible leaf macros compete first. Manual LAB competition can also remove a very small number of extremely stale/low-utility leaf macros before hard pressure occurs.
 
-A candidate can promote itself when it has enough support and the estimated gain exceeds the level-specific threshold. Higher levels require more evidence. This is an engineering compression criterion, not a semantic claim.
+## Utility is multidimensional
 
-The policy lives in `AdaptiveHierarchyPolicy.kt`.
+A macro is not judged by occurrence count alone. `MemoryCompetitionPolicy.kt` combines:
 
-## 2. Live self-promotion is bounded
+- recurrence,
+- structural relevance,
+- relation mass and relation breadth,
+- template-role reuse,
+- recency,
+- abstraction level,
+- structural maturity/rank.
 
-Only the best currently eligible candidate may auto-promote on one incoming token. Auto-promotion also has a per-stream cooldown:
+The score is only a storage-management heuristic. It is not treated as semantic meaning or truth.
 
-- L0: 48 source tokens
-- L1: 24 source tokens
-- L2+: at least 12/8 source tokens
+## Hard protection
 
-This prevents a repetitive signal from instantly generating every overlapping combination as a permanent macro. Manual/timed consolidation remains available and is also ranked by the same adaptive compression score. Consolidation is capped at 8 new macros per level per pass.
+Automatic competition cannot remove a macro when it is:
 
-## 3. Non-overlapping upward emission
+- a child/component of a higher macro,
+- currently active,
+- the current previous-context token for a live stream,
+- structurally mature at S rank or above,
+- reused in many template roles.
 
-A learned macro still stores its constituent token IDs, but Step 13 no longer recursively emits every overlapping match. For each modality/level stream, an accepted macro span must start after the previously emitted span.
+This means pruning is conservative by design.
 
-Example: if `[A B C]` is a learned macro, repeated `A B C A B C` can emit approximately:
+## Dependency cleanup
 
-`M_ABC  M_ABC`
+When a leaf macro is removed, Step 14 also removes:
 
-rather than repeatedly activating overlapping tails. The next abstraction level therefore receives a substantially shorter stream as the system learns stable patterns.
+- persistent macro relations touching that ID,
+- overexchange memory touching that ID,
+- temporary pattern candidates that contain that ID,
+- momentary working-state references,
+- stale rolling-buffer references.
 
-This higher stream is an abstraction stream, not a lossless raw-audio archive. The original level-0 identities remain in the base memory/counters, and every macro keeps references to its constituents.
+Then composition, template, substitution and relation indexes are rebuilt from surviving macros. This work happens at maintenance/consolidation time, never on each audio frame.
 
-## 4. New diagnostics
+A forgotten macro is not permanently banned. If the same structure reappears strongly enough, the normal candidate/compression pipeline can learn a new macro identity for it.
 
-The normal memory statistics now show:
+## UI / diagnostics
 
-- L0 input token count
-- number of accepted base macro emissions
-- estimated tokens saved by replacing non-overlapping recognized spans with one macro token
-- estimated compression gain
-- mean accepted macro span
-- number of live auto-promoted macros in this session
+LAB now has `MEMORY COMPETITION JETZT` and the memory statistics show:
 
-This makes the central hard test visible: with repeated familiar input, the higher-level stream should need fewer tokens to represent recognized structure.
+- competition runs,
+- total macros/relations/candidates removed,
+- removals in the most recent run,
+- protected macros,
+- number of pressured modality/level groups.
 
-## 5. Existing systems remain
+Timed/manual consolidation also runs the conservative automatic competition pass.
 
-Step 13 retains:
+## Existing systems retained
 
-- FFT frequency IDs
-- fixed DIRECT IDs
-- learned ADAPTIVE IDs
-- lazy working set / retrieval
-- overexchange
-- recursive macros through L4
-- templates and slots
-- substitution classes
-- multidimensional relevance
-- F → SSS → Ω+n structural ranks
-- LIVE / MEMORY / LAB
-- visual canvas and orchestra
-- encoder convergence lab
+Step 14 retains FFT, fixed DIRECT and learned ADAPTIVE audio encoders, adaptive compression hierarchy, lazy active working set, overexchange, recursive L1-L4 macros, templates/slots, substitution classes, multidimensional relevance, F→SSS→Ω+n ranks, LIVE/MEMORY/LAB, visual canvas, orchestra and encoder convergence testing.
 
-Existing `equinox_v06_memory.json` and `equinox_v06_adaptive_quantizer.json` remain load-compatible. Newly auto-promoted macros use the same persistent macro format as older ones.
-
-## Validation performed
-
-The modified `MemoryModel`, adaptive/direct quantizers, relevance/rank engines and new hierarchy policy were compiled together with Kotlin stubs. `MainActivity` was separately compiled against Android/AndroidX stubs.
-
-A synthetic stream repeating a three-token pattern 40 times (120 base tokens) produced a bounded hierarchy with 6 auto-promoted macros, reached L3, emitted 37 non-overlapping base macros and reported an estimated base-token reduction of about 61.7% for that artificial case. This is only a mechanics test; it is not evidence of semantic learning or real-world compression quality.
-
-A full Android APK build still has to be run in Android Studio because the generation environment does not contain the Android SDK.
+Existing `equinox_v06_memory.json` data remains structurally compatible; Step 14 changes maintenance policy rather than the persisted macro schema.
 
 ## Build
 
 Application ID: `de.equinox.v05`
 
-Version: `0.6-step13-adaptive-hierarchy` (versionCode 27)
+Version: `0.6-step14-memory-competition` (versionCode 28)

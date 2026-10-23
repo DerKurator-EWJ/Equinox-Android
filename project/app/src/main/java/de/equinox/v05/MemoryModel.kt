@@ -39,16 +39,18 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 13
+ * v0.6 Step 14
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
  * relevance profile and now supports three isolated audio alphabets: legacy FFT
  * frequency IDs ("audio"), fixed 16-bit direct IDs ("audio_direct") and the learned
  * adaptive vector-quantizer IDs ("audio_adaptive"). They never mix sequence streams.
- * Step 13 adds adaptive hierarchy promotion and non-overlapping macro emission: recurring
- * patterns can promote themselves when their estimated dictionary compression gain is
- * positive enough, and only non-overlapping recognized spans are emitted upward.
+ * Step 13 added adaptive hierarchy promotion and non-overlapping macro emission.
+ * Step 14 adds dependency-safe memory competition: only stale leaf macros can compete for
+ * bounded stream capacity; higher-order dependencies, active structures and mature S+
+ * structures are protected. Pruned identities can be relearned later if the world supplies
+ * enough evidence again.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
  *
@@ -109,7 +111,14 @@ data class MemoryStats(
     val hierarchyBaseCompressionGain: Double = 0.0,
     val hierarchyAllMacroEmissions: Long = 0L,
     val hierarchyAutoPromotions: Long = 0L,
-    val hierarchyMeanAcceptedSpan: Double = 0.0
+    val hierarchyMeanAcceptedSpan: Double = 0.0,
+    val competitionRuns: Long = 0L,
+    val competitionMacrosPruned: Long = 0L,
+    val competitionRelationsPruned: Long = 0L,
+    val competitionCandidatesPruned: Long = 0L,
+    val competitionLastPruned: Int = 0,
+    val competitionLastProtected: Int = 0,
+    val competitionLastPressuredGroups: Int = 0
 )
 
 data class GraphNode(
@@ -243,7 +252,8 @@ data class ConsolidationResult(
     val sequencePromoted: Int,
     val highestNewLevel: Int,
     val templatesDiscovered: Int = 0,
-    val substitutionClassesDiscovered: Int = 0
+    val substitutionClassesDiscovered: Int = 0,
+    val competitionPruned: Int = 0
 )
 
 class MemoryModel(context: Context) {
@@ -377,6 +387,16 @@ class MemoryModel(context: Context) {
     private var hierarchyAcceptedSpanTotal = 0L
     private var hierarchyAutoPromotions = 0L
     private var hierarchyAutoPromotionsSinceSave = 0
+
+    // Step 14 memory-competition diagnostics. The pruning decision itself is derived
+    // from live memory state; these counters are runtime diagnostics and are not semantics.
+    private var competitionRuns = 0L
+    private var competitionMacrosPruned = 0L
+    private var competitionRelationsPruned = 0L
+    private var competitionCandidatesPruned = 0L
+    private var competitionLastPruned = 0
+    private var competitionLastProtected = 0
+    private var competitionLastPressuredGroups = 0
 
     private var nextMacroId = MACRO_ID_BASE
     private var macroFrozen = false
@@ -800,8 +820,9 @@ class MemoryModel(context: Context) {
         if (macroFrozen) {
             decayCandidates()
             pruneMacroRelations()
+            val competition = runMemoryCompetitionInternal(force = false)
             save()
-            return ConsolidationResult(0, 0, 0, 0)
+            return ConsolidationResult(0, 0, 0, 0, competitionPruned = competition.macrosPruned)
         }
 
         val threshold = max(2L, minSequenceHits)
@@ -839,6 +860,7 @@ class MemoryModel(context: Context) {
         // with decay so the system can learn across multiple consolidation windows.
         decayCandidates()
         pruneMacroRelations()
+        val competition = runMemoryCompetitionInternal(force = false)
         save()
 
         return ConsolidationResult(
@@ -848,7 +870,8 @@ class MemoryModel(context: Context) {
             highestNewLevel = highest,
             templatesDiscovered = (learnedTemplateCount() - templatesBefore).coerceAtLeast(0),
             substitutionClassesDiscovered =
-                (derivedSubstitutionClasses().size - substitutionClassesBefore).coerceAtLeast(0)
+                (derivedSubstitutionClasses().size - substitutionClassesBefore).coerceAtLeast(0),
+            competitionPruned = competition.macrosPruned
         )
     }
 
@@ -1323,7 +1346,14 @@ class MemoryModel(context: Context) {
             hierarchyAllMacroEmissions = hierarchyAllMacroEmissions,
             hierarchyAutoPromotions = hierarchyAutoPromotions,
             hierarchyMeanAcceptedSpan = if (hierarchyAllMacroEmissions <= 0L) 0.0 else
-                hierarchyAcceptedSpanTotal.toDouble() / hierarchyAllMacroEmissions.toDouble()
+                hierarchyAcceptedSpanTotal.toDouble() / hierarchyAllMacroEmissions.toDouble(),
+            competitionRuns = competitionRuns,
+            competitionMacrosPruned = competitionMacrosPruned,
+            competitionRelationsPruned = competitionRelationsPruned,
+            competitionCandidatesPruned = competitionCandidatesPruned,
+            competitionLastPruned = competitionLastPruned,
+            competitionLastProtected = competitionLastProtected,
+            competitionLastPressuredGroups = competitionLastPressuredGroups
         )
     }
 
@@ -1359,6 +1389,13 @@ class MemoryModel(context: Context) {
         hierarchyAcceptedSpanTotal = 0L
         hierarchyAutoPromotions = 0L
         hierarchyAutoPromotionsSinceSave = 0
+        competitionRuns = 0L
+        competitionMacrosPruned = 0L
+        competitionRelationsPruned = 0L
+        competitionCandidatesPruned = 0L
+        competitionLastPruned = 0
+        competitionLastProtected = 0
+        competitionLastPressuredGroups = 0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -1403,6 +1440,13 @@ class MemoryModel(context: Context) {
         hierarchyAcceptedSpanTotal = 0L
         hierarchyAutoPromotions = 0L
         hierarchyAutoPromotionsSinceSave = 0
+        competitionRuns = 0L
+        competitionMacrosPruned = 0L
+        competitionRelationsPruned = 0L
+        competitionCandidatesPruned = 0L
+        competitionLastPruned = 0
+        competitionLastProtected = 0
+        competitionLastPressuredGroups = 0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -1415,7 +1459,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_13)
+                .put("formatVersion", 60_14)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
@@ -1839,6 +1883,186 @@ class MemoryModel(context: Context) {
                 if (index == slotIndex) append('*') else append(token)
             }
         }
+
+
+    /**
+     * Step 14 manual maintenance entry point. Automatic competition also runs at consolidation.
+     * force=true does NOT bypass dependency protection; it only allows clearly stale, very
+     * low-utility leaf macros to compete before a stream reaches its soft capacity target.
+     */
+    @Synchronized
+    fun runMemoryCompetition(force: Boolean = true): MemoryCompetitionResult {
+        val result = runMemoryCompetitionInternal(force)
+        if (result.macrosPruned > 0 || result.relationsPruned > 0 || result.candidatesPruned > 0) {
+            save()
+        }
+        return result
+    }
+
+    private fun runMemoryCompetitionInternal(force: Boolean): MemoryCompetitionResult {
+        competitionRuns++
+        rebuildMacroCompositionIndex()
+
+        if (macros.isEmpty()) {
+            competitionLastPruned = 0
+            competitionLastProtected = 0
+            competitionLastPressuredGroups = 0
+            return MemoryCompetitionResult(
+                runs = competitionRuns,
+                macrosExamined = 0,
+                macrosPruned = 0,
+                relationsPruned = 0,
+                candidatesPruned = 0,
+                protectedMacros = 0,
+                pressuredGroups = 0,
+                remainingMacros = 0
+            )
+        }
+
+        data class Candidate(
+            val macro: MacroCode,
+            val score: MemoryCompetitionScore
+        )
+
+        val previousIds = previousActiveMacro.values.toSet()
+        val grouped = macros.values.groupBy { "${it.modality}|${it.level}" }
+        val removeIds = linkedSetOf<Int>()
+        var protectedCount = 0
+        var pressuredGroups = 0
+        var examined = 0
+
+        for ((_, group) in grouped) {
+            val pressure = group.size > MemoryCompetitionPolicy.HARD_MACROS_PER_STREAM
+            if (pressure) pressuredGroups++
+
+            val candidatesForGroup = ArrayList<Candidate>()
+            for (macro in group) {
+                examined++
+                val relationKeys = relationIndex[macro.id].orEmpty()
+                val relationWeights = relationKeys.mapNotNull { macroRelations[it] }
+                val relationMass = relationWeights.sum()
+                val profile = structuralRankFor(macro)
+                val score = MemoryCompetitionPolicy.evaluate(
+                    weight = macro.weight,
+                    abstractionLevel = macro.level,
+                    parentReuseCount = macroParentUseCount[macro.id] ?: 0,
+                    relationMass = relationMass,
+                    relationDegree = relationWeights.size,
+                    templateRoleCount = templateSignaturesByMacro[macro.id]?.size ?: 0,
+                    ageObservations = (observations - macro.lastActivatedObservation).coerceAtLeast(0L),
+                    active = activeWorking.containsKey(macro.id),
+                    previousContext = macro.id in previousIds,
+                    profile = profile
+                )
+                if (score.protected) {
+                    protectedCount++
+                } else {
+                    candidatesForGroup += Candidate(macro, score)
+                }
+            }
+
+            if (candidatesForGroup.isEmpty()) continue
+            val pressureNeed = (group.size - MemoryCompetitionPolicy.TARGET_MACROS_PER_STREAM).coerceAtLeast(0)
+            val budget = if (pressure) {
+                pressureNeed.coerceAtMost(MemoryCompetitionPolicy.MAX_PRUNE_PER_RUN - removeIds.size)
+            } else if (force) {
+                minOf(16, MemoryCompetitionPolicy.MAX_PRUNE_PER_RUN - removeIds.size)
+            } else 0
+            if (budget <= 0) continue
+
+            candidatesForGroup
+                .asSequence()
+                .filter { c ->
+                    val age = (observations - c.macro.lastActivatedObservation).coerceAtLeast(0L)
+                    if (pressure) {
+                        c.score.stale || c.score.utility < 0.34
+                    } else {
+                        c.score.stale && c.score.utility < 0.20 && age >= MemoryCompetitionPolicy.MIN_IDLE_OBSERVATIONS * 2L
+                    }
+                }
+                .sortedWith(
+                    compareBy<Candidate> { it.score.utility }
+                        .thenBy { it.macro.weight }
+                        .thenBy { it.macro.lastActivatedObservation }
+                )
+                .take(budget)
+                .forEach { removeIds += it.macro.id }
+
+            if (removeIds.size >= MemoryCompetitionPolicy.MAX_PRUNE_PER_RUN) break
+        }
+
+        if (removeIds.isEmpty()) {
+            competitionLastPruned = 0
+            competitionLastProtected = protectedCount
+            competitionLastPressuredGroups = pressuredGroups
+            return MemoryCompetitionResult(
+                runs = competitionRuns,
+                macrosExamined = examined,
+                macrosPruned = 0,
+                relationsPruned = 0,
+                candidatesPruned = 0,
+                protectedMacros = protectedCount,
+                pressuredGroups = pressuredGroups,
+                remainingMacros = macros.size
+            )
+        }
+
+        // Invalid higher-level candidates must disappear with a removed ingredient.
+        val candidatesBefore = candidates.size
+        candidates.entries.removeIf { (_, candidate) -> candidate.tokens.any { it in removeIds } }
+        val candidatesPruned = candidatesBefore - candidates.size
+
+        val relationsBefore = macroRelations.size
+        macroRelations.entries.removeIf { (key, _) -> keyFrom(key) in removeIds || keyTo(key) in removeIds }
+        val relationsPruned = relationsBefore - macroRelations.size
+        exchangeMemory.entries.removeIf { (key, _) -> keyFrom(key) in removeIds || keyTo(key) in removeIds }
+        currentExchanges.entries.removeIf { (key, _) -> keyFrom(key) in removeIds || keyTo(key) in removeIds }
+
+        removeIds.forEach { id ->
+            val macro = macros.remove(id) ?: return@forEach
+            val signature = patternSignature(macro.level - 1, macro.modality, macro.tokens)
+            if (macroBySignature[signature] == id) macroBySignature.remove(signature)
+            activeWorking.remove(id)
+        }
+
+        previousActiveMacro.entries.removeIf { it.value in removeIds }
+        memoryPlaybackCursor = memoryPlaybackCursor?.takeUnless { it in removeIds }
+
+        // Rolling buffers are runtime state only. Remove any now-invalid macro tokens.
+        rolling.values.forEach { buffer ->
+            if (buffer.any { it in removeIds }) {
+                val kept = buffer.filterNot { it in removeIds }
+                buffer.clear()
+                kept.forEach { buffer.addLast(it) }
+            }
+        }
+
+        // Rebuild bounded derived indexes from surviving identities. This is maintenance-time
+        // work only and never runs per audio frame.
+        macroParentUseCount.clear()
+        rebuildMacroCompositionIndex()
+        rebuildTemplateIndex()
+        relationIndex.clear()
+        macroRelations.keys.forEach { indexRelation(it) }
+
+        competitionMacrosPruned += removeIds.size.toLong()
+        competitionRelationsPruned += relationsPruned.toLong()
+        competitionCandidatesPruned += candidatesPruned.toLong()
+        competitionLastPruned = removeIds.size
+        competitionLastProtected = protectedCount
+        competitionLastPressuredGroups = pressuredGroups
+
+        return MemoryCompetitionResult(
+            runs = competitionRuns,
+            macrosExamined = examined,
+            macrosPruned = removeIds.size,
+            relationsPruned = relationsPruned,
+            candidatesPruned = candidatesPruned,
+            protectedMacros = protectedCount,
+            pressuredGroups = pressuredGroups,
+            remainingMacros = macros.size
+        )
+    }
 
     private fun pruneMacroRelations() {
         if (macroRelations.size > 4096) {
