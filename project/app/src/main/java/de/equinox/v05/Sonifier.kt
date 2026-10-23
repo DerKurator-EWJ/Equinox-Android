@@ -110,7 +110,13 @@ class Sonifier {
                 .map(::foldToSpeakerRange)
                 .distinctBy { (it * 10.0).toInt() }
                 .toDoubleArray()
-                .ifEmpty { doubleArrayOf(foldToSpeakerRange(macro.hz)) }
+                .let { values ->
+                    if (values.isNotEmpty()) {
+                        values
+                    } else {
+                        doubleArrayOf(foldToSpeakerRange(macro.hz))
+                    }
+                }
 
             appendTone(
                 out = out,
