@@ -1,5 +1,4 @@
-# Equinox v0.6 Step 15 — Predictive Recall
+Equinox v0.6 Step 16 — Hybrid Mode
 
-Open this folder as the Android Studio project.
-
-Step 15 adds sparse directional next-state prediction to the existing macro memory. See `README_V06.md` for details.
+Open this folder directly in Android Studio.
+See README_V06.md for the architecture and Step-16 changes.

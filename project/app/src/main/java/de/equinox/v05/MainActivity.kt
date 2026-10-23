@@ -37,13 +37,15 @@ class MainActivity : ComponentActivity() {
         private const val SAMPLE_RATE = 48_000
         private const val FFT_SIZE = 2_048
         private const val MEMORY_STEP_MS = 650L
+        private const val HYBRID_STEP_MS = 420L
     }
 
-    private enum class AppPage { LIVE, MEMORY, LAB }
+    private enum class AppPage { LIVE, HYBRID, MEMORY, LAB }
 
     @Volatile private var running = false
     @Volatile private var cameraRunning = false
     @Volatile private var memoryPlaybackRunning = false
+    @Volatile private var hybridPlaybackRunning = false
 
     private var cameraProvider: ProcessCameraProvider? = null
     private lateinit var cameraExecutor: ExecutorService
@@ -53,6 +55,7 @@ class MainActivity : ComponentActivity() {
     private var worker: Thread? = null
 
     private lateinit var livePage: LinearLayout
+    private lateinit var hybridPage: LinearLayout
     private lateinit var memoryPage: LinearLayout
     private lateinit var labPage: LinearLayout
     private var currentPage = AppPage.LIVE
@@ -68,11 +71,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var labMemoryStats: TextView
     private lateinit var intervalSpinner: Spinner
     private lateinit var outputCanvas: EquinoxOutputView
+    private lateinit var hybridCanvas: EquinoxOutputView
     private lateinit var memoryCanvas: EquinoxOutputView
     private lateinit var graphView: RelationGraphView
     private lateinit var memoryModeStatus: TextView
+    private lateinit var hybridModeStatus: TextView
+    private lateinit var hybridSensorStatus: TextView
     private lateinit var memoryOrchestraStatus: TextView
     private lateinit var memoryAutoOrchestra: CheckBox
+    private lateinit var hybridOrchestraStatus: TextView
 
     private lateinit var memory: MemoryModel
     private lateinit var outputBridge: EngineOutputBridge
@@ -131,6 +138,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val hybridLoop = object : Runnable {
+        override fun run() {
+            if (!hybridPlaybackRunning) return
+
+            val ok = memory.hybridPlaybackStep()
+            refreshHybridPage(ok)
+            updateMemoryStats()
+            uiHandler.postDelayed(this, HYBRID_STEP_MS)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -161,7 +179,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 15 — PREDICTIVE RECALL", 17f, 8).apply {
+        root.addView(label("STEP 16 — HYBRID MODE", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -170,32 +188,39 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
         }
         val liveTab = Button(this).apply { text = "LIVE" }
+        val hybridTab = Button(this).apply { text = "HYBRID" }
         val memoryTab = Button(this).apply { text = "MEMORY" }
         val labTab = Button(this).apply { text = "LAB" }
         modeRow.addView(liveTab, weightedButtonParams())
+        modeRow.addView(hybridTab, weightedButtonParams())
         modeRow.addView(memoryTab, weightedButtonParams())
         modeRow.addView(labTab, weightedButtonParams())
         root.addView(modeRow, buttonParams(14))
 
         livePage = pageContainer()
+        hybridPage = pageContainer()
         memoryPage = pageContainer()
         labPage = pageContainer()
         root.addView(livePage)
+        root.addView(hybridPage)
         root.addView(memoryPage)
         root.addView(labPage)
 
         buildLivePage()
+        buildHybridPage()
         buildMemoryPage()
         buildLabPage()
 
         fun selectPage(page: AppPage) {
             showPage(page)
             liveTab.isEnabled = page != AppPage.LIVE
+            hybridTab.isEnabled = page != AppPage.HYBRID
             memoryTab.isEnabled = page != AppPage.MEMORY
             labTab.isEnabled = page != AppPage.LAB
         }
 
         liveTab.setOnClickListener { selectPage(AppPage.LIVE) }
+        hybridTab.setOnClickListener { selectPage(AppPage.HYBRID) }
         memoryTab.setOnClickListener { selectPage(AppPage.MEMORY) }
         labTab.setOnClickListener { selectPage(AppPage.LAB) }
 
@@ -294,6 +319,85 @@ class MainActivity : ComponentActivity() {
                 sonifier.stop()
                 val state = outputBridge.snapshot(maxSoundMacros = 12)
                 orchestra.play(state) { text -> runOnUiThread { liveOrchestraStatus.text = text } }
+            }
+        }, buttonParams(6))
+    }
+
+    private fun buildHybridPage() {
+        hybridPage.addView(label("HYBRID — GEGENWART + GEDÄCHTNIS", 20f, 18).apply {
+            setTextColor(Color.rgb(120, 235, 190))
+        })
+        hybridPage.addView(label(
+            "Live-Input bleibt echtes A-Signal. Dazwischen darf das bereits Gelernte read-only über Prediction und lokale Relationen weiterlaufen. Interne Aktivierung wird nicht als neue Erfahrung zurückgeschrieben.",
+            12f,
+            6
+        ).apply { setTextColor(Color.LTGRAY) })
+
+        hybridSensorStatus = label("Sensoren: Audio AUS · Kamera AUS", 14f, 12).apply {
+            setTextColor(Color.rgb(155, 230, 205))
+        }
+        hybridPage.addView(hybridSensorStatus)
+
+        val sensorRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        sensorRow.addView(Button(this).apply {
+            text = "AUDIO AN/AUS"
+            setOnClickListener { if (running) stopAudio() else ensurePermissionAndStart() }
+        }, weightedButtonParams())
+        sensorRow.addView(Button(this).apply {
+            text = "KAMERA AN/AUS"
+            setOnClickListener { if (cameraRunning) stopCameraLearning() else ensureCameraPermissionAndStart() }
+        }, weightedButtonParams())
+        hybridPage.addView(sensorRow, buttonParams(8))
+
+        hybridModeStatus = label("HYBRID: bereit · wartet auf Live-Makro", 15f, 12).apply {
+            setTextColor(Color.rgb(185, 255, 220))
+        }
+        hybridPage.addView(hybridModeStatus)
+
+        hybridCanvas = EquinoxOutputView(this).apply { setModeLabel("HYBRID") }
+        hybridPage.addView(
+            hybridCanvas,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(540)).apply { topMargin = dp(12) }
+        )
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        row.addView(Button(this).apply {
+            text = "RUN"
+            setOnClickListener { startHybridPlayback() }
+        }, weightedButtonParams())
+        row.addView(Button(this).apply {
+            text = "1 STEP"
+            setOnClickListener {
+                val ok = memory.hybridPlaybackStep()
+                refreshHybridPage(ok)
+                updateMemoryStats()
+            }
+        }, weightedButtonParams())
+        row.addView(Button(this).apply {
+            text = "STOP"
+            setOnClickListener { stopHybridPlayback(clear = false) }
+        }, weightedButtonParams())
+        hybridPage.addView(row, buttonParams(10))
+
+        hybridOrchestraStatus = label("Hybrid-Orchester: AUS", 13f, 10).apply {
+            setTextColor(Color.rgb(125, 220, 255))
+        }
+        hybridPage.addView(hybridOrchestraStatus)
+        hybridPage.addView(Button(this).apply {
+            text = "AKTUELLEN HYBRID-STATE SPIELEN"
+            setOnClickListener {
+                // Step 17 will add simultaneous microphone + synthesis. For now avoid
+                // teaching the microphone its own loudspeaker output.
+                if (running) stopAudio()
+                sonifier.stop()
+                val state = outputBridge.snapshot(maxSoundMacros = 12)
+                orchestra.play(state) { text -> runOnUiThread { hybridOrchestraStatus.text = text } }
             }
         }, buttonParams(6))
     }
@@ -759,7 +863,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 15 ergänzt das Gedächtnis um gerichteten Predictive Recall. Ein aktuell aktives Makro fragt nur seine bereits gelernten ausgehenden Übergänge ab und materialisiert höchstens vier wahrscheinliche Folgemakros als Erwartung im Working Set. Diese Prognosen werden nicht als neue Erfahrung zurückgeschrieben, beeinflussen aber B-Zustand, Überaustausch, Leinwand und Orchester. Die Trefferquote misst nur, ob der tatsächliche nächste Makroknoten unter den Top-k-Prognosen lag.",
+            "Step 16 ergänzt einen echten HYBRID-Modus. Reale Sensorereignisse bleiben der einzige A-State und re-ankern den Hybrid-Cursor. Zwischen Live-Ereignissen darf der Cursor read-only über gelernte Prediction/Relationen weiterlaufen. Diese interne Propagation erzeugt keine Beobachtungen, keine Makrogewichte und keine neuen Übergänge; sie verändert nur das momentane B-/Working-Set und den transienten Überaustausch.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -777,31 +881,99 @@ class MainActivity : ComponentActivity() {
         when (page) {
             AppPage.LIVE -> {
                 stopMemoryPlayback(clear = true)
+                stopHybridPlayback(clear = false)
                 orchestra.stop()
+                hybridPage.visibility = View.GONE
                 memoryPage.visibility = View.GONE
                 labPage.visibility = View.GONE
                 livePage.visibility = View.VISIBLE
             }
+            AppPage.HYBRID -> {
+                stopMemoryPlayback(clear = false)
+                orchestra.stop()
+                livePage.visibility = View.GONE
+                memoryPage.visibility = View.GONE
+                labPage.visibility = View.GONE
+                hybridPage.visibility = View.VISIBLE
+                refreshSensorUiState()
+                refreshHybridPage(ok = true)
+            }
             AppPage.MEMORY -> {
+                stopHybridPlayback(clear = true)
                 stopAudio()
                 stopCameraLearning()
                 sonifier.stop()
                 orchestra.stop()
                 memory.clearMomentaryState()
                 livePage.visibility = View.GONE
+                hybridPage.visibility = View.GONE
                 labPage.visibility = View.GONE
                 memoryPage.visibility = View.VISIBLE
                 memoryModeStatus.text = if (memory.hasLearnedMacros()) "MEMORY: bereit" else "MEMORY: noch keine gelernten Makros"
             }
             AppPage.LAB -> {
                 stopMemoryPlayback(clear = false)
+                stopHybridPlayback(clear = false)
                 livePage.visibility = View.GONE
+                hybridPage.visibility = View.GONE
                 memoryPage.visibility = View.GONE
                 labPage.visibility = View.VISIBLE
             }
         }
         currentPage = page
         refreshGraph()
+    }
+
+    private fun startHybridPlayback() {
+        if (!memory.hasLearnedMacros()) {
+            hybridModeStatus.text = "HYBRID: noch keine gelernten Makros"
+            return
+        }
+        stopMemoryPlayback(clear = false)
+        if (!hybridPlaybackRunning) {
+            hybridPlaybackRunning = true
+            hybridModeStatus.text = "HYBRID: RUN · Live ankert, Memory propagiert read-only"
+            uiHandler.removeCallbacks(hybridLoop)
+            uiHandler.post(hybridLoop)
+        }
+    }
+
+    private fun stopHybridPlayback(clear: Boolean) {
+        hybridPlaybackRunning = false
+        uiHandler.removeCallbacks(hybridLoop)
+        if (clear) memory.clearMomentaryState()
+        if (::hybridModeStatus.isInitialized) {
+            hybridModeStatus.text = if (memory.hasLearnedMacros()) "HYBRID: gestoppt" else "HYBRID: noch keine gelernten Makros"
+        }
+    }
+
+    private fun refreshHybridPage(ok: Boolean) {
+        if (!::hybridCanvas.isInitialized) return
+        val state = outputBridge.snapshot(maxSoundMacros = 12)
+        hybridCanvas.setState(state)
+        val w = state.working
+        if (::hybridModeStatus.isInitialized) {
+            hybridModeStatus.text = if (!ok && w.nodes.none { it.activation > 0.12 }) {
+                "HYBRID: wartet auf Live-Makro"
+            } else if (hybridPlaybackRunning) {
+                "HYBRID: RUN · ${w.nodes.count { it.activation > 0.12 }} live/aktiv · ${w.nodes.count { it.retrieved }} erinnert · ${w.predictions.size} Prediction · ${w.exchanges.size} Austausch"
+            } else {
+                "HYBRID: ${w.nodes.size} Working-Set-Knoten · ${w.predictions.size} Prediction"
+            }
+        }
+        refreshSensorUiState()
+    }
+
+    private fun refreshSensorUiState() {
+        if (::hybridSensorStatus.isInitialized) {
+            hybridSensorStatus.text = "Sensoren: Audio ${if (running) "AKTIV" else "AUS"} · Kamera ${if (cameraRunning) "AKTIV" else "AUS"}"
+        }
+        if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio: AUS"
+        if (::startButton.isInitialized) startButton.isEnabled = !running
+        if (::stopButton.isInitialized) stopButton.isEnabled = running
+        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · 8×6 Raster" else "Kamera: AUS"
+        if (::cameraButton.isInitialized) cameraButton.isEnabled = !cameraRunning
+        if (::cameraStopButton.isInitialized) cameraStopButton.isEnabled = cameraRunning
     }
 
     private fun startMemoryPlayback() {
@@ -842,6 +1014,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshGraph() {
         val state = outputBridge.snapshot()
         if (::outputCanvas.isInitialized && livePage.visibility == View.VISIBLE) outputCanvas.setState(state)
+        if (::hybridCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridCanvas.setState(state)
         if (::memoryCanvas.isInitialized && memoryPage.visibility == View.VISIBLE) memoryCanvas.setState(state)
         if (::graphView.isInitialized && labPage.visibility == View.VISIBLE) graphView.setSnapshot(state.graph)
     }
@@ -907,6 +1080,7 @@ class MainActivity : ComponentActivity() {
         startButton.isEnabled = false
         stopButton.isEnabled = true
         status.text = "Audio: AKTIV"
+        refreshSensorUiState()
         lastConsolidationMs = System.currentTimeMillis()
 
         recorder.startRecording()
@@ -1091,6 +1265,7 @@ class MainActivity : ComponentActivity() {
                 cameraStatus.text = "Kamera: AKTIV · 8×6 Raster"
                 cameraButton.isEnabled = false
                 cameraStopButton.isEnabled = true
+                refreshSensorUiState()
             } catch (e: Exception) {
                 cameraRunning = false
                 cameraStatus.text = "Kamera: Startfehler ${e.javaClass.simpleName}"
@@ -1109,6 +1284,7 @@ class MainActivity : ComponentActivity() {
         cameraStatus.text = "Kamera: AUS"
         cameraButton.isEnabled = true
         cameraStopButton.isEnabled = false
+        refreshSensorUiState()
         updateMemoryStats()
         refreshGraph()
     }
@@ -1171,6 +1347,7 @@ class MainActivity : ComponentActivity() {
             "Makros: ${s.macroCodes} | $levelText | Relationen: ${s.macroRelations}\n" +
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
             "Predictive Recall: ${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Treffer ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%)\n" +
+            "Hybrid: ${s.hybridSteps} interne Schritte | letzter Seed ${if (s.hybridSeedId == 0) "—" else s.hybridSeedId}\n" +
             "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
@@ -1224,6 +1401,7 @@ class MainActivity : ComponentActivity() {
         status.text = "Audio: AUS"
         startButton.isEnabled = true
         stopButton.isEnabled = false
+        refreshSensorUiState()
         val result = memory.consolidate()
         lastConsolidationSummary = consolidationSummary(result)
         updateConsolidationStatus()
@@ -1262,6 +1440,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         if (::adaptiveQuantizer.isInitialized) adaptiveQuantizer.saveNow()
         stopMemoryPlayback(clear = false)
+        stopHybridPlayback(clear = false)
         stopCameraLearning()
         try { cameraExecutor.shutdownNow() } catch (_: Exception) { }
         stopAudio()

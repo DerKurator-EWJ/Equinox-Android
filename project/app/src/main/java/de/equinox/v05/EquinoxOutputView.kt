@@ -15,7 +15,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Step 15 output-only canvas with structural rank, relevance and predictive recall.
+ * Step 16 output-only canvas with structural rank, relevance, predictive recall and Hybrid working-set projection.
  *
  * This view never mutates MemoryModel. It renders a read-only EngineOutputState.
  * Positions are projection coordinates derived from IDs and the active working set;

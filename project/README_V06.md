@@ -1,33 +1,32 @@
-# Equinox v0.6 — Step 15: Predictive Recall
+# Equinox v0.6 — Step 16: Hybrid Mode
 
-Step 15 builds on Step 14 Memory Competition and adds a sparse, directional prediction layer without turning the memory back into a full-graph simulation.
+Step 16 closes the first loop between **live perception** and **learned memory** without turning recalled material into fake experience.
 
-## New in Step 15
+## New in Step 16
 
-- **Directional next-macro prediction:** when a macro is active, Equinox looks only at its already learned outgoing macro transitions.
-- **Top-k only:** at most 4 likely next macros are materialized into the bounded working set.
-- **No full graph scan:** predictions are addressed through the existing local relation index.
-- **Prediction becomes B-state expectation:** forecast macros enter the same expectation channel already used by overexchange.
-- **No self-fulfilling learning:** a prediction is never written back as an observation or relation just because it was predicted.
-- **Top-k hit diagnostics:** on the next real macro event, Equinox checks whether the actual macro was among the previous predictions.
-- **Memory mode follows learned direction:** memory-only playback prefers the strongest predicted continuation before falling back to ordinary graph traversal.
-- **Canvas output:** predicted transitions appear as thin warm expectation arcs; exchange remains a separate cyan/magenta layer.
-- **Orchestra:** no new sound library is used. Predicted macros already affect sound through their expectation/B-state.
+- New fourth main page: **HYBRID** next to LIVE, MEMORY and LAB.
+- Microphone/camera remain real sensor input and are the only source of live **A-state**.
+- Every real macro activation re-anchors a runtime Hybrid cursor in the present.
+- Between sensor events, Hybrid mode may follow one already learned prediction/relation hop.
+- Recalled/predicted macros enter only as expectation / **B-state**.
+- Hybrid propagation is read-only: it does **not** increment observations, macro weights, candidate hits or transition counts.
+- Hybrid overexchange is transient and is not written into persistent exchange memory.
+- The bounded Working Set and existing local relation index are reused; no full-memory scan is added per Hybrid tick.
+- HYBRID has its own output canvas and direct sensor start/stop controls.
+- The orchestra can render the current Hybrid state, but Step 16 still stops microphone input before loudspeaker synthesis to avoid acoustic self-learning. Simultaneous audio I/O is reserved for Step 17.
 
-## Operational rule
+## Runtime flow
 
-For active macro `M_i`, only learned directed transitions `M_i -> M_j` are considered. If a transition has enough support, prediction confidence is derived from:
+`live sensor -> quant/macro -> A-state -> memory lookup/prediction -> B-state -> transient overexchange -> canvas/orchestra`
 
-`relative outgoing share × support confidence`
-
-This is a practical sequence predictor, not semantic understanding and not a claim about physical causality.
+A new live macro always resets the Hybrid traversal anchor, so internal memory remains coupled to the current world instead of drifting indefinitely on its own.
 
 ## Memory compatibility
 
-The same `equinox_v06_memory.json` structure remains usable. Step 15 derives predictions from the directional transition counts already stored in that file. The save format marker is updated to `60_15`, but no destructive migration is required.
+The existing `equinox_v06_memory.json` remains compatible. Hybrid state is runtime-only. The format marker is updated to `60_16`; no destructive migration is required.
 
 ## Build
 
-Open the inner folder `Equinox_v06_Step15_PredictiveRecall` directly in Android Studio and build the APK as usual.
+Open `Equinox_v06_Step16_HybridMode` directly in Android Studio and build the APK as usual.
 
-The Android SDK is not installed in the generation environment, so a full Android Gradle/APK build was not performed here. The modified core was compiled with Kotlin/JVM stubs, the output canvas was compiled separately, and a synthetic repeated-sequence test produced stable predictions with a measured top-k hit rate.
+A full Android Gradle build cannot be run in the generation environment because the Android SDK is unavailable. The changed Kotlin core and activity are checked separately with JVM/Android stubs before packaging.

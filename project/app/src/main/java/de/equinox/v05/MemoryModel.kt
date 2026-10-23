@@ -44,8 +44,12 @@ private const val MAX_PREDICTIONS_PER_EVENT = 4
 private const val MIN_PREDICTION_SUPPORT = 2L
 private const val MIN_PREDICTION_CONFIDENCE = 0.06
 
+// Step 16: hybrid mode lets a live event seed a short read-only memory walk.
+// Internal propagation never masquerades as a new sensor observation.
+private const val HYBRID_CONTEXT_FLOOR = 0.22
+
 /**
- * v0.6 Step 15
+ * v0.6 Step 16
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -53,10 +57,10 @@ private const val MIN_PREDICTION_CONFIDENCE = 0.06
  * frequency IDs ("audio"), fixed 16-bit direct IDs ("audio_direct") and the learned
  * adaptive vector-quantizer IDs ("audio_adaptive"). They never mix sequence streams.
  * Step 13 added adaptive hierarchy promotion and non-overlapping macro emission.
- * Step 14 added dependency-safe memory competition. Step 15 adds sparse directional
- * predictive recall: the currently active macro queries only its learned outgoing transition
- * index, materializes a few likely next macros as B-state expectations, and lets those
- * expectations participate in the same overexchange/output path. No full-graph scan is used.
+ * Step 14 added dependency-safe memory competition. Step 15 added sparse directional
+ * predictive recall. Step 16 adds HYBRID mode: real sensor activation re-anchors a runtime
+ * cursor, while read-only memory propagation can follow learned predictions/relations between
+ * live events. The internal walk writes no artificial observations or learned transitions.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
  *
@@ -129,7 +133,9 @@ data class MemoryStats(
     val predictionTopConfidence: Double = 0.0,
     val predictionChecks: Long = 0L,
     val predictionHits: Long = 0L,
-    val predictionHitRate: Double = 0.0
+    val predictionHitRate: Double = 0.0,
+    val hybridSteps: Long = 0L,
+    val hybridSeedId: Int = 0
 )
 
 data class GraphNode(
@@ -399,6 +405,12 @@ class MemoryModel(context: Context) {
     // Memory-mode traversal cursor. It is runtime-only and never learned back.
     private var memoryPlaybackCursor: Int? = null
     private var memoryPlaybackSteps = 0L
+
+    // Step 16 hybrid cursor is reset by every real live macro activation, then may walk
+    // through predicted/related memory between sensor events. It is runtime-only.
+    private var hybridPlaybackCursor: Int? = null
+    private var hybridPlaybackSteps = 0L
+    private var lastHybridSeedId = 0
 
     // One short active stream per modality and abstraction source level.
     private val rolling = mutableMapOf<String, ArrayDeque<Int>>()
@@ -701,6 +713,10 @@ class MemoryModel(context: Context) {
             indexRelation(key)
         }
         previousActiveMacro[relationStreamKey] = macro.id
+
+        // A real event always re-anchors Hybrid mode in the present.
+        hybridPlaybackCursor = macro.id
+        lastHybridSeedId = macro.id
 
         // Lazy retrieval: only the strongest local neighbors of the live macro are
         // materialized into the working set. Their B-state is contextual expectation.
@@ -1058,6 +1074,66 @@ class MemoryModel(context: Context) {
         return true
     }
 
+
+    /**
+     * Step 16 HYBRID activation.
+     *
+     * The current live macro is the anchor. Between sensor events the cursor may follow one
+     * already learned prediction/relation hop. Only expectation/B-state and transient
+     * overexchange are materialized. No observations, macro weights, transition counts,
+     * candidates or persistent exchange memory are changed here.
+     */
+    @Synchronized
+    fun hybridPlaybackStep(): Boolean {
+        if (macros.isEmpty()) return false
+
+        decayAndPruneWorkingSet()
+        currentExchanges.clear()
+        currentPredictions.clear()
+
+        val seed = hybridPlaybackCursor?.let { macros[it] }
+            ?: activeWorking.entries
+                .asSequence()
+                .filter { (_, state) -> state.actual >= 0.12 }
+                .sortedByDescending { (_, state) -> state.actual * 2.0 + state.expected }
+                .mapNotNull { (id, _) -> macros[id] }
+                .firstOrNull()
+            ?: return false
+
+        // Do not create artificial A-state. If the seed is already a live node, preserve it;
+        // otherwise it remains an expected memory continuation only.
+        touchAsContext(seed.id, HYBRID_CONTEXT_FLOOR)
+
+        val retrieved = retrieveNeighborsIntoWorkingSet(seed.id, seed.modality)
+        val predictions = predictNextIntoWorkingSet(seed)
+        currentPredictions.addAll(predictions)
+        lastPredictionCandidates = predictions.size
+        lastTopPredictionConfidence = predictions.maxOfOrNull { it.confidence } ?: 0.0
+
+        val localIds = LinkedHashSet<Int>()
+        localIds += seed.id
+        localIds.addAll(retrieved)
+        localIds.addAll(predictions.map { it.targetId })
+
+        val values = ArrayList<Double>()
+        for (otherId in localIds) {
+            if (otherId == seed.id) continue
+            val r = calculateTransientOverexchange(seed.id, otherId) ?: continue
+            values += abs(r)
+        }
+
+        lastRetrievedCount = retrieved.size
+        lastExchangePairs = values.size
+        lastMeanAbsExchange = if (values.isEmpty()) 0.0 else values.average()
+        enforceWorkingSetLimit()
+
+        hybridPlaybackSteps++
+        lastHybridSeedId = seed.id
+        hybridPlaybackCursor = predictions.maxByOrNull { it.confidence }?.targetId
+            ?: chooseNextMemoryCursor(seed.id, seed.modality)
+        return true
+    }
+
     /** Drop only runtime activation. Persistent learned memory remains untouched. */
     @Synchronized
     fun clearMomentaryState() {
@@ -1071,6 +1147,9 @@ class MemoryModel(context: Context) {
         lastMeanAbsExchange = 0.0
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
+        hybridPlaybackCursor = null
+        hybridPlaybackSteps = 0L
+        lastHybridSeedId = 0
     }
 
     @Synchronized
@@ -1467,7 +1546,9 @@ class MemoryModel(context: Context) {
             predictionTopConfidence = lastTopPredictionConfidence,
             predictionChecks = predictionChecks,
             predictionHits = predictionHits,
-            predictionHitRate = if (predictionChecks <= 0L) 0.0 else predictionHits.toDouble() / predictionChecks.toDouble()
+            predictionHitRate = if (predictionChecks <= 0L) 0.0 else predictionHits.toDouble() / predictionChecks.toDouble(),
+            hybridSteps = hybridPlaybackSteps,
+            hybridSeedId = lastHybridSeedId
         )
     }
 
@@ -1493,6 +1574,9 @@ class MemoryModel(context: Context) {
         pendingPredictionsByStream.clear()
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
+        hybridPlaybackCursor = null
+        hybridPlaybackSteps = 0L
+        lastHybridSeedId = 0
         rolling.clear()
         previousActiveMacro.clear()
         hierarchyStreamPositions.clear()
@@ -1550,6 +1634,9 @@ class MemoryModel(context: Context) {
         pendingPredictionsByStream.clear()
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
+        hybridPlaybackCursor = null
+        hybridPlaybackSteps = 0L
+        lastHybridSeedId = 0
         rolling.clear()
         previousActiveMacro.clear()
         hierarchyStreamPositions.clear()
@@ -1585,7 +1672,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_15)
+                .put("formatVersion", 60_16)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
