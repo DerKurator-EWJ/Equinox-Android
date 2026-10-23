@@ -53,6 +53,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step04-outputcanvasorchestra` | `Equinox_v06_Step04_OutputCanvasOrchestra.zip` | 22 | 0 | `b3314749046a3eed74d3af47160ee20ec0d0fa4dd281354795a1734af931a4cd` |
 | `android-v06-step05-livememorymodes` | `Equinox_v06_Step05_LiveMemoryModes.zip` | 22 | 0 | `eca15b1d559ccd7084f733b1888ec721313a1889a4a10a4b8e61df337abeaa40` |
 | `android-v06-step06-structuralranks` | `Equinox_v06_Step06_StructuralRanks.zip` | 23 | 0 | `2e732102372e8870307104ebb32ac3f9b1e2aaadd04ea370c3df26632d9c6fa2` |
+| `android-v06-step07-templateslots` | `Equinox_v06_Step07_TemplateSlots.zip` | 23 | 0 | `728eb62189bf397bc3dcb058d94c99b663b30ec785d8cbe32263621eca924024` |
 
 ## Security, licensing, and limitations
 

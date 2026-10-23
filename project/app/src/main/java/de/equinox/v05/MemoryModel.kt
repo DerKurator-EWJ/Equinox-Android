@@ -16,6 +16,12 @@ private const val MAX_PATTERN_LENGTH = 6
 private const val MAX_PATTERN_CANDIDATES = 6_000
 private const val MAX_PROMOTIONS_PER_LEVEL = 24
 
+// Step 07: one-slot structural templates are indexed from already stable macros.
+private const val MAX_TEMPLATE_BUCKETS = 12_000
+private const val MIN_TEMPLATE_LENGTH = 3
+private const val MIN_TEMPLATE_VARIANTS = 2
+private const val SLOT_TOKEN = Int.MIN_VALUE
+
 // Step 03: bounded event-driven working set.
 private const val MAX_ACTIVE_MACROS = 48
 private const val MAX_RETRIEVED_NEIGHBORS = 6
@@ -25,11 +31,11 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 06
+ * v0.6 Step 07
  *
  * Keeps the bounded active working set and indexed lazy retrieval, plus the
- * non-learning memory-playback path. Step 06 adds read-only multidimensional
- * structural ranking (F..SSS..Omega+n) derived from existing evidence. External observations can still update long-term
+ * non-learning memory-playback path. Step 07 keeps read-only multidimensional
+ * structural ranking and adds one-slot template abstraction derived from stable macros. External observations can still update long-term
  * memory; Memory mode only activates already learned macros and relations.
  *
  * Operational definitions used here:
@@ -64,7 +70,11 @@ data class MemoryStats(
     val overexchangePairs: Int = 0,
     val meanAbsOverexchange: Double = 0.0,
     val highestActiveRank: String = "—",
-    val highestActiveRankScore: Double = 0.0
+    val highestActiveRankScore: Double = 0.0,
+    val templateCodes: Int = 0,
+    val activeTemplates: Int = 0,
+    val templateVariantLinks: Int = 0,
+    val widestTemplateVariants: Int = 0
 )
 
 data class GraphNode(
@@ -151,11 +161,27 @@ data class WorkingSetSnapshot(
     val exchanges: List<ActiveExchange>
 )
 
+/**
+ * Read-only description of a learned structural template. SLOT_TOKEN is never exposed;
+ * the variable position is represented explicitly by slotIndex.
+ */
+data class TemplateSlotSummary(
+    val level: Int,
+    val modality: String,
+    val slotIndex: Int,
+    val fixedTokens: List<Int?>,
+    val variants: List<Int>,
+    val supportingMacros: Int,
+    val supportWeight: Long,
+    val active: Boolean
+)
+
 data class ConsolidationResult(
     val microPromoted: Int,
     val macroPromoted: Int,
     val sequencePromoted: Int,
-    val highestNewLevel: Int
+    val highestNewLevel: Int,
+    val templatesDiscovered: Int = 0
 )
 
 class MemoryModel(context: Context) {
@@ -181,6 +207,20 @@ class MemoryModel(context: Context) {
         var weight: Long,
         var representativeHz: Double,
         var lastActivatedObservation: Long = 0L
+    )
+
+    /**
+     * A template bucket is not a second relation graph. It is a compact structural index:
+     * macros with the same fixed positions and different values at one slot share one bucket.
+     */
+    private data class TemplateBucket(
+        val signature: String,
+        val level: Int,
+        val modality: String,
+        val slotIndex: Int,
+        val pattern: List<Int>,
+        val macroIds: MutableSet<Int> = linkedSetOf(),
+        val variants: MutableSet<Int> = linkedSetOf()
     )
 
     private data class WorkingMacro(
@@ -212,6 +252,12 @@ class MemoryModel(context: Context) {
     // Number of higher macros that reuse a macro as a component. This is an index, not
     // another learned relation graph, and lets rank calculation stay local/on-demand.
     private val macroParentUseCount = mutableMapOf<Int, Int>()
+
+    // Step 07 structural generalization index. Each stable macro contributes at most
+    // MAX_PATTERN_LENGTH masked signatures; no pairwise macro comparison is required.
+    private val templateBuckets = linkedMapOf<String, TemplateBucket>()
+    private val templateSignaturesByMacro = mutableMapOf<Int, MutableSet<String>>()
+
     private val macroRelations = mutableMapOf<Long, Long>()
 
     // Relation lookup index: a macro can retrieve only its known local neighborhood.
@@ -522,6 +568,7 @@ class MemoryModel(context: Context) {
         }
 
         val threshold = max(2L, minSequenceHits)
+        val templatesBefore = learnedTemplateCount()
         var created = 0
         var highest = 0
 
@@ -551,6 +598,7 @@ class MemoryModel(context: Context) {
                 macros[macro.id] = macro
                 macroBySignature[signature] = macro.id
                 indexMacroComposition(macro)
+                indexMacroForTemplates(macro)
                 created++
                 highest = max(highest, macro.level)
             }
@@ -566,7 +614,8 @@ class MemoryModel(context: Context) {
             microPromoted = 0,
             macroPromoted = created,
             sequencePromoted = created,
-            highestNewLevel = highest
+            highestNewLevel = highest,
+            templatesDiscovered = (learnedTemplateCount() - templatesBefore).coerceAtLeast(0)
         )
     }
 
@@ -934,6 +983,13 @@ class MemoryModel(context: Context) {
             .map { structuralRankFor(it) }
             .maxByOrNull { it.score }
 
+        val learnedTemplates = learnedTemplateBuckets()
+        val activeTemplateCount = learnedTemplates.count { bucket ->
+            bucket.macroIds.any { activeWorking.containsKey(it) }
+        }
+        val templateVariantLinks = learnedTemplates.sumOf { it.variants.size }
+        val widestTemplate = learnedTemplates.maxOfOrNull { it.variants.size } ?: 0
+
         return MemoryStats(
             persistentCodes = quants.size,
             temporaryCodes = candidates.size,
@@ -958,7 +1014,11 @@ class MemoryModel(context: Context) {
             overexchangePairs = lastExchangePairs,
             meanAbsOverexchange = lastMeanAbsExchange,
             highestActiveRank = highestActiveRank?.label ?: "—",
-            highestActiveRankScore = highestActiveRank?.score ?: 0.0
+            highestActiveRankScore = highestActiveRank?.score ?: 0.0,
+            templateCodes = learnedTemplates.size,
+            activeTemplates = activeTemplateCount,
+            templateVariantLinks = templateVariantLinks,
+            widestTemplateVariants = widestTemplate
         )
     }
 
@@ -969,6 +1029,8 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         macroParentUseCount.clear()
+        templateBuckets.clear()
+        templateSignaturesByMacro.clear()
         macroRelations.clear()
         relationIndex.clear()
         activeWorking.clear()
@@ -997,6 +1059,8 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         macroParentUseCount.clear()
+        templateBuckets.clear()
+        templateSignaturesByMacro.clear()
         macroRelations.clear()
         relationIndex.clear()
         activeWorking.clear()
@@ -1018,7 +1082,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_06)
+                .put("formatVersion", 60_07)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
@@ -1120,6 +1184,7 @@ class MemoryModel(context: Context) {
             }
 
             rebuildMacroCompositionIndex()
+            rebuildTemplateIndex()
 
             val relationArray = root.optJSONArray("macroRelations") ?: JSONArray()
             for (i in 0 until relationArray.length()) {
@@ -1170,6 +1235,93 @@ class MemoryModel(context: Context) {
         macroParentUseCount.clear()
         macros.values.forEach { indexMacroComposition(it) }
     }
+
+    /**
+     * One-slot structural abstraction. For a macro [A,B,C,D], four masked signatures
+     * are possible. If another stable macro later supplies [A,B,C,E], both land in
+     * the same [A,B,C,□] bucket without an O(N²) comparison.
+     */
+    private fun indexMacroForTemplates(macro: MacroCode) {
+        if (macro.tokens.size < MIN_TEMPLATE_LENGTH) return
+
+        for (slot in macro.tokens.indices) {
+            val signature = templateSignature(macro.level, macro.modality, macro.tokens, slot)
+            var bucket = templateBuckets[signature]
+            if (bucket == null) {
+                if (templateBuckets.size >= MAX_TEMPLATE_BUCKETS) continue
+                val pattern = macro.tokens.toMutableList().apply { this[slot] = SLOT_TOKEN }
+                bucket = TemplateBucket(
+                    signature = signature,
+                    level = macro.level,
+                    modality = macro.modality,
+                    slotIndex = slot,
+                    pattern = pattern
+                )
+                templateBuckets[signature] = bucket
+            }
+
+            bucket.macroIds += macro.id
+            bucket.variants += macro.tokens[slot]
+            templateSignaturesByMacro.getOrPut(macro.id) { linkedSetOf() }.add(signature)
+        }
+    }
+
+    private fun rebuildTemplateIndex() {
+        templateBuckets.clear()
+        templateSignaturesByMacro.clear()
+        // Higher-weight structures get first access if the bounded index ever fills.
+        macros.values
+            .sortedWith(compareByDescending<MacroCode> { it.weight }.thenByDescending { it.level })
+            .forEach { indexMacroForTemplates(it) }
+    }
+
+    private fun learnedTemplateBuckets(): List<TemplateBucket> =
+        templateBuckets.values.filter {
+            it.macroIds.size >= MIN_TEMPLATE_VARIANTS && it.variants.size >= MIN_TEMPLATE_VARIANTS
+        }
+
+    private fun learnedTemplateCount(): Int = templateBuckets.values.count {
+        it.macroIds.size >= MIN_TEMPLATE_VARIANTS && it.variants.size >= MIN_TEMPLATE_VARIANTS
+    }
+
+    /**
+     * Read-only top templates for LAB / future output layers. Templates are inferred
+     * structure, not semantic labels: a slot means "observed substitution here" only.
+     */
+    @Synchronized
+    fun templateSlotSnapshot(maxTemplates: Int = 24): List<TemplateSlotSummary> =
+        learnedTemplateBuckets()
+            .asSequence()
+            .map { bucket ->
+                val supportWeight = bucket.macroIds.sumOf { macros[it]?.weight ?: 0L }
+                TemplateSlotSummary(
+                    level = bucket.level,
+                    modality = bucket.modality,
+                    slotIndex = bucket.slotIndex,
+                    fixedTokens = bucket.pattern.map { token -> if (token == SLOT_TOKEN) null else token },
+                    variants = bucket.variants.toList(),
+                    supportingMacros = bucket.macroIds.size,
+                    supportWeight = supportWeight,
+                    active = bucket.macroIds.any { activeWorking.containsKey(it) }
+                )
+            }
+            .sortedWith(
+                compareByDescending<TemplateSlotSummary> { it.active }
+                    .thenByDescending { it.variants.size }
+                    .thenByDescending { it.supportWeight }
+                    .thenByDescending { it.level }
+            )
+            .take(maxTemplates.coerceAtLeast(0))
+            .toList()
+
+    private fun templateSignature(level: Int, modality: String, tokens: List<Int>, slotIndex: Int): String =
+        buildString {
+            append(modality).append('|').append(level).append("|slot=").append(slotIndex).append('|')
+            tokens.forEachIndexed { index, token ->
+                if (index > 0) append(',')
+                if (index == slotIndex) append('*') else append(token)
+            }
+        }
 
     private fun pruneMacroRelations() {
         if (macroRelations.size > 4096) {

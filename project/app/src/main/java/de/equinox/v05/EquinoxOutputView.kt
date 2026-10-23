@@ -15,7 +15,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Step 06 output-only canvas with read-only structural ranks.
+ * Step 07 output-only canvas with read-only structural ranks.
  *
  * This view never mutates MemoryModel. It renders a read-only EngineOutputState.
  * Positions are projection coordinates derived from IDs and the active working set;

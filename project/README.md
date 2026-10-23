@@ -1,5 +1,5 @@
-# Equinox v0.6 — Step 06
+# Equinox v0.6 Step 07
 
-Open this folder itself in Android Studio, then build the debug APK.
+Template / Slot Abstraction on top of the Step 06 structural-rank build.
 
-Main addition: derived structural ranks `F -> ... -> SSS -> Ω -> Ω+n` based on recurrence, higher-level reuse, relation support and context specificity. Ranking is output/diagnostic metadata and does not change the learner.
+See `README_V06.md` for architecture, compatibility and build notes.
