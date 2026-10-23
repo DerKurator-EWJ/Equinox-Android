@@ -45,6 +45,8 @@ class MainActivity : Activity() {
     private lateinit var memory: MemoryModel
     private val sonifier = Sonifier()
     private lateinit var sonificationStatus: TextView
+    private lateinit var consolidationStatus: TextView
+    private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
     @Volatile private var lastConsolidationMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,7 +77,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 06 — MEMORY SONIFICATION", 18f, 16).apply {
+        root.addView(label("STEP 07 — RECURSIVE ABSTRACTION", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -101,14 +103,17 @@ class MainActivity : Activity() {
         refreshGraph()
 
         root.addView(label(
-            "Kreise = Mikrocodes · orange Felder = Makrocodes · orange Kurven = Makro-/Mitgliedsrelationen",
+            "Mikro = Kreis · L1 orange · L2 pink · L3 violett · L4 magenta · höhere Ebenen entstehen aus stabilen Relationen der Ebene darunter",
             12f,
             12
         ).apply { setTextColor(Color.LTGRAY) })
 
         intervalSpinner = Spinner(this)
-        val intervals = arrayOf("3 Sekunden", "30 Sekunden", "1 Minute", "5 Minuten", "15 Minuten", "30 Minuten")
+        val intervals = arrayOf("5 Sekunden", "15 Sekunden", "30 Sekunden", "1 Minute", "5 Minuten", "15 Minuten", "30 Minuten")
         intervalSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, intervals)
+        consolidationStatus = label("Konsolidierung: 5 s · nächste: —\n$lastConsolidationSummary", 14f, 18).apply { setTextColor(Color.rgb(255, 205, 105)) }
+        root.addView(consolidationStatus)
+
         root.addView(intervalSpinner, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { topMargin = dp(18) })
@@ -123,7 +128,10 @@ class MainActivity : Activity() {
             text = "JETZT KONSOLIDIEREN"
             setOnClickListener {
                 val result = memory.consolidate()
-                memoryStats.text = memoryText() + "\nNeu: ${result.microPromoted} Mikro · ${result.macroPromoted} Makro"
+                lastConsolidationMs = System.currentTimeMillis()
+                lastConsolidationSummary = consolidationSummary(result)
+                updateConsolidationStatus()
+                memoryStats.text = memoryText()
                 refreshGraph()
             }
         }
@@ -191,7 +199,7 @@ class MainActivity : Activity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Sonifikation liest nur das persistente Gedächtnis. Mikrocodes werden Töne; Makrocodes werden Akkorde aus ihren Mitgliedern. Während der Ausgabe wird das Mikrofon gestoppt, damit Equinox nicht unkontrolliert sich selbst lernt.",
+            "Sonifikation liest das persistente Gedächtnis einschließlich höherer Abstraktionsebenen. Mikro = Töne; höhere Knoten = Akkorde aus ihren rekursiv aufgelösten Mikrofrequenzen. Das Mikrofon bleibt während der Ausgabe gestoppt.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
@@ -311,8 +319,9 @@ class MainActivity : Activity() {
                 val now = System.currentTimeMillis()
                 val interval = selectedIntervalMs()
                 if (now - lastConsolidationMs >= interval) {
-                    memory.consolidate()
+                    val result = memory.consolidate()
                     lastConsolidationMs = now
+                    lastConsolidationSummary = consolidationSummary(result)
                     didConsolidate = true
                 }
 
@@ -322,7 +331,7 @@ class MainActivity : Activity() {
                         frequencyId.text = "Frequenz-ID: $id"
                         strength.text = "Signalstärke: %.5f".format(bestMag)
                         frames.text = "Frames verarbeitet: $frameCount"
-                        if (frameCount % 5L == 0L) memoryStats.text = memoryText()
+                        if (frameCount % 5L == 0L) { memoryStats.text = memoryText(); updateConsolidationStatus() }
                         if (didConsolidate || frameCount % 12L == 0L) refreshGraph()
                     }
                 }
@@ -332,20 +341,45 @@ class MainActivity : Activity() {
 
     private fun selectedIntervalMs(): Long {
         return when (intervalSpinner.selectedItemPosition) {
-            0 -> 3_000L
-            1 -> 30_000L
-            2 -> 60_000L
-            3 -> 300_000L
-            4 -> 900_000L
+            0 -> 5_000L
+            1 -> 15_000L
+            2 -> 30_000L
+            3 -> 60_000L
+            4 -> 300_000L
+            5 -> 900_000L
             else -> 1_800_000L
         }
     }
 
+    private fun updateConsolidationStatus() {
+        if (!::consolidationStatus.isInitialized) return
+        val interval = selectedIntervalMs()
+        val remaining = if (running) (interval - (System.currentTimeMillis() - lastConsolidationMs)).coerceAtLeast(0L) else interval
+        val seconds = (remaining + 999L) / 1000L
+        val label = intervalSpinner.selectedItem?.toString() ?: "—"
+        consolidationStatus.text = "Konsolidierung: $label · nächste in ${seconds}s\n$lastConsolidationSummary"
+    }
+
     private fun memoryText(): String {
         val s = memory.stats()
+        val levelText = if (s.levelCounts.isEmpty()) {
+            "noch keine"
+        } else {
+            s.levelCounts.entries.joinToString(" · ") { "L${it.key}:${it.value}" }
+        }
         return "Mikro: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
-            "Makro: ${s.macroCodes} Codes | ${s.macroRelations} Relationen | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
+            "Abstraktion: $levelText | höchste Ebene: L${s.maxAbstractionLevel} | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
+            "Makro gesamt: ${s.macroCodes} | Makrorelationen: ${s.macroRelations}\n" +
             "Beobachtungen: ${s.observations} | stärkstes Mikrogewicht: ${s.strongestWeight}"
+    }
+
+    private fun consolidationSummary(result: ConsolidationResult): String {
+        val levelPart = if (result.highestNewLevel > 0) {
+            " · höchste neue Ebene L${result.highestNewLevel}"
+        } else {
+            ""
+        }
+        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten$levelPart"
     }
 
     private fun stopAudio() {
@@ -359,7 +393,9 @@ class MainActivity : Activity() {
         status.text = "Audio: AUS"
         startButton.isEnabled = true
         stopButton.isEnabled = false
-        memory.consolidate()
+        val result = memory.consolidate()
+        lastConsolidationSummary = consolidationSummary(result)
+        updateConsolidationStatus()
         memoryStats.text = memoryText()
         refreshGraph()
     }

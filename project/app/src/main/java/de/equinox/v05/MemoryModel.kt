@@ -7,6 +7,7 @@ import java.io.File
 import kotlin.math.max
 
 private const val MACRO_ID_BASE = 1_000_000
+private const val MAX_ABSTRACTION_LEVEL = 4
 
 data class MemoryStats(
     val persistentCodes: Int,
@@ -16,29 +17,35 @@ data class MemoryStats(
     val strongestWeight: Long,
     val macroCodes: Int,
     val macroRelations: Int,
-    val macroFrozen: Boolean
+    val macroFrozen: Boolean,
+    val maxAbstractionLevel: Int,
+    val levelCounts: Map<Int, Int>
 )
 
 data class GraphNode(
     val id: Int,
     val weight: Long,
     val representativeHz: Double,
-    val isMacro: Boolean = false,
+    val abstractionLevel: Int = 0,
     val memberCount: Int = 1
-)
+) {
+    val isMacro: Boolean get() = abstractionLevel > 0
+}
 
 data class GraphEdge(
     val fromId: Int,
     val toId: Int,
     val weight: Long,
-    val isMacro: Boolean = false
-)
+    val abstractionLevel: Int = 0,
+    val isMembership: Boolean = false
+) {
+    val isMacro: Boolean get() = abstractionLevel > 0 || isMembership
+}
 
 data class GraphSnapshot(
     val nodes: List<GraphNode>,
     val edges: List<GraphEdge>
 )
-
 
 data class SonificationNode(
     val id: Int,
@@ -50,7 +57,8 @@ data class SonificationMacro(
     val id: Int,
     val hz: Double,
     val weight: Long,
-    val memberHz: List<Double>
+    val memberHz: List<Double>,
+    val abstractionLevel: Int
 )
 
 data class SonificationSnapshot(
@@ -58,29 +66,37 @@ data class SonificationSnapshot(
     val macros: List<SonificationMacro>
 )
 
+data class ConsolidationResult(
+    val microPromoted: Int,
+    val macroPromoted: Int,
+    val highestNewLevel: Int
+)
+
 class MemoryModel(context: Context) {
     private data class Code(var weight: Long, val representativeHz: Double)
     private data class Candidate(var hits: Int, var hzSum: Double)
     private data class MacroCode(
         val id: Int,
+        val level: Int,
         val members: MutableSet<Int>,
         var weight: Long,
         var representativeHz: Double
     )
 
-    // Same persistent file as Step 03/04 on purpose so existing learned micro-memory survives the update.
+    // Same file name on purpose: Step 07 migrates the earlier Step 03-06.5 memory.
     private val file = File(context.filesDir, "equinox_step03_memory.json")
+
     private val persistent = mutableMapOf<Int, Code>()
     private val candidates = mutableMapOf<Int, Candidate>()
     private val relations = mutableMapOf<Long, Long>()
 
     private val macros = mutableMapOf<Int, MacroCode>()
     private val macroRelations = mutableMapOf<Long, Long>()
+
     private var nextMacroId = MACRO_ID_BASE
     private var macroFrozen = false
-
     private var previousId: Int? = null
-    private var previousMacroId: Int? = null
+    private val previousByLevel = mutableMapOf<Int, Int>()
     private var observations = 0L
 
     init { load() }
@@ -88,6 +104,7 @@ class MemoryModel(context: Context) {
     @Synchronized
     fun observe(id: Int, hz: Double) {
         observations++
+
         val known = persistent[id]
         if (known != null) {
             known.weight++
@@ -105,37 +122,45 @@ class MemoryModel(context: Context) {
         }
         previousId = id
 
-        // Existing macro nodes can react even while creation of NEW macros is frozen.
-        val activeMacro = macros.values
-            .asSequence()
-            .filter { id in it.members }
-            .maxByOrNull { it.weight }
-        if (activeMacro != null) {
-            activeMacro.weight++
-            previousMacroId?.let { prev ->
-                if (prev != activeMacro.id) {
-                    val key = pairKey(prev, activeMacro.id)
+        // Activate one best matching macro at each abstraction level.
+        var activeChildId = id
+        for (level in 1..MAX_ABSTRACTION_LEVEL) {
+            val active = macros.values
+                .asSequence()
+                .filter { it.level == level && activeChildId in it.members }
+                .maxByOrNull { it.weight }
+                ?: break
+
+            active.weight++
+
+            previousByLevel[level]?.let { prev ->
+                if (prev != active.id) {
+                    val key = pairKey(prev, active.id)
                     macroRelations[key] = (macroRelations[key] ?: 0L) + 1L
                 }
             }
-            previousMacroId = activeMacro.id
+            previousByLevel[level] = active.id
+            activeChildId = active.id
         }
     }
 
-    /**
-     * Promotes repeated micro IDs and then discovers stable relation pairs as first-level macro nodes.
-     * This is intentionally conservative: Step 05 proves the mechanism before deeper recursion is added.
-     */
     @Synchronized
-    fun consolidate(minHits: Int = 3, macroRelationThreshold: Long = 10L): ConsolidationResult {
+    fun consolidate(
+        minHits: Int = 3,
+        baseRelationThreshold: Long = 10L
+    ): ConsolidationResult {
         var promotedMicro = 0
+
         val it = candidates.iterator()
         while (it.hasNext()) {
             val (id, c) = it.next()
             if (c.hits >= minHits) {
                 val existing = persistent[id]
                 if (existing == null) {
-                    persistent[id] = Code(c.hits.toLong(), c.hzSum / max(1, c.hits))
+                    persistent[id] = Code(
+                        weight = c.hits.toLong(),
+                        representativeHz = c.hzSum / max(1, c.hits)
+                    )
                 } else {
                     existing.weight += c.hits
                 }
@@ -145,46 +170,95 @@ class MemoryModel(context: Context) {
         }
 
         var promotedMacro = 0
-        if (!macroFrozen) {
-            val candidatesForMacro = relations.entries
-                .asSequence()
-                .map { (key, weight) -> Triple(keyFrom(key), keyTo(key), weight) }
-                .filter { (a, b, w) ->
-                    a != b && w >= macroRelationThreshold && persistent.containsKey(a) && persistent.containsKey(b)
-                }
-                .sortedByDescending { it.third }
-                .take(64)
-                .toList()
+        var highestNewLevel = 0
 
-            for ((a, b, weight) in candidatesForMacro) {
-                if (macroForPair(a, b) != null) continue
-                val ca = persistent[a] ?: continue
-                val cb = persistent[b] ?: continue
-                val hz = weightedHz(ca, cb)
-                val macro = MacroCode(
-                    id = nextMacroId++,
-                    members = mutableSetOf(a, b),
-                    weight = weight,
-                    representativeHz = hz
-                )
-                macros[macro.id] = macro
-                promotedMacro++
+        if (!macroFrozen) {
+            for (targetLevel in 1..MAX_ABSTRACTION_LEVEL) {
+                val created = createMacrosForLevel(targetLevel, baseRelationThreshold)
+                if (created > 0) {
+                    promotedMacro += created
+                    highestNewLevel = targetLevel
+                }
             }
         }
 
         pruneRelations()
         pruneMacroRelations()
         save()
-        return ConsolidationResult(promotedMicro, promotedMacro)
+
+        return ConsolidationResult(
+            microPromoted = promotedMicro,
+            macroPromoted = promotedMacro,
+            highestNewLevel = highestNewLevel
+        )
     }
 
-    private fun weightedHz(a: Code, b: Code): Double {
-        val total = max(1L, a.weight + b.weight).toDouble()
-        return (a.representativeHz * a.weight + b.representativeHz * b.weight) / total
+    private fun createMacrosForLevel(targetLevel: Int, baseThreshold: Long): Int {
+        val sourceLevel = targetLevel - 1
+        val threshold = baseThreshold + (sourceLevel * 4L)
+
+        val sourceIds: Set<Int> = if (sourceLevel == 0) {
+            persistent.keys.toSet()
+        } else {
+            macros.values.filter { it.level == sourceLevel }.map { it.id }.toSet()
+        }
+
+        if (sourceIds.size < 2) return 0
+
+        val sourceRelations = if (sourceLevel == 0) relations else macroRelations
+
+        val candidatesForMacro = sourceRelations.entries
+            .asSequence()
+            .map { (key, weight) -> Triple(keyFrom(key), keyTo(key), weight) }
+            .filter { (a, b, w) ->
+                a != b && w >= threshold && a in sourceIds && b in sourceIds
+            }
+            .sortedByDescending { it.third }
+            .take(if (targetLevel == 1) 48 else 20)
+            .toList()
+
+        var created = 0
+
+        for ((a, b, weight) in candidatesForMacro) {
+            if (macroForPairAtLevel(targetLevel, a, b) != null) continue
+
+            val hzA = representativeHzOf(a) ?: continue
+            val hzB = representativeHzOf(b) ?: continue
+            val weightA = weightOf(a).coerceAtLeast(1L)
+            val weightB = weightOf(b).coerceAtLeast(1L)
+            val total = (weightA + weightB).toDouble()
+            val hz = (hzA * weightA + hzB * weightB) / total
+
+            val macro = MacroCode(
+                id = nextMacroId++,
+                level = targetLevel,
+                members = mutableSetOf(a, b),
+                weight = weight,
+                representativeHz = hz
+            )
+            macros[macro.id] = macro
+            created++
+        }
+
+        return created
     }
 
-    private fun macroForPair(a: Int, b: Int): MacroCode? = macros.values.firstOrNull {
-        it.members.size == 2 && a in it.members && b in it.members
+    private fun macroForPairAtLevel(level: Int, a: Int, b: Int): MacroCode? =
+        macros.values.firstOrNull {
+            it.level == level && it.members.size == 2 && a in it.members && b in it.members
+        }
+
+    private fun representativeHzOf(id: Int): Double? =
+        persistent[id]?.representativeHz ?: macros[id]?.representativeHz
+
+    private fun weightOf(id: Int): Long =
+        persistent[id]?.weight ?: macros[id]?.weight ?: 0L
+
+    private fun leafHzOf(id: Int, depth: Int = 0): List<Double> {
+        if (depth > MAX_ABSTRACTION_LEVEL + 1) return emptyList()
+        persistent[id]?.let { return listOf(it.representativeHz) }
+        val macro = macros[id] ?: return emptyList()
+        return macro.members.flatMap { leafHzOf(it, depth + 1) }
     }
 
     @Synchronized
@@ -197,8 +271,14 @@ class MemoryModel(context: Context) {
     fun isMacroFrozen(): Boolean = macroFrozen
 
     @Synchronized
-    fun graphSnapshot(maxMicroNodes: Int = 40, maxMacroNodes: Int = 18, maxEdges: Int = 180): GraphSnapshot {
-        if (persistent.isEmpty() && macros.isEmpty()) return GraphSnapshot(emptyList(), emptyList())
+    fun graphSnapshot(
+        maxMicroNodes: Int = 34,
+        maxMacroNodesPerLevel: Int = 12,
+        maxEdges: Int = 150
+    ): GraphSnapshot {
+        if (persistent.isEmpty() && macros.isEmpty()) {
+            return GraphSnapshot(emptyList(), emptyList())
+        }
 
         val strongestMicroIds = persistent.entries
             .sortedByDescending { it.value.weight }
@@ -206,65 +286,110 @@ class MemoryModel(context: Context) {
             .map { it.key }
             .toSet()
 
-        val strongestMacros = macros.values
-            .sortedByDescending { it.weight }
-            .take(maxMacroNodes)
-        val macroIds = strongestMacros.map { it.id }.toSet()
+        val selectedMacros = (1..MAX_ABSTRACTION_LEVEL).flatMap { level ->
+            macros.values
+                .filter { it.level == level }
+                .sortedByDescending { it.weight }
+                .take(maxMacroNodesPerLevel)
+        }
+
+        val macroIds = selectedMacros.map { it.id }.toSet()
+        val visible = strongestMicroIds + macroIds
 
         val nodes = mutableListOf<GraphNode>()
+
         strongestMicroIds.forEach { id ->
-            persistent[id]?.let { nodes += GraphNode(id, it.weight, it.representativeHz, false, 1) }
-        }
-        strongestMacros.forEach { m ->
-            nodes += GraphNode(m.id, m.weight, m.representativeHz, true, m.members.size)
+            persistent[id]?.let {
+                nodes += GraphNode(
+                    id = id,
+                    weight = it.weight,
+                    representativeHz = it.representativeHz,
+                    abstractionLevel = 0,
+                    memberCount = 1
+                )
+            }
         }
 
-        val visible = strongestMicroIds + macroIds
+        selectedMacros.forEach { m ->
+            nodes += GraphNode(
+                id = m.id,
+                weight = m.weight,
+                representativeHz = m.representativeHz,
+                abstractionLevel = m.level,
+                memberCount = m.members.size
+            )
+        }
+
         val edges = mutableListOf<GraphEdge>()
 
         relations.entries
             .asSequence()
-            .map { (key, weight) -> GraphEdge(keyFrom(key), keyTo(key), weight, false) }
+            .map { (key, weight) ->
+                GraphEdge(keyFrom(key), keyTo(key), weight, abstractionLevel = 0)
+            }
             .filter { it.fromId in strongestMicroIds && it.toId in strongestMicroIds }
             .sortedByDescending { it.weight }
             .take(maxEdges)
             .forEach { edges += it }
 
-        // Membership edges make the abstraction boundary visible without making coordinates part of the core.
-        strongestMacros.forEach { m ->
-            m.members.filter { it in strongestMicroIds }.forEach { member ->
-                edges += GraphEdge(member, m.id, max(2L, m.weight / 2L), true)
+        selectedMacros.forEach { m ->
+            m.members.filter { it in visible }.forEach { member ->
+                edges += GraphEdge(
+                    fromId = member,
+                    toId = m.id,
+                    weight = max(2L, m.weight / 2L),
+                    abstractionLevel = m.level,
+                    isMembership = true
+                )
             }
         }
 
         macroRelations.entries
             .asSequence()
-            .map { (key, weight) -> GraphEdge(keyFrom(key), keyTo(key), weight, true) }
-            .filter { it.fromId in visible && it.toId in visible }
+            .mapNotNull { (key, weight) ->
+                val from = keyFrom(key)
+                val to = keyTo(key)
+                val lf = macros[from]?.level ?: return@mapNotNull null
+                val lt = macros[to]?.level ?: return@mapNotNull null
+                if (from !in visible || to !in visible || lf != lt) return@mapNotNull null
+                GraphEdge(
+                    fromId = from,
+                    toId = to,
+                    weight = weight,
+                    abstractionLevel = lf
+                )
+            }
             .sortedByDescending { it.weight }
-            .take(80)
+            .take(100)
             .forEach { edges += it }
 
-        return GraphSnapshot(nodes.sortedWith(compareBy<GraphNode> { it.isMacro }.thenBy { it.id }), edges)
+        return GraphSnapshot(
+            nodes = nodes.sortedWith(
+                compareBy<GraphNode> { it.abstractionLevel }.thenByDescending { it.weight }
+            ),
+            edges = edges
+        )
     }
 
-
     @Synchronized
-    fun sonificationSnapshot(maxMicro: Int = 8, maxMacros: Int = 6): SonificationSnapshot {
+    fun sonificationSnapshot(maxMicro: Int = 8, maxMacros: Int = 8): SonificationSnapshot {
         val micro = persistent.entries
             .sortedByDescending { it.value.weight }
             .take(maxMicro)
-            .map { (id, code) -> SonificationNode(id, code.representativeHz, code.weight) }
+            .map { (id, code) ->
+                SonificationNode(id, code.representativeHz, code.weight)
+            }
 
         val macro = macros.values
-            .sortedByDescending { it.weight }
+            .sortedWith(compareByDescending<MacroCode> { it.level }.thenByDescending { it.weight })
             .take(maxMacros)
             .map { m ->
                 SonificationMacro(
                     id = m.id,
                     hz = m.representativeHz,
                     weight = m.weight,
-                    memberHz = m.members.mapNotNull { persistent[it]?.representativeHz }
+                    memberHz = leafHzOf(m.id).distinct().take(6),
+                    abstractionLevel = m.level
                 )
             }
 
@@ -272,16 +397,25 @@ class MemoryModel(context: Context) {
     }
 
     @Synchronized
-    fun stats(): MemoryStats = MemoryStats(
-        persistentCodes = persistent.size,
-        temporaryCodes = candidates.size,
-        relations = relations.size,
-        observations = observations,
-        strongestWeight = persistent.values.maxOfOrNull { it.weight } ?: 0L,
-        macroCodes = macros.size,
-        macroRelations = macroRelations.size,
-        macroFrozen = macroFrozen
-    )
+    fun stats(): MemoryStats {
+        val levelCounts = macros.values
+            .groupingBy { it.level }
+            .eachCount()
+            .toSortedMap()
+
+        return MemoryStats(
+            persistentCodes = persistent.size,
+            temporaryCodes = candidates.size,
+            relations = relations.size,
+            observations = observations,
+            strongestWeight = persistent.values.maxOfOrNull { it.weight } ?: 0L,
+            macroCodes = macros.size,
+            macroRelations = macroRelations.size,
+            macroFrozen = macroFrozen,
+            maxAbstractionLevel = macros.values.maxOfOrNull { it.level } ?: 0,
+            levelCounts = levelCounts
+        )
+    }
 
     @Synchronized
     fun reset() {
@@ -291,7 +425,7 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroRelations.clear()
         previousId = null
-        previousMacroId = null
+        previousByLevel.clear()
         observations = 0L
         nextMacroId = MACRO_ID_BASE
         macroFrozen = false
@@ -312,8 +446,8 @@ class MemoryModel(context: Context) {
     }
 
     private fun pruneMacroRelations() {
-        if (macroRelations.size <= 2048) return
-        val keep = macroRelations.entries.sortedByDescending { it.value }.take(1536)
+        if (macroRelations.size <= 4096) return
+        val keep = macroRelations.entries.sortedByDescending { it.value }.take(3072)
         macroRelations.clear()
         keep.forEach { macroRelations[it.key] = it.value }
     }
@@ -321,13 +455,19 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
+            root.put("formatVersion", 7)
             root.put("observations", observations)
             root.put("nextMacroId", nextMacroId)
             root.put("macroFrozen", macroFrozen)
 
             val codes = JSONArray()
             persistent.forEach { (id, c) ->
-                codes.put(JSONObject().put("id", id).put("weight", c.weight).put("hz", c.representativeHz))
+                codes.put(
+                    JSONObject()
+                        .put("id", id)
+                        .put("weight", c.weight)
+                        .put("hz", c.representativeHz)
+                )
             }
             root.put("codes", codes)
 
@@ -344,6 +484,7 @@ class MemoryModel(context: Context) {
                 macroArray.put(
                     JSONObject()
                         .put("id", m.id)
+                        .put("level", m.level)
                         .put("weight", m.weight)
                         .put("hz", m.representativeHz)
                         .put("members", members)
@@ -358,11 +499,13 @@ class MemoryModel(context: Context) {
             root.put("macroRelations", macroEdgeArray)
 
             file.writeText(root.toString())
-        } catch (_: Exception) { }
+        } catch (_: Exception) {
+        }
     }
 
     private fun load() {
         if (!file.exists()) return
+
         try {
             val root = JSONObject(file.readText())
             observations = root.optLong("observations", 0L)
@@ -372,7 +515,10 @@ class MemoryModel(context: Context) {
             val codes = root.optJSONArray("codes") ?: JSONArray()
             for (i in 0 until codes.length()) {
                 val o = codes.getJSONObject(i)
-                persistent[o.getInt("id")] = Code(o.getLong("weight"), o.getDouble("hz"))
+                persistent[o.getInt("id")] = Code(
+                    o.getLong("weight"),
+                    o.getDouble("hz")
+                )
             }
 
             val edges = root.optJSONArray("relations") ?: JSONArray()
@@ -386,9 +532,20 @@ class MemoryModel(context: Context) {
                 val o = macroArray.getJSONObject(i)
                 val membersJson = o.optJSONArray("members") ?: JSONArray()
                 val members = mutableSetOf<Int>()
-                for (j in 0 until membersJson.length()) members += membersJson.getInt(j)
+                for (j in 0 until membersJson.length()) {
+                    members += membersJson.getInt(j)
+                }
+
                 val id = o.getInt("id")
-                macros[id] = MacroCode(id, members, o.getLong("weight"), o.getDouble("hz"))
+                // Migration: old Step 05/06/06.5 macros did not store "level"; they become level 1.
+                val level = o.optInt("level", 1).coerceIn(1, MAX_ABSTRACTION_LEVEL)
+                macros[id] = MacroCode(
+                    id = id,
+                    level = level,
+                    members = members,
+                    weight = o.getLong("weight"),
+                    representativeHz = o.getDouble("hz")
+                )
                 nextMacroId = max(nextMacroId, id + 1)
             }
 
@@ -397,8 +554,7 @@ class MemoryModel(context: Context) {
                 val o = macroEdgeArray.getJSONObject(i)
                 macroRelations[o.getLong("key")] = o.getLong("weight")
             }
-        } catch (_: Exception) { }
+        } catch (_: Exception) {
+        }
     }
 }
-
-data class ConsolidationResult(val microPromoted: Int, val macroPromoted: Int)
