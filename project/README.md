@@ -1,4 +1,4 @@
-Equinox v0.6 Step 09 — Multidimensional Relevance
+Equinox v0.6 Step 10 — Dual Audio Encoder
 
-Open this directory as the Android Studio project.
-See README_V06.md for architecture, compatibility and verification notes.
+Open this exact folder as an Android Studio project and use Build > Build APK(s).
+See README_V06.md for the architecture and verification notes.

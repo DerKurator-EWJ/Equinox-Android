@@ -56,6 +56,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step07-templateslots` | `Equinox_v06_Step07_TemplateSlots.zip` | 23 | 0 | `728eb62189bf397bc3dcb058d94c99b663b30ec785d8cbe32263621eca924024` |
 | `android-v06-step08-substitutionclasses` | `Equinox_v06_Step08_SubstitutionClasses.zip` | 23 | 0 | `339d6dc398627e9a8ed06883442090e59230908f36f7ed5e7210423b3bea6063` |
 | `android-v06-step09-multidimensionalrelevance` | `Equinox_v06_Step09_MultidimensionalRelevance.zip` | 24 | 0 | `df9f0c6b5d2ce78c8b882809af901e3d41c482c866ad8fb4925445ea33d4d993` |
+| `android-v06-step10-dualaudioencoder` | `Equinox_v06_Step10_DualAudioEncoder.zip` | 26 | 0 | `46a8111ced1691b98d72cdb9f120cf659f4ac4457fbbb98605f898bb376c0fcc` |
 
 ## Security, licensing, and limitations
 

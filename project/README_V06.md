@@ -1,122 +1,116 @@
-# Equinox v0.6 — Step 09: Multidimensional Relevance
+# Equinox v0.6 — Step 10: Dual Audio Encoder
 
-Basis: v0.6 Step 08 Substitution Classes.
+Basis: v0.6 Step 09 Multidimensional Relevance.
 
-## New in Step 09
+## Purpose
 
-Step 09 separates structural importance into independent read-only dimensions instead of treating one raw weight as "importance".
+Step 10 performs the audio-encoder hard test discussed during the v0.6 redesign.
+The Equinox memory core should not depend on FFT as a fundamental representation.
+Therefore the app now has two selectable sensor encoders that feed the same macro,
+lazy-retrieval, overexchange, template, substitution and relevance architecture.
 
-For every macro Equinox now derives:
+The two encoders are deliberately kept as separate alphabets so their memories do
+not contaminate each other.
 
-- **Frequency** — normalized recurrence / occurrence.
-- **Reuse** — how often higher macros reuse this macro as a component.
-- **Relation support** — how much learned macro-relation evidence exists.
-- **Context entropy** — how broadly relation evidence is distributed over contexts.
-- **Specificity** — how selective/context-focused the learned relation support is.
-- **Persistence** — whether the macro remained active across a longer observation span.
-- **Generality** — broad distributed contextual use.
-- **Structural relevance** — a bounded composite 0..1 used by output and diagnostics.
+## Encoder A — FFT / frequency identity
 
-These are not semantic labels. Equinox still does not know that a token is a noun, object, word, fruit, etc.
+The existing path remains available and is the default for backward compatibility:
 
-## Frequency is not importance
+`PCM -> FFT -> dominant frequency -> logarithmic frequency ID -> Equinox core`
 
-The relevance composite intentionally gives raw frequency only a small share of the score.
+It continues to use the existing positive frequency IDs and modality `audio`.
+Existing v0.6 memories remain readable.
 
-A very frequent macro with broad/high-entropy context can therefore be less relevant than a less frequent macro that is:
+## Encoder B — DIRECT / fixed 16-bit acoustic identity
 
-- reused by higher structures,
-- strongly supported by relations,
-- selective in context,
-- persistent across time.
+The new path does **not** call `Fft.magnitudes()`.
+A 2048-sample PCM frame is quantized directly in the time domain using only five
+coarse behaviour groups:
 
-A synthetic verification test used:
+- zero-crossing rate: 4 bits
+- normalized waveform roughness: 4 bits
+- strongest tested autocorrelation lag: 3 bits
+- autocorrelation strength: 3 bits
+- coarse envelope trend: 2 bits
 
-- a very frequent, broad-context pattern: relevance ≈ 0.426
-- a less frequent, selective/reused pattern: relevance ≈ 0.868
+These fields form one 16-bit identity. Therefore the theoretical direct alphabet is
+bounded to exactly **65,536 possible states**. It does not grow just because the app
+runs longer.
 
-The second pattern therefore outranked the first even though it occurred far less often.
+Direct identities use negative IDs `-1 .. -65536` and modality `audio_direct`, so
+there is no collision with legacy frequency IDs or the positive macro-ID space.
+Silence below a small RMS threshold is displayed but is not learned.
 
-## Rank vs relevance
+This is intentionally a simple experimental encoder. It is not a claim that these
+five features are a complete representation of sound.
 
-The RPG rank remains:
+## Same memory, different front end
 
-`F → E → D → C → B → A → S → SS → SSS → Ω → Ω+1 → ...`
+After quantization both paths use the same pipeline:
 
-But Step 09 explicitly separates:
+`Quant ID -> temporary sequence evidence -> stable macro -> lazy active set -> sparse macro relations -> overexchange -> templates -> substitution classes -> relevance/rank -> output`
 
-- **rank** = accumulated structural maturity / abstraction,
-- **relevance** = bounded multidimensional read-only structural importance estimate.
+No new level-0 relation graph was added.
 
-Neither value directly rewrites learning.
+The core therefore remains independent of whether the sensor identity came from an
+FFT frequency bin or a direct time-domain pattern.
 
-## Temporal persistence
+## Switching encoders
 
-Macro memory now stores both:
+Open **LAB -> AUDIO-ENCODER HARD TEST** and choose:
 
-- `firstActivatedObservation`
-- `lastActivatedObservation`
+- `FFT`
+- `DIRECT-ID`
 
-This allows persistence to be estimated from the span across which the structure continued to recur.
+Changing the encoder while audio is running first stops/consolidates the current
+audio stream, preventing a rolling sequence from crossing between two alphabets.
+The selected mode is saved in SharedPreferences.
 
-Older Step 05–08 memory files remain readable. When `firstActivatedObservation` is missing, Step 09 falls back conservatively to the previous last-activation value.
+The LIVE page shows the currently selected encoder.
 
-## Output changes
+FFT mode reports dominant Hz, frequency ID and FFT magnitude.
+DIRECT mode reports pattern ID, RMS activity and the quantized time-domain feature
+bins.
 
-The LIVE/MEMORY canvas now uses relevance as a secondary presence signal:
+## Memory / diagnostics
 
-- relevant structures gain slightly more visual presence,
-- general/context-broad structures can receive a wider diffuse halo,
-- the footer reports mean active relevance.
+The memory statistics now separately report:
 
-The library-free orchestra also uses relevance as one input to voice presence. Generality slightly changes harmonic complexity. No sample library is added.
+- FFT quant codes / FFT macros
+- Direct-ID quant codes / Direct-ID macros
 
-The renderer and orchestra remain read-only consumers of the core.
+This makes it possible to run the same environment through both encoders and compare
+how quickly each representation stabilizes and compresses.
 
-## UI / diagnostics
+The same persistent file `equinox_v06_memory.json` is used. The save format is now
+`formatVersion = 6010`. Step 05–09 data remains loadable; new direct IDs are simply
+additional entries with modality `audio_direct`.
 
-Memory statistics now additionally show:
+## Orchestra
 
-- mean active relevance,
-- highest active relevance,
-- mean active context entropy,
-- highest active generality.
-
-This is intended for comparing patterns that are merely common with patterns that are structurally useful.
-
-## Efficiency
-
-Step 09 does not introduce a new persistent graph.
-
-Relevance is calculated lazily from data that already exists:
-
-- macro occurrence count,
-- parent reuse index,
-- sparse relation weights,
-- first/last activation observations.
-
-The cost is local to the macro being projected or inspected. There is no all-to-all relevance calculation.
-
-## Persistence
-
-The same `equinox_v06_memory.json` is used.
-
-The save format now writes `formatVersion = 6009` and the first activation observation for each macro. Existing Step 05–08 files can still be loaded.
+Direct-ID codes do not store fake measured frequencies. For output only, the
+orchestra deterministically projects a pitch from the direct ID / macro composition.
+That pitch is a human-audible visualization and is not fed back into memory as a
+physical property of the code.
 
 ## Verification performed here
 
-The Step 09 core (`MemoryModel.kt`, `StructuralRank.kt`, `StructuralRelevance.kt`) compiles successfully against JVM Android/JSON stubs.
+- `MemoryModel.kt`, `StructuralRank.kt`, `StructuralRelevance.kt` and
+  `DirectAudioQuantizer.kt` compile successfully against JVM Android/JSON stubs.
+- A direct-quantizer test confirmed that a 440 Hz sine at two substantially different
+  amplitudes maps to the same direct identity, while deterministic broadband noise
+  maps to a different identity.
+- The same test produced a different identity for an 880 Hz sine in the tested frame.
 
-The output layer (`EngineOutputState.kt`, `EquinoxOutputView.kt`, `OrchestraSonifier.kt`) also compiles successfully against Android graphics/media stubs.
-
-A direct relevance test confirmed that a less frequent but selective/reused pattern can score higher than a massively frequent broad-context pattern.
-
-A complete Android APK build is still not possible in this environment because the Android SDK/build tools are not installed.
+A complete Android APK build is still not possible in this environment because the
+Android SDK/build tools are not installed.
 
 ## Build
 
-Open exactly `Equinox_v06_Step09_MultidimensionalRelevance` as the Android Studio project and use **Build > Build APK(s)**.
+Open exactly `Equinox_v06_Step10_DualAudioEncoder` as the Android Studio project and
+use **Build > Build APK(s)**.
 
-Application ID remains `de.equinox.v05`, so it updates the same installed app when signed with the same key/debug key.
+Application ID remains `de.equinox.v05`, so it updates the same installed app when
+signed with the same key/debug key.
 
-Version: `0.6-step09-multidimensional-relevance` (versionCode 23).
+Version: `0.6-step10-dual-audio-encoder` (versionCode 24).

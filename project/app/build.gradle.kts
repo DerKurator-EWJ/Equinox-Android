@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 23
-        versionName = "0.6-step09-multidimensional-relevance"
+        versionCode = 24
+        versionName = "0.6-step10-dual-audio-encoder"
     }
 
     compileOptions {
