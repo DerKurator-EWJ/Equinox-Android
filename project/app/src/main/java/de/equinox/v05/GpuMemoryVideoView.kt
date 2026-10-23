@@ -14,7 +14,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Step 32 — Tier-aware Visual Hierarchy on the Unified Canvas.
+ * Step 33 — Fluid Hierarchy Transitions on the Unified Canvas.
  *
  * There is only one physical OpenGL surface. Camera pigment and the read-only Equinox
  * working set are two ingredients of the same renderer. memoryBlend is continuous:
@@ -26,7 +26,9 @@ import kotlin.math.min
  * The renderer never writes pixels, positions or blend state back into MemoryModel.
  */
 class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
-    private val gpuRenderer = GpuRenderer()
+    private val gpuRenderer = GpuRenderer {
+        postOnAnimation { requestRender() }
+    }
 
     init {
         setEGLContextClientVersion(2)
@@ -68,7 +70,9 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
 
     fun lastRenderCostMs(): Double = gpuRenderer.lastRenderCostMs
 
-    private class GpuRenderer : GLSurfaceView.Renderer {
+    private class GpuRenderer(
+        private val scheduleNextFrame: () -> Unit
+    ) : GLSurfaceView.Renderer {
         private data class Packet(
             val frame: VideoFrameSnapshot?,
             val memoryEnergy: Float,
@@ -76,8 +80,10 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             val expectation: Float,
             val prediction: Float,
             val fields: FloatArray,
+            val fieldIds: IntArray,
             val fieldCount: Int,
             val links: FloatArray,
+            val linkKeys: LongArray,
             val linkCount: Int,
             val info: String
         )
@@ -89,6 +95,44 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         private val pending = AtomicReference<Packet?>(null)
         private var current: Packet? = null
         private var currentFrame: VideoFrameSnapshot? = null
+
+        private data class SmoothField(
+            val id: Int,
+            var x: Float,
+            var y: Float,
+            var strength: Float,
+            var tier: Float,
+            var targetX: Float,
+            var targetY: Float,
+            var targetStrength: Float,
+            var targetTier: Float,
+            var seenThisPacket: Boolean = false
+        )
+
+        private data class SmoothLink(
+            val key: Long,
+            var ax: Float,
+            var ay: Float,
+            var bx: Float,
+            var by: Float,
+            var alpha: Float,
+            var targetAx: Float,
+            var targetAy: Float,
+            var targetBx: Float,
+            var targetBy: Float,
+            var targetAlpha: Float,
+            var seenThisPacket: Boolean = false
+        )
+
+        private val smoothFields = LinkedHashMap<Int, SmoothField>()
+        private val smoothLinks = LinkedHashMap<Long, SmoothLink>()
+        private var displayMemoryEnergy = 0f
+        private var displaySignedExchange = 0f
+        private var displayExpectation = 0f
+        private var displayPrediction = 0f
+        private var displayBlend = 0.35f
+        private var lastAnimNanos = 0L
+        private var animationActive = false
 
         private var program = 0
         private var textureId = 0
@@ -106,6 +150,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         private var uFields = -1
         private var uLinkCount = -1
         private var uLinks = -1
+        private var uLinkAlpha = -1
 
         private val quad: FloatBuffer = ByteBuffer.allocateDirect(4 * 4 * 4)
             .order(ByteOrder.nativeOrder())
@@ -167,7 +212,9 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
 
             val positionById = HashMap<Int, Pair<Float, Float>>(strongest.size)
             val fieldData = FloatArray(MAX_FIELDS * 4)
+            val fieldIds = IntArray(MAX_FIELDS) { Int.MIN_VALUE }
             strongest.forEachIndexed { index, node ->
+                fieldIds[index] = node.id
                 val p = fieldPosition(node.id)
                 positionById[node.id] = p
                 val activity = max(node.activation, node.expectation).coerceIn(0.0, 1.0).toFloat()
@@ -208,9 +255,13 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 }
 
             val linkData = FloatArray(MAX_LINKS * 4)
+            val linkKeys = LongArray(MAX_LINKS)
             linkPairs.take(MAX_LINKS).forEachIndexed { index, pair ->
                 val a = positionById[pair.first] ?: return@forEachIndexed
                 val b = positionById[pair.second] ?: return@forEachIndexed
+                val lo = min(pair.first, pair.second)
+                val hi = max(pair.first, pair.second)
+                linkKeys[index] = (lo.toLong() shl 32) xor (hi.toLong() and 0xffffffffL)
                 val base = index * 4
                 linkData[base] = a.first
                 linkData[base + 1] = a.second
@@ -226,8 +277,10 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     expectation = meanExpectation.coerceIn(0.0, 1.0).toFloat(),
                     prediction = predictionEnergy.coerceIn(0.0, 1.0).toFloat(),
                     fields = fieldData,
+                    fieldIds = fieldIds,
                     fieldCount = strongest.size,
                     links = linkData,
+                    linkKeys = linkKeys,
                     linkCount = linkPairs.size.coerceAtMost(MAX_LINKS),
                     info = info
                 )
@@ -247,6 +300,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             uFields = GLES20.glGetUniformLocation(program, "uFields[0]")
             uLinkCount = GLES20.glGetUniformLocation(program, "uLinkCount")
             uLinks = GLES20.glGetUniformLocation(program, "uLinks[0]")
+            uLinkAlpha = GLES20.glGetUniformLocation(program, "uLinkAlpha[0]")
 
             val ids = IntArray(1)
             GLES20.glGenTextures(1, ids, 0)
@@ -268,8 +322,14 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             pending.getAndSet(null)?.let { packet ->
                 current = packet
                 if (packet.frame != null) currentFrame = packet.frame
+                acceptTargets(packet)
             }
             val packet = current
+            val now = System.nanoTime()
+            val dt = if (lastAnimNanos == 0L) 1.0 / 60.0 else ((now - lastAnimNanos) / 1_000_000_000.0).coerceIn(0.0, 0.10)
+            lastAnimNanos = now
+            animationActive = advanceVisualState(dt, packet)
+
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             if (packet == null || program == 0 || textureId == 0) {
                 lastRenderCostMs = (System.nanoTime() - start) / 1_000_000.0
@@ -284,21 +344,24 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glUniform1i(uTexture, 0)
             GLES20.glUniform4f(
                 uSummary,
-                packet.memoryEnergy,
-                packet.signedExchange,
-                packet.expectation,
-                packet.prediction
+                displayMemoryEnergy,
+                displaySignedExchange,
+                displayExpectation,
+                displayPrediction
             )
-            GLES20.glUniform1f(uBlend, memoryBlend)
+            GLES20.glUniform1f(uBlend, displayBlend)
             GLES20.glUniform2f(
                 uTexel,
                 1f / textureW.coerceAtLeast(1).toFloat(),
                 1f / textureH.coerceAtLeast(1).toFloat()
             )
-            GLES20.glUniform1i(uFieldCount, packet.fieldCount)
-            GLES20.glUniform4fv(uFields, MAX_FIELDS, packet.fields, 0)
-            GLES20.glUniform1i(uLinkCount, packet.linkCount)
-            GLES20.glUniform4fv(uLinks, MAX_LINKS, packet.links, 0)
+            val renderFields = buildSmoothedFieldArray()
+            val renderLinks = buildSmoothedLinkArray()
+            GLES20.glUniform1i(uFieldCount, renderFields.second)
+            GLES20.glUniform4fv(uFields, MAX_FIELDS, renderFields.first, 0)
+            GLES20.glUniform1i(uLinkCount, renderLinks.second)
+            GLES20.glUniform4fv(uLinks, MAX_LINKS, renderLinks.first, 0)
+            GLES20.glUniform1fv(uLinkAlpha, MAX_LINKS, renderLinks.third, 0)
 
             quad.position(0)
             GLES20.glEnableVertexAttribArray(aPosition)
@@ -312,6 +375,137 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glDisableVertexAttribArray(aTexCoord)
 
             lastRenderCostMs = (System.nanoTime() - start) / 1_000_000.0
+            if (animationActive) scheduleNextFrame()
+        }
+
+        private fun acceptTargets(packet: Packet) {
+            smoothFields.values.forEach { it.seenThisPacket = false }
+            for (i in 0 until packet.fieldCount.coerceAtMost(MAX_FIELDS)) {
+                val id = packet.fieldIds[i]
+                if (id == Int.MIN_VALUE) continue
+                val base = i * 4
+                val tx = packet.fields[base]
+                val ty = packet.fields[base + 1]
+                val ts = packet.fields[base + 2]
+                val tt = packet.fields[base + 3]
+                val state = smoothFields[id]
+                if (state == null) {
+                    smoothFields[id] = SmoothField(id, tx, ty, 0f, tt, tx, ty, ts, tt, true)
+                } else {
+                    state.targetX = tx
+                    state.targetY = ty
+                    state.targetStrength = ts
+                    state.targetTier = tt
+                    state.seenThisPacket = true
+                }
+            }
+            smoothFields.values.filter { !it.seenThisPacket }.forEach { it.targetStrength = 0f }
+
+            smoothLinks.values.forEach { it.seenThisPacket = false }
+            for (i in 0 until packet.linkCount.coerceAtMost(MAX_LINKS)) {
+                val key = packet.linkKeys[i]
+                if (key == 0L) continue
+                val base = i * 4
+                val ax = packet.links[base]
+                val ay = packet.links[base + 1]
+                val bx = packet.links[base + 2]
+                val by = packet.links[base + 3]
+                val state = smoothLinks[key]
+                if (state == null) {
+                    smoothLinks[key] = SmoothLink(key, ax, ay, bx, by, 0f, ax, ay, bx, by, 1f, true)
+                } else {
+                    state.targetAx = ax
+                    state.targetAy = ay
+                    state.targetBx = bx
+                    state.targetBy = by
+                    state.targetAlpha = 1f
+                    state.seenThisPacket = true
+                }
+            }
+            smoothLinks.values.filter { !it.seenThisPacket }.forEach { it.targetAlpha = 0f }
+            animationActive = true
+        }
+
+        private fun advanceVisualState(dt: Double, packet: Packet?): Boolean {
+            fun alpha(rate: Double): Float = (1.0 - kotlin.math.exp(-rate * dt)).toFloat().coerceIn(0f, 1f)
+            val fast = alpha(12.0)
+            val medium = alpha(8.0)
+            val slow = alpha(5.0)
+
+            val targetMemory = packet?.memoryEnergy ?: 0f
+            val targetExchange = packet?.signedExchange ?: 0f
+            val targetExpectation = packet?.expectation ?: 0f
+            val targetPrediction = packet?.prediction ?: 0f
+            displayMemoryEnergy += (targetMemory - displayMemoryEnergy) * medium
+            displaySignedExchange += (targetExchange - displaySignedExchange) * medium
+            displayExpectation += (targetExpectation - displayExpectation) * medium
+            displayPrediction += (targetPrediction - displayPrediction) * medium
+            displayBlend += (memoryBlend - displayBlend) * fast
+
+            smoothFields.values.forEach { f ->
+                f.x += (f.targetX - f.x) * slow
+                f.y += (f.targetY - f.y) * slow
+                f.strength += (f.targetStrength - f.strength) * medium
+                f.tier += (f.targetTier - f.tier) * slow
+            }
+            smoothLinks.values.forEach { l ->
+                l.ax += (l.targetAx - l.ax) * slow
+                l.ay += (l.targetAy - l.ay) * slow
+                l.bx += (l.targetBx - l.bx) * slow
+                l.by += (l.targetBy - l.by) * slow
+                l.alpha += (l.targetAlpha - l.alpha) * medium
+            }
+
+            smoothFields.entries.removeAll { (_, f) -> f.targetStrength <= 0f && f.strength < 0.004f }
+            smoothLinks.entries.removeAll { (_, l) -> l.targetAlpha <= 0f && l.alpha < 0.004f }
+
+            val fieldMotion = smoothFields.values.any {
+                kotlin.math.abs(it.targetStrength - it.strength) > 0.003f ||
+                    kotlin.math.abs(it.targetTier - it.tier) > 0.01f ||
+                    kotlin.math.abs(it.targetX - it.x) > 0.001f ||
+                    kotlin.math.abs(it.targetY - it.y) > 0.001f
+            }
+            val linkMotion = smoothLinks.values.any { kotlin.math.abs(it.targetAlpha - it.alpha) > 0.003f }
+            val summaryMotion = kotlin.math.abs(targetMemory - displayMemoryEnergy) > 0.003f ||
+                kotlin.math.abs(targetExchange - displaySignedExchange) > 0.003f ||
+                kotlin.math.abs(targetExpectation - displayExpectation) > 0.003f ||
+                kotlin.math.abs(targetPrediction - displayPrediction) > 0.003f ||
+                kotlin.math.abs(memoryBlend - displayBlend) > 0.003f
+            return fieldMotion || linkMotion || summaryMotion
+        }
+
+        private fun buildSmoothedFieldArray(): Pair<FloatArray, Int> {
+            val selected = smoothFields.values
+                .filter { it.strength > 0.003f }
+                .sortedByDescending { it.strength }
+                .take(MAX_FIELDS)
+            val data = FloatArray(MAX_FIELDS * 4)
+            selected.forEachIndexed { i, f ->
+                val base = i * 4
+                data[base] = f.x
+                data[base + 1] = f.y
+                data[base + 2] = f.strength.coerceIn(0f, 1f)
+                data[base + 3] = f.tier.coerceAtLeast(0f)
+            }
+            return Pair(data, selected.size)
+        }
+
+        private fun buildSmoothedLinkArray(): Triple<FloatArray, Int, FloatArray> {
+            val selected = smoothLinks.values
+                .filter { it.alpha > 0.003f }
+                .sortedByDescending { it.alpha }
+                .take(MAX_LINKS)
+            val data = FloatArray(MAX_LINKS * 4)
+            val alpha = FloatArray(MAX_LINKS)
+            selected.forEachIndexed { i, l ->
+                val base = i * 4
+                data[base] = l.ax
+                data[base + 1] = l.ay
+                data[base + 2] = l.bx
+                data[base + 3] = l.by
+                alpha[i] = l.alpha.coerceIn(0f, 1f)
+            }
+            return Triple(data, selected.size, alpha)
         }
 
         private fun uploadFallbackTexture() {
@@ -445,6 +639,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 uniform int uLinkCount;
                 // x/y=start, z/w=end
                 uniform vec4 uLinks[5];
+                uniform float uLinkAlpha[5];
                 varying vec2 vTex;
 
                 float sdSegment(vec2 p, vec2 a, vec2 b) {
@@ -548,7 +743,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                         if (i < uLinkCount) {
                             vec4 ln = uLinks[i];
                             float d = sdSegment(vTex, ln.xy, ln.zw);
-                            linkGlow += 1.0 - smoothstep(0.0025, 0.017, d);
+                            linkGlow += (1.0 - smoothstep(0.0025, 0.017, d)) * clamp(uLinkAlpha[i], 0.0, 1.0);
                         }
                     }
                     linkGlow = min(1.4, linkGlow);

@@ -113,3 +113,6 @@ The Reality ↔ Memory blend is now shared by the single GPU canvas and the cont
 ## Step 32 — Tier-aware Visual Hierarchy
 
 The unified OpenGL canvas no longer treats every active macro as the same point-like visual primitive. The RPG abstraction depth now selects the *kind* of spatial expression: F/E/D become fine fibers, middle tiers become local membranes/tissue, SSS-level structures become regional density, and Ω+n becomes a broad organizing domain. Relevance/activity remain separate from abstraction depth, so deeper does not automatically mean brighter or more important. The renderer also reserves a small number of field slots across shallow/mid/deep groups so deep structures are not hidden by a flood of low-tier activity.
+
+### Step 33
+Fluid renderer-side hierarchy transitions: persistent macro-ID visual states, eased Reality/Memory blend, fade-in/out for fields and links, continuous tier morphing, and on-demand animation frames only while a transition is active.
