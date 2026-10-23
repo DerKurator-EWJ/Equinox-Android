@@ -24,15 +24,14 @@ import kotlin.math.sqrt
  * slowly toward their observations and learn a local acceptance radius. Existing IDs
  * never change identity, so MemoryModel can safely store them over long periods.
  *
- * This is online vector quantization / codebook learning. It is intentionally bounded
- * to keep the hard test feasible on a phone; it makes no claim that these six features
- * are an optimal representation of sound.
+ * This is online vector quantization / codebook learning. Step 25 removes the former
+ * 4096-ID ceiling. Identity growth is now evidence-driven: familiar, heavily reused
+ * prototypes may split more finely while weakly supported regions stay coarse.
  */
 class AdaptiveAudioQuantizer(private val context: Context) {
     companion object {
         private const val FILE_NAME = "equinox_v06_adaptive_quantizer.json"
         private const val FORMAT_VERSION = 1
-        private const val MAX_PROTOTYPES = 4_096
         private const val ID_BASE = -1_000_000
         private const val SILENCE_RMS = 0.0025
         private const val SAVE_EVERY_ACCEPTED = 128L
@@ -56,6 +55,7 @@ class AdaptiveAudioQuantizer(private val context: Context) {
         val matchDistance: Double,
         val acceptanceRadius: Double,
         val codebookSize: Int,
+        val familiarity: Double,
         val debugText: String
     )
 
@@ -86,6 +86,9 @@ class AdaptiveAudioQuantizer(private val context: Context) {
 
     private val file = File(context.filesDir, FILE_NAME)
     private val prototypes = ArrayList<Prototype>()
+    // Coarse feature index keeps unbounded codebook growth from turning every frame into
+    // a full O(N) scan. Only the local bucket and one-axis neighbor buckets are searched.
+    private val prototypeBuckets = mutableMapOf<Int, MutableList<Prototype>>()
     private val recentNovelty = ArrayDeque<Boolean>()
     private var nextOrdinal = 1
     private var acceptedFrames = 0L
@@ -93,8 +96,16 @@ class AdaptiveAudioQuantizer(private val context: Context) {
     private var reusedIds = 0L
     private var matchDistanceSum = 0.0
     private var matchDistanceCount = 0L
+    private var learnedStructureCount = 0
 
     init { load() }
+
+
+    /** Supplies slow-changing context from the relational core; it is not an ID cap. */
+    @Synchronized
+    fun updateStructureContext(totalAdaptiveMacros: Int, totalMacroRelations: Int) {
+        learnedStructureCount = (totalAdaptiveMacros.coerceAtLeast(0) + totalMacroRelations.coerceAtLeast(0) / 4)
+    }
 
     @Synchronized
     fun quantize(frame: ShortArray): Result {
@@ -108,6 +119,7 @@ class AdaptiveAudioQuantizer(private val context: Context) {
                 matchDistance = 0.0,
                 acceptanceRadius = 0.0,
                 codebookSize = prototypes.size,
+                familiarity = 0.0,
                 debugText = "Stille"
             )
         }
@@ -115,7 +127,7 @@ class AdaptiveAudioQuantizer(private val context: Context) {
         acceptedFrames++
         var nearest: Prototype? = null
         var nearestDistance = Double.POSITIVE_INFINITY
-        for (p in prototypes) {
+        for (p in candidatePrototypes(f.values)) {
             val d = distance(f.values, p.center)
             if (d < nearestDistance) {
                 nearestDistance = d
@@ -125,8 +137,8 @@ class AdaptiveAudioQuantizer(private val context: Context) {
 
         val p = nearest
         val radius = if (p == null) 0.0 else acceptanceRadius(p)
-        val canCreate = prototypes.size < MAX_PROTOTYPES
-        val create = p == null || (nearestDistance > radius && canCreate)
+        val creationRadius = if (p == null) 0.0 else creationRadius(p)
+        val create = p == null || nearestDistance > creationRadius
 
         val chosen: Prototype
         val usedDistance: Double
@@ -141,6 +153,7 @@ class AdaptiveAudioQuantizer(private val context: Context) {
                 radiusEma = 0.015
             )
             prototypes += chosen
+            indexPrototype(chosen)
             createdIds++
             usedDistance = 0.0
             usedRadius = acceptanceRadius(chosen)
@@ -166,10 +179,12 @@ class AdaptiveAudioQuantizer(private val context: Context) {
             matchDistance = usedDistance,
             acceptanceRadius = usedRadius,
             codebookSize = prototypes.size,
+            familiarity = familiarity(chosen),
             debugText = buildString {
                 append(if (create) "NEU" else "reuse")
                 append(" · ").append(f.debug)
                 if (!create) append(" · d ").append("%.3f".format(usedDistance)).append("/r ").append("%.3f".format(usedRadius))
+                append(" · fam ").append("%.2f".format(familiarity(chosen)))
             }
         )
     }
@@ -183,7 +198,7 @@ class AdaptiveAudioQuantizer(private val context: Context) {
         recentNoveltyRate = if (recentNovelty.isEmpty()) 0.0 else recentNovelty.count { it }.toDouble() / recentNovelty.size.toDouble(),
         meanMatchDistance = if (matchDistanceCount <= 0L) 0.0 else matchDistanceSum / matchDistanceCount.toDouble(),
         strongestPrototypeCount = prototypes.maxOfOrNull { it.count } ?: 0L,
-        saturated = prototypes.size >= MAX_PROTOTYPES
+        saturated = false
     )
 
     @Synchronized
@@ -214,6 +229,7 @@ class AdaptiveAudioQuantizer(private val context: Context) {
     @Synchronized
     fun reset() {
         prototypes.clear()
+        prototypeBuckets.clear()
         recentNovelty.clear()
         nextOrdinal = 1
         acceptedFrames = 0L
@@ -225,11 +241,72 @@ class AdaptiveAudioQuantizer(private val context: Context) {
     }
 
     private fun updatePrototype(p: Prototype, x: DoubleArray, distance: Double) {
+        val oldBucket = bucketKey(p.center)
         p.count++
         // Learning slows continuously with experience, but never becomes completely rigid.
         val lr = (1.0 / sqrt(p.count.toDouble() + 24.0)).coerceIn(0.008, 0.10)
         for (i in p.center.indices) p.center[i] += lr * (x[i] - p.center[i])
         p.radiusEma = 0.95 * p.radiusEma + 0.05 * distance.coerceIn(0.0, 1.0)
+        reindexPrototype(p, oldBucket)
+    }
+
+    private fun bucketCoords(values: DoubleArray): IntArray = IntArray(values.size) { i ->
+        (values[i].coerceIn(0.0, 1.0) * 5.0).toInt().coerceIn(0, 4)
+    }
+
+    private fun bucketKey(values: DoubleArray): Int = bucketKey(bucketCoords(values))
+
+    private fun bucketKey(coords: IntArray): Int {
+        var key = 0
+        for (c in coords) key = key * 5 + c.coerceIn(0, 4)
+        return key
+    }
+
+    private fun candidatePrototypes(values: DoubleArray): List<Prototype> {
+        if (prototypes.isEmpty()) return emptyList()
+        val coords = bucketCoords(values)
+        val out = LinkedHashSet<Prototype>()
+        prototypeBuckets[bucketKey(coords)]?.let { out.addAll(it) }
+        for (axis in coords.indices) {
+            val original = coords[axis]
+            if (original > 0) {
+                coords[axis] = original - 1
+                prototypeBuckets[bucketKey(coords)]?.let { out.addAll(it) }
+            }
+            if (original < 4) {
+                coords[axis] = original + 1
+                prototypeBuckets[bucketKey(coords)]?.let { out.addAll(it) }
+            }
+            coords[axis] = original
+        }
+        return out.toList()
+    }
+
+    private fun indexPrototype(p: Prototype) {
+        prototypeBuckets.getOrPut(bucketKey(p.center)) { ArrayList() }.add(p)
+    }
+
+    private fun reindexPrototype(p: Prototype, oldBucket: Int) {
+        val newBucket = bucketKey(p.center)
+        if (oldBucket == newBucket) return
+        prototypeBuckets[oldBucket]?.let { list ->
+            list.remove(p)
+            if (list.isEmpty()) prototypeBuckets.remove(oldBucket)
+        }
+        prototypeBuckets.getOrPut(newBucket) { ArrayList() }.add(p)
+    }
+
+    private fun familiarity(p: Prototype): Double =
+        (p.count.toDouble() / (p.count.toDouble() + 24.0)).coerceIn(0.0, 1.0)
+
+    /**
+     * Familiar prototypes are allowed to resolve finer distinctions. This does not impose
+     * a global codebook capacity; it only changes the local split threshold.
+     */
+    private fun creationRadius(p: Prototype): Double {
+        val familiar = familiarity(p)
+        val structuralResolution = (1.0 - 1.0 / (1.0 + ln(1.0 + learnedStructureCount.toDouble()))).coerceIn(0.0, 0.85)
+        return (acceptanceRadius(p) * (1.08 - 0.34 * familiar - 0.16 * structuralResolution)).coerceAtLeast(0.024)
     }
 
     private fun acceptanceRadius(p: Prototype): Double {
@@ -354,9 +431,12 @@ class AdaptiveAudioQuantizer(private val context: Context) {
                     radiusEma = o.optDouble("radiusEma", 0.055).coerceIn(0.0, 1.0)
                 )
             }
+            prototypeBuckets.clear()
+            prototypes.forEach { indexPrototype(it) }
         }.onFailure {
             // Corrupt encoder state should never prevent the app from starting.
             prototypes.clear()
+            prototypeBuckets.clear()
             nextOrdinal = 1
         }
     }

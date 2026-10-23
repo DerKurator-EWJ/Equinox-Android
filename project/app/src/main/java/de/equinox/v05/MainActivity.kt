@@ -149,7 +149,7 @@ class MainActivity : ComponentActivity() {
             updateMemoryStats()
 
             if (::memoryAutoOrchestra.isInitialized && memoryAutoOrchestra.isChecked && !orchestra.isPlaying()) {
-                val state = outputBridge.snapshot(maxSoundMacros = 12)
+                val state = outputBridge.snapshot()
                 orchestra.play(state) { text ->
                     runOnUiThread { if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = text }
                 }
@@ -174,7 +174,7 @@ class MainActivity : ComponentActivity() {
             updateMemoryStats()
 
             if (::memoryAutoOrchestra.isInitialized && memoryAutoOrchestra.isChecked && !orchestra.isPlaying()) {
-                val state = outputBridge.snapshot(maxSoundMacros = 12)
+                val state = outputBridge.snapshot()
                 orchestra.play(state) { text ->
                     runOnUiThread { if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = text }
                 }
@@ -590,7 +590,7 @@ class MainActivity : ComponentActivity() {
             text = "MEMORY ALS ORCHESTER SPIELEN"
             setOnClickListener {
                 sonifier.stop()
-                val state = outputBridge.snapshot(maxSoundMacros = 12)
+                val state = outputBridge.snapshot()
                 orchestra.play(state) { text -> runOnUiThread { memoryOrchestraStatus.text = text } }
             }
         }, buttonParams(6))
@@ -778,10 +778,10 @@ class MainActivity : ComponentActivity() {
         }
         val bgInput = colorField("Hintergrund HEX", currentPrefs.backgroundColor)
         val edgeInput = colorField("Mikro-Kanten HEX", currentPrefs.audioEdgeColor)
-        val l1Input = colorField("L1 HEX", currentPrefs.macroLevel1Color)
-        val l2Input = colorField("L2 HEX", currentPrefs.macroLevel2Color)
-        val l3Input = colorField("L3 HEX", currentPrefs.macroLevel3Color)
-        val l4Input = colorField("L4 HEX", currentPrefs.macroLevel4Color)
+        val l1Input = colorField("F HEX", currentPrefs.macroLevel1Color)
+        val l2Input = colorField("E HEX", currentPrefs.macroLevel2Color)
+        val l3Input = colorField("D HEX", currentPrefs.macroLevel3Color)
+        val l4Input = colorField("C+ Basis HEX", currentPrefs.macroLevel4Color)
         val glowCheck = CheckBox(this).apply {
             text = "Glow aktiv"
             isChecked = currentPrefs.glowEnabled
@@ -1017,7 +1017,7 @@ class MainActivity : ComponentActivity() {
             setOnClickListener {
                 if (running) stopAudio()
                 sonifier.stop()
-                val state = outputBridge.snapshot(maxSoundMacros = 12)
+                val state = outputBridge.snapshot()
                 orchestra.play(state) { text -> runOnUiThread { labOrchestraStatus.text = text } }
             }
         }, buttonParams(6))
@@ -1130,7 +1130,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshHybridPage(ok: Boolean) {
         if (!::hybridCanvas.isInitialized) return
-        val state = outputBridge.snapshot(maxSoundMacros = 12)
+        val state = outputBridge.snapshot()
         hybridCanvas.setState(state)
         if (::hybridVideoCanvas.isInitialized) hybridVideoCanvas.setEngineState(state)
         val w = state.working
@@ -1153,7 +1153,7 @@ class MainActivity : ComponentActivity() {
         if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio: AUS"
         if (::startButton.isInitialized) startButton.isEnabled = !running
         if (::stopButton.isInitialized) stopButton.isEnabled = running
-        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · Lernen 8×6 · Video 48×27" else "Kamera: AUS"
+        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · Lernen adaptiv coarse→fine · Video adaptiv" else "Kamera: AUS"
         if (::cameraButton.isInitialized) cameraButton.isEnabled = !cameraRunning
         if (::cameraStopButton.isInitialized) cameraStopButton.isEnabled = cameraRunning
     }
@@ -1217,7 +1217,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshMemoryPage() {
         if (!::memoryCanvas.isInitialized) return
-        val state = outputBridge.snapshot(maxSoundMacros = 12)
+        val state = outputBridge.snapshot()
         memoryCanvas.setState(state)
         val w = state.working
         if (::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
@@ -1574,7 +1574,7 @@ class MainActivity : ComponentActivity() {
 
                             runOnUiThread {
                                 cameraFrames.text =
-                                    "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · +${result.createdThisFrame} neue IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
+                                    "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · Regionen ${result.sampledRegions} · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
                                 adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
                                 if (visualFrameCount % 2L == 0L) {
                                     updateMemoryStats()
@@ -1595,7 +1595,7 @@ class MainActivity : ComponentActivity() {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
                 cameraRunning = true
-                cameraStatus.text = "Kamera: AKTIV · Lernen 8×6 · Video 48×27"
+                cameraStatus.text = "Kamera: AKTIV · Lernen adaptiv coarse→fine · Video adaptiv"
                 cameraButton.isEnabled = false
                 cameraStopButton.isEnabled = true
                 refreshSensorUiState()
@@ -1695,12 +1695,12 @@ class MainActivity : ComponentActivity() {
 
     private fun adaptiveQuantizerText(): String {
         val s = adaptiveQuantizer.stats()
-        return "Adaptive-Codebook: ${s.prototypes}/4096 Prototypen · Frames ${s.acceptedFrames} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}${if (s.saturated) " · SATURIERT" else ""}"
+        return "Adaptive-Codebook: ${s.prototypes} Prototypen · offen · Frames ${s.acceptedFrames} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}"
     }
 
     private fun adaptiveVisualQuantizerText(): String {
         val s = adaptiveVisualQuantizer.stats()
-        return "Visual-Codebook: ${s.prototypes}/1024 Prototypen · Patches ${s.acceptedPatches} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}${if (s.saturated) " · SATURIERT" else ""}"
+        return "Visual-Codebook: ${s.prototypes} Prototypen · offen · Patches ${s.acceptedPatches} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}"
     }
 
     private fun updateMemoryStats() {
@@ -1711,7 +1711,9 @@ class MainActivity : ComponentActivity() {
 
     private fun memoryText(): String {
         val s = memory.stats()
-        val levelText = if (s.levelCounts.isEmpty()) "noch keine" else s.levelCounts.entries.joinToString(" · ") { "L${it.key}:${it.value}" }
+        adaptiveAudioQuantizer.updateStructureContext(s.adaptiveAudioMacros, s.macroRelations)
+        adaptiveVisualQuantizer.updateStructureContext(s.adaptiveVisualMacros, s.crossModalMacros)
+        val levelText = if (s.levelCounts.isEmpty()) "noch keine" else s.levelCounts.entries.joinToString(" · ") { "${AbstractionTier.labelForMacroDepth(it.key)}:${it.value}" }
         return "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
             "Audio-Alphabete: FFT ${s.fftAudioCodes} Q/${s.fftAudioMacros} M · Direct ${s.directAudioCodes} Q/${s.directAudioMacros} M · Adaptive ${s.adaptiveAudioCodes} Q/${s.adaptiveAudioMacros} M\n" +
             "Vision: adaptive ${s.adaptiveVisualCodes} Q/${s.adaptiveVisualMacros} M · visuell gesamt ${s.visualPersistentCodes} Q\n" +
@@ -1721,18 +1723,18 @@ class MainActivity : ComponentActivity() {
             "Predictive Recall: ${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Treffer ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%)\n" +
             "Hybrid: ${s.hybridSteps} interne Schritte | letzter Seed ${if (s.hybridSeedId == 0) "—" else s.hybridSeedId}\n" +
             "Dream: ${s.dreamSteps} Schritte | P ${s.dreamPredictionHops} · R ${s.dreamRelationHops} · S ${s.dreamSubstitutionHops} · X ${s.dreamCrossModalHops} · Restart ${s.dreamRestarts} | letzter Modus ${s.dreamLastMode}\n" +
-            "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
+            "Höchster aktiver Tier: ${s.highestActiveRank} · Reife-Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
             "Relevanz aktiv: Ø ${"%.3f".format(s.meanActiveRelevance)} | max ${"%.3f".format(s.highestActiveRelevance)} | Kontextentropie Ø ${"%.3f".format(s.meanActiveContextEntropy)} | Generalität max ${"%.3f".format(s.highestActiveGenerality)}\n" +
-            "Adaptive Hierarchie: L0 ${s.hierarchyBaseInputTokens} Token | Makro-Emissionen ${s.hierarchyBaseMacroEmissions} | gespart ${s.hierarchyBaseSavedTokens} (${"%.1f".format(s.hierarchyBaseCompressionGain * 100.0)}%) | ØSpan ${"%.2f".format(s.hierarchyMeanAcceptedSpan)} | Auto-Makros ${s.hierarchyAutoPromotions}\n" +
+            "Adaptive Hierarchie: Q ${s.hierarchyBaseInputTokens} Token | Makro-Emissionen ${s.hierarchyBaseMacroEmissions} | gespart ${s.hierarchyBaseSavedTokens} (${"%.1f".format(s.hierarchyBaseCompressionGain * 100.0)}%) | ØSpan ${"%.2f".format(s.hierarchyMeanAcceptedSpan)} | Auto-Makros ${s.hierarchyAutoPromotions}\n" +
             "Memory Competition: Läufe ${s.competitionRuns} | entfernt gesamt ${s.competitionMacrosPruned} M/${s.competitionRelationsPruned} R/${s.competitionCandidatesPruned} K | letzter Lauf ${s.competitionLastPruned} entfernt · ${s.competitionLastProtected} geschützt · Druckgruppen ${s.competitionLastPressuredGroups}\n" +
             "Long-Term Store: ${s.storageBackend} · ${s.storageBytes} Bytes · disk-backed Makros ${s.storageDiskBackedMacros}/${s.macroCodes} · Token-Lesezugriffe ${s.storageTokenReads}\n" +
-            "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}"
+            "Sequenz-/Kandidatenraum: offen · aktuell ${s.temporaryCodes} temporäre Kandidaten"
     }
 
     private fun consolidationSummary(result: ConsolidationResult): String {
-        val levelPart = if (result.highestNewLevel > 0) " · höchste neue Ebene L${result.highestNewLevel}" else ""
+        val levelPart = if (result.highestNewLevel > 0) " · höchste neue Stufe ${AbstractionTier.labelForMacroDepth(result.highestNewLevel)}" else ""
         val templatePart = if (result.templatesDiscovered > 0) " · +${result.templatesDiscovered} Templates" else ""
         val classPart = if (result.substitutionClassesDiscovered > 0) " · +${result.substitutionClassesDiscovered} Substitutionsklassen" else ""
         val competitionPart = if (result.competitionPruned > 0) " · -${result.competitionPruned} schwache Blatt-Makros" else ""

@@ -71,6 +71,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step22-autonomousmemorydream` | `Equinox_v06_Step22_AutonomousMemoryDream.zip` | 35 | 0 | `a60951613890d0dd81f16c68b5dc924158183aa790cb0bb76a73d2b0702ddb18` |
 | `android-v06-step23-indexedlongtermstorage` | `Equinox_v06_Step23_IndexedLongTermStorage.zip` | 36 | 0 | `792fb80781605b7e8b1cb5157ece5ba85b70ff48ddeaa3e037bd4f0d2b866639` |
 | `android-v06-step24-longtermhardtest` | `Equinox_v06_Step24_LongTermHardTest.zip` | 37 | 0 | `296d08fc00bcc456d8c15c921d243f5ffe3c0f5240f1e2bd97dbcfce8c28fb0c` |
+| `android-v06-step25-unboundedadaptiveresolution` | `Equinox_v06_Step25_UnboundedAdaptiveResolution.zip` | 39 | 0 | `9bb193b89e8420956315f1df2e918d3d587189608d29f17dc24bc86a90cbc92d` |
 
 ## Security, licensing, and limitations
 

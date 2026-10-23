@@ -10,15 +10,10 @@ import kotlin.math.max
 import kotlin.math.min
 
 private const val MACRO_ID_BASE = 1_000_000
-private const val MAX_ABSTRACTION_LEVEL = 4
 private const val MIN_PATTERN_LENGTH = 2
-private const val MAX_PATTERN_LENGTH = 6
-private const val MAX_PATTERN_CANDIDATES = 6_000
-private const val MAX_PROMOTIONS_PER_LEVEL = 8
 private const val AUTO_PROMOTION_COOLDOWN_BASE_TOKENS = 48L
 
 // Step 07/08: one-slot templates feed the sparse substitution-class layer.
-private const val MAX_TEMPLATE_BUCKETS = 12_000
 private const val MIN_TEMPLATE_LENGTH = 3
 private const val MIN_TEMPLATE_VARIANTS = 2
 private const val SLOT_TOKEN = Int.MIN_VALUE
@@ -27,20 +22,15 @@ private const val SLOT_TOKEN = Int.MIN_VALUE
 // Two macro tokens become structurally linked only when they can replace each other
 // in at least two distinct learned template roles.
 private const val MIN_SUBSTITUTION_ROLE_SUPPORT = 2
-private const val MAX_SUBSTITUTION_PAIR_INDEX = 24_000
-private const val MAX_CLASS_VARIANTS_PER_TEMPLATE = 24
 
-// Step 03: bounded event-driven working set.
-private const val MAX_ACTIVE_MACROS = 48
-private const val MAX_RETRIEVED_NEIGHBORS = 6
+// Step 25: event-driven working set with relevance-mass scaling; no fixed node count.
 private const val ACTIVE_TTL_OBSERVATIONS = 24L
 private const val ACTUAL_DECAY = 0.82
 private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
-// Step 15: sparse directional recall/prediction. Predictions are derived only from
-// already learned macro-to-macro transitions and materialized into the bounded working set.
-private const val MAX_PREDICTIONS_PER_EVENT = 4
+// Step 25: sparse directional recall/prediction. Prediction breadth is selected by probability mass,
+// not a fixed Top-k count.
 private const val MIN_PREDICTION_SUPPORT = 2L
 private const val MIN_PREDICTION_CONFIDENCE = 0.06
 
@@ -54,14 +44,11 @@ private const val HYBRID_CONTEXT_FLOOR = 0.22
 private const val MIN_CROSSMODAL_SUPPORT = 4L
 private const val CROSSMODAL_WINDOW_NS = 900_000_000L
 private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
-private const val MAX_RECENT_SENSOR_MACROS = 12
-private const val MAX_CROSSMODAL_PARTNERS_PER_EVENT = 3
-private const val MAX_CROSSMODAL_CANDIDATES = 4_000
 
 /**
  * v0.6 Step 23
  *
- * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
+ * Keeps the active working set, indexed lazy retrieval, structural tiers,
  * templates and substitution classes. Step 09 added a read-only multidimensional
  * relevance profile and now supports three isolated audio alphabets: legacy FFT
  * frequency IDs ("audio"), fixed 16-bit direct IDs ("audio_direct") and the learned
@@ -75,6 +62,8 @@ private const val MAX_CROSSMODAL_CANDIDATES = 4_000
  * predictions, ordinary relations, substitution alternatives and cross-modal bridges.
  * Step 23 replaces the monolithic JSON checkpoint with a compact indexed long-term store.
  * Macro headers stay lightweight in RAM while token payloads are disk-backed and read lazily.
+ * Step 25 removes semantic ceilings: hierarchy depth, working-set breadth, candidate/template counts
+ * and adaptive codebook sizes are evidence/resource-driven rather than fixed constants.
  * The coincidence clock is runtime-only and is never persisted into the learned identities.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
@@ -435,7 +424,7 @@ class MemoryModel(context: Context) {
     private var crossModalActivations = 0L
 
     // Step 07/08 structural generalization index. Each stable macro contributes at most
-    // MAX_PATTERN_LENGTH masked signatures; no pairwise macro comparison is required.
+    // one masked signature per token position; no pairwise macro comparison is required.
     private val templateBuckets = linkedMapOf<String, TemplateBucket>()
     private val templateSignaturesByMacro = mutableMapOf<Int, MutableSet<String>>()
 
@@ -642,20 +631,23 @@ class MemoryModel(context: Context) {
     /**
      * Event-driven / lazy pattern processing.
      *
-     * Cost per incoming token is bounded by MAX_PATTERN_LENGTH * abstraction levels.
-     * We never scan all stored macros. Existing macros are addressed directly by signature.
+     * Pattern horizon grows logarithmically with learned structure/experience. There is no
+     * abstraction ceiling and no global sequence-capacity number. Existing macros are still
+     * addressed directly by signature, so persistent memory is never globally scanned here.
      */
     private fun feedToken(streamLevel: Int, modality: String, tokenId: Int) {
-        if (streamLevel >= MAX_ABSTRACTION_LEVEL) return
-
         val streamKey = streamKey(streamLevel, modality)
         val streamPosition = (hierarchyStreamPositions[streamKey] ?: 0L) + 1L
         hierarchyStreamPositions[streamKey] = streamPosition
         if (streamLevel == 0) hierarchyBaseInputTokens++
 
+        val horizon = AdaptiveScalePolicy.patternHorizon(
+            macrosAtDepth = macros.size,
+            observationsAtDepth = streamPosition
+        )
         val buffer = rolling.getOrPut(streamKey) { ArrayDeque() }
         buffer.addLast(tokenId)
-        while (buffer.size > MAX_PATTERN_LENGTH) buffer.removeFirst()
+        while (buffer.size > horizon) buffer.removeFirst()
 
         val current = buffer.toList()
         val coveredUntilBeforeEvent = hierarchyCoveredUntil[streamKey] ?: 0L
@@ -667,7 +659,7 @@ class MemoryModel(context: Context) {
         val lastAutoPromotionAt = hierarchyLastAutoPromotionAt[streamKey] ?: Long.MIN_VALUE / 4L
         val autoPromotionAllowed = streamPosition - lastAutoPromotionAt >= promotionCooldown
 
-        for (length in MIN_PATTERN_LENGTH..minOf(MAX_PATTERN_LENGTH, current.size)) {
+        for (length in MIN_PATTERN_LENGTH..current.size) {
             val tail = current.takeLast(length)
             val signature = patternSignature(streamLevel, modality, tail)
 
@@ -689,15 +681,13 @@ class MemoryModel(context: Context) {
             val effectiveCandidate = if (candidate != null) {
                 candidate.hits++
                 candidate
-            } else if (candidates.size < MAX_PATTERN_CANDIDATES) {
+            } else {
                 PatternCandidate(
                     streamLevel = streamLevel,
                     modality = modality,
                     tokens = tail,
                     hits = 1L
                 ).also { candidates[signature] = it }
-            } else {
-                null
             }
 
             if (!macroFrozen && autoPromotionAllowed && effectiveCandidate != null) {
@@ -729,6 +719,8 @@ class MemoryModel(context: Context) {
             }
         }
 
+        pruneTransientCandidatePressureIfNeeded()
+
         // Step 13 emits only non-overlapping recognized spans upward. This makes each
         // abstraction stream genuinely shorter instead of recursively activating every
         // overlapping match. Lower-level raw input remains available in the level-0 alphabet.
@@ -755,7 +747,7 @@ class MemoryModel(context: Context) {
         autoPromotion: Boolean
     ): MacroCode? {
         if (macroFrozen || macroBySignature.containsKey(signature)) return null
-        if (candidate.streamLevel !in 0 until MAX_ABSTRACTION_LEVEL) return null
+        if (candidate.streamLevel < 0) return null
 
         val macro = MacroCode(
             id = nextMacroId++,
@@ -799,7 +791,7 @@ class MemoryModel(context: Context) {
         val relationStreamKey = streamKey(macro.level, macro.modality)
         val previous = previousActiveMacro[relationStreamKey]
 
-        // Evaluate the previous event's top-k forecast before creating the next one.
+        // Evaluate the previous event's probability-mass forecast before creating the next one.
         evaluatePendingPrediction(relationStreamKey, macro.id)
 
         // A-state: this macro actually occurred in the current live stream.
@@ -864,10 +856,10 @@ class MemoryModel(context: Context) {
 
         // Cross-modal learning is triggered only by real sensor macro activations. Retrieved
         // context/predictions never create joint memories. This may materialize one already
-        // supported audio+visual joint macro into the same bounded working set.
+        // supported audio+visual joint macro into the same adaptive working set.
         observeCrossModalEvidence(macro)
 
-        enforceWorkingSetLimit()
+        enforceAdaptiveWorkingSet()
 
         // The activated macro becomes one token for the next abstraction stream.
         feedToken(
@@ -886,23 +878,29 @@ class MemoryModel(context: Context) {
         pruneRecentSensorQueue(ownQueue, now)
         ownQueue.removeAll { it.macroId == source.id }
         ownQueue.addLast(RecentSensorMacro(source.id, now))
-        while (ownQueue.size > MAX_RECENT_SENSOR_MACROS) ownQueue.removeFirst()
 
         val otherQueue = recentSensorMacros.getValue(opposite)
         pruneRecentSensorQueue(otherQueue, now)
         if (otherQueue.isEmpty()) return
 
-        otherQueue.asSequence()
-            .mapNotNull { recent -> macros[recent.macroId] }
-            .filter { it.id != source.id }
-            .distinctBy { it.id }
-            .sortedByDescending { it.lastActivatedObservation }
-            .take(MAX_CROSSMODAL_PARTNERS_PER_EVENT)
-            .forEach { other ->
-                val audio = if (family == "audio") source else other
-                val visual = if (family == "vision") source else other
-                registerCrossModalPair(audio, visual, now)
-            }
+        val recentPartners = otherQueue.asSequence()
+            .mapNotNull { recent -> macros[recent.macroId]?.let { recent to it } }
+            .filter { (_, m) -> m.id != source.id }
+            .distinctBy { (_, m) -> m.id }
+            .sortedByDescending { (recent, _) -> recent.seenNs }
+            .toList()
+        val temporalWeights = recentPartners.map { (recent, _) ->
+            (1.0 - ((now - recent.seenNs).toDouble() / CROSSMODAL_WINDOW_NS.toDouble())).coerceIn(0.01, 1.0)
+        }
+        val totalTemporal = temporalWeights.sum().coerceAtLeast(1e-9)
+        var temporalMass = 0.0
+        recentPartners.forEachIndexed { index, (_, other) ->
+            if (temporalMass / totalTemporal >= AdaptiveScalePolicy.RETRIEVAL_MASS_TARGET && index > 0) return@forEachIndexed
+            temporalMass += temporalWeights[index]
+            val audio = if (family == "audio") source else other
+            val visual = if (family == "vision") source else other
+            registerCrossModalPair(audio, visual, now)
+        }
     }
 
     private fun pruneRecentSensorQueue(queue: ArrayDeque<RecentSensorMacro>, now: Long) {
@@ -927,7 +925,7 @@ class MemoryModel(context: Context) {
 
         val candidate = crossModalCandidates[signature]
         if (candidate == null) {
-            if (crossModalCandidates.size >= MAX_CROSSMODAL_CANDIDATES) return
+            pruneCrossModalCandidateEvidence(now)
             crossModalCandidates[signature] = CrossModalCandidate(
                 audioMacroId = audio.id,
                 visualMacroId = visual.id,
@@ -959,7 +957,7 @@ class MemoryModel(context: Context) {
         visual: MacroCode
     ): MacroCode? {
         crossModalByPair[signature]?.let { return macros[it] }
-        val level = (max(audio.level, visual.level) + 1).coerceAtMost(MAX_ABSTRACTION_LEVEL)
+        val level = max(audio.level, visual.level) + 1
         val joint = MacroCode(
             id = nextMacroId++,
             level = level,
@@ -982,7 +980,7 @@ class MemoryModel(context: Context) {
 
     /**
      * A joint macro is a live derived event, but it does not recursively manufacture sensor
-     * evidence. It enters the same bounded working set and a dedicated cross-modal sequence
+     * evidence. It enters the same adaptive working set and a dedicated cross-modal sequence
      * stream, so repeated joint events can still form higher cross-modal temporal structure.
      */
     private fun activateCrossModalMacro(joint: MacroCode, supportConfidence: Double) {
@@ -1047,7 +1045,7 @@ class MemoryModel(context: Context) {
         if (outgoing.isEmpty()) return emptyList()
         val total = outgoing.sumOf { it.second }.coerceAtLeast(1L).toDouble()
 
-        return outgoing.asSequence()
+        val ranked = outgoing.asSequence()
             .map { (targetId, support) ->
                 val share = support.toDouble() / total
                 val supportConfidence = support.toDouble() / (support.toDouble() + 4.0)
@@ -1060,18 +1058,27 @@ class MemoryModel(context: Context) {
             }
             .filter { it.confidence >= MIN_PREDICTION_CONFIDENCE }
             .sortedWith(compareByDescending<ActivePrediction> { it.confidence }.thenByDescending { it.support })
-            .take(MAX_PREDICTIONS_PER_EVENT)
-            .onEach { prediction ->
-                // B-state expectation only. Prediction itself is not a learned event.
-                touchAsContext(prediction.targetId, prediction.confidence)
-            }
             .toList()
+        if (ranked.isEmpty()) return emptyList()
+        val confidenceMass = ranked.sumOf { it.confidence }.coerceAtLeast(1e-9)
+        val selected = ArrayList<ActivePrediction>()
+        var accumulated = 0.0
+        for (prediction in ranked) {
+            selected += prediction
+            accumulated += prediction.confidence
+            if (accumulated / confidenceMass >= AdaptiveScalePolicy.PREDICTION_MASS_TARGET) break
+        }
+        selected.forEach { prediction ->
+            // B-state expectation only. Prediction itself is not a learned event.
+            touchAsContext(prediction.targetId, prediction.confidence)
+        }
+        return selected
     }
 
     /** Pull only indexed neighbors of one active macro into momentary context. */
     private fun retrieveNeighborsIntoWorkingSet(sourceId: Int, modality: String): List<Int> {
         val keys = relationIndex[sourceId] ?: return emptyList()
-        return keys.asSequence()
+        val ranked = keys.asSequence()
             .mapNotNull { key ->
                 val from = keyFrom(key)
                 val to = keyTo(key)
@@ -1082,12 +1089,18 @@ class MemoryModel(context: Context) {
                 Triple(other, weight, relationConfidenceByWeight(weight))
             }
             .sortedByDescending { it.second }
-            .take(MAX_RETRIEVED_NEIGHBORS)
-            .map { (id, _, expectation) ->
-                touchAsContext(id, expectation)
-                id
-            }
             .toList()
+        if (ranked.isEmpty()) return emptyList()
+        val totalWeight = ranked.sumOf { it.second.toDouble() }.coerceAtLeast(1e-9)
+        val selected = ArrayList<Int>()
+        var mass = 0.0
+        for ((id, weight, expectation) in ranked) {
+            touchAsContext(id, expectation)
+            selected += id
+            mass += weight.toDouble()
+            if (mass / totalWeight >= AdaptiveScalePolicy.RETRIEVAL_MASS_TARGET) break
+        }
+        return selected
     }
 
     private fun touchAsContext(id: Int, expected: Double) {
@@ -1159,16 +1172,26 @@ class MemoryModel(context: Context) {
         }
     }
 
-    private fun enforceWorkingSetLimit() {
-        if (activeWorking.size <= MAX_ACTIVE_MACROS) return
-        val keepIds = activeWorking.entries
-            .sortedByDescending { (_, state) ->
-                state.actual * 2.0 + state.expected + abs(state.exchangeBias) * 0.5 -
-                    (observations - state.lastTouchedObservation).coerceAtLeast(0L) * 0.01
+    private fun enforceAdaptiveWorkingSet() {
+        if (activeWorking.isEmpty()) return
+        val ranked = activeWorking.entries
+            .map { entry ->
+                val state = entry.value
+                val score = (state.actual * 2.0 + state.expected + abs(state.exchangeBias) * 0.5 -
+                    (observations - state.lastTouchedObservation).coerceAtLeast(0L) * 0.01).coerceAtLeast(0.0)
+                entry to score
             }
-            .take(MAX_ACTIVE_MACROS)
-            .map { it.key }
-            .toSet()
+            .sortedByDescending { it.second }
+        val mandatory = ranked.filter { it.first.value.actual >= 0.50 }.map { it.first.key }.toMutableSet()
+        val total = ranked.sumOf { it.second }.coerceAtLeast(1e-9)
+        var mass = ranked.filter { it.first.key in mandatory }.sumOf { it.second }
+        val keepIds = mandatory
+        for ((entry, score) in ranked) {
+            if (entry.key in keepIds) continue
+            if (mass / total >= AdaptiveScalePolicy.WORKING_MASS_TARGET && keepIds.isNotEmpty()) break
+            keepIds += entry.key
+            mass += score
+        }
         activeWorking.keys.retainAll(keepIds)
     }
 
@@ -1195,8 +1218,9 @@ class MemoryModel(context: Context) {
         var created = 0
         var highest = 0
 
-        for (sourceLevel in 0 until MAX_ABSTRACTION_LEVEL) {
-            val eligible = candidates.entries
+        val sourceLevels = candidates.values.map { it.streamLevel }.distinct().sorted()
+        for (sourceLevel in sourceLevels) {
+            val eligibleAll = candidates.entries
                 .asSequence()
                 .filter { (_, c) -> c.streamLevel == sourceLevel }
                 .mapNotNull { entry ->
@@ -1210,8 +1234,8 @@ class MemoryModel(context: Context) {
                     if (score.eligible) Triple(entry.key, c, score) else null
                 }
                 .sortedByDescending { it.third.priority }
-                .take(MAX_PROMOTIONS_PER_LEVEL)
                 .toList()
+            val eligible = eligibleAll.take(AdaptiveScalePolicy.promotionBudget(eligibleAll.size))
 
             for ((signature, c, _) in eligible) {
                 val macro = promoteCandidate(signature, c, autoPromotion = false) ?: continue
@@ -1239,6 +1263,27 @@ class MemoryModel(context: Context) {
         )
     }
 
+    private fun pruneTransientCandidatePressureIfNeeded() {
+        val target = AdaptiveScalePolicy.candidateSoftTarget(quants.size, macros.size)
+        if (candidates.size <= target * 2) return
+        val keep = candidates.entries
+            .sortedWith(compareByDescending<Map.Entry<String, PatternCandidate>> { it.value.hits }
+                .thenByDescending { it.value.tokens.size })
+            .take(target)
+            .associate { it.key to it.value }
+        candidates.clear()
+        candidates.putAll(keep)
+    }
+
+    private fun pruneCrossModalCandidateEvidence(now: Long) {
+        val staleAfter = CROSSMODAL_WINDOW_NS * 6L
+        val it = crossModalCandidates.iterator()
+        while (it.hasNext()) {
+            val (_, candidate) = it.next()
+            if (now - candidate.lastEvidenceNs > staleAfter && candidate.hits < MIN_CROSSMODAL_SUPPORT) it.remove()
+        }
+    }
+
     private fun decayCandidates() {
         val iterator = candidates.iterator()
         while (iterator.hasNext()) {
@@ -1256,18 +1301,26 @@ class MemoryModel(context: Context) {
     private fun representativeHzOf(id: Int): Double? =
         quants[id]?.representativeHz ?: macros[id]?.representativeHz
 
-    private fun leafHzOf(id: Int, depth: Int = 0): List<Double> {
-        if (depth > MAX_ABSTRACTION_LEVEL + 2) return emptyList()
-        quants[id]?.let { q ->
-            return when {
-                q.representativeHz > 0.0 -> listOf(q.representativeHz)
-                q.modality == "audio_adaptive" -> listOf(AdaptiveAudioQuantizer.projectionHzForId(id))
-                q.modality == "audio_direct" -> listOf(DirectAudioQuantizer.projectionHzForId(id))
-                else -> emptyList()
+    private fun leafHzOf(id: Int): List<Double> {
+        val out = ArrayList<Double>()
+        val stack = ArrayDeque<Int>()
+        val visited = HashSet<Int>()
+        stack.addLast(id)
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            if (!visited.add(current)) continue
+            val q = quants[current]
+            if (q != null) {
+                when {
+                    q.representativeHz > 0.0 -> out += q.representativeHz
+                    q.modality == "audio_adaptive" -> out += AdaptiveAudioQuantizer.projectionHzForId(current)
+                    q.modality == "audio_direct" -> out += DirectAudioQuantizer.projectionHzForId(current)
+                }
+                continue
             }
+            macros[current]?.tokens?.forEach { stack.addLast(it) }
         }
-        val macro = macros[id] ?: return emptyList()
-        return macro.tokens.flatMap { leafHzOf(it, depth + 1) }
+        return out
     }
 
     /**
@@ -1322,7 +1375,7 @@ class MemoryModel(context: Context) {
         lastRetrievedCount = retrieved.size
         lastExchangePairs = values.size
         lastMeanAbsExchange = if (values.isEmpty()) 0.0 else values.average()
-        enforceWorkingSetLimit()
+        enforceAdaptiveWorkingSet()
 
         memoryPlaybackSteps++
         memoryPlaybackCursor = predictions.maxByOrNull { it.confidence }?.targetId
@@ -1414,7 +1467,7 @@ class MemoryModel(context: Context) {
         lastRetrievedCount = retrieved.size
         lastExchangePairs = values.size
         lastMeanAbsExchange = if (values.isEmpty()) 0.0 else values.average()
-        enforceWorkingSetLimit()
+        enforceAdaptiveWorkingSet()
 
         rememberDreamId(seed.id)
         dreamPlaybackSteps++
@@ -1451,15 +1504,12 @@ class MemoryModel(context: Context) {
                 Triple(other, weight, relationConfidenceByWeight(weight))
             }
             .sortedByDescending { it.second }
-            .take(8)
             .forEach { (id, _, confidence) -> offer(id, DreamHopKind.RELATION, 0.42 + 0.72 * confidence) }
 
         dreamSubstitutionAlternatives(seed.id, seed.modality)
-            .take(8)
             .forEach { id -> offer(id, DreamHopKind.SUBSTITUTION, 0.56) }
 
         dreamCrossModalAlternatives(seed.id)
-            .take(8)
             .forEach { id -> offer(id, DreamHopKind.CROSSMODAL, 0.66) }
 
         return choices.values.toList()
@@ -1498,7 +1548,6 @@ class MemoryModel(context: Context) {
             .filter { it != sourceId && macros[it]?.modality == modality }
             .distinct()
             .sortedByDescending { macros[it]?.weight ?: 0L }
-            .take(12)
             .toList()
 
     private fun dreamCrossModalAlternatives(sourceId: Int): List<Int> {
@@ -1506,13 +1555,11 @@ class MemoryModel(context: Context) {
         if (source.modality == "crossmodal") {
             return source.tokens.asSequence()
                 .filter { macros.containsKey(it) }
-                .take(8)
-                .toList()
+                    .toList()
         }
         return crossModalMemberIndex[sourceId].orEmpty().asSequence()
             .filter { macros[it]?.modality == "crossmodal" }
             .sortedByDescending { macros[it]?.weight ?: 0L }
-            .take(8)
             .toList()
     }
 
@@ -1524,7 +1571,6 @@ class MemoryModel(context: Context) {
                     .thenByDescending { it.level }
                     .thenByDescending { it.weight }
             )
-            .take(32)
             .toList()
         if (top.isEmpty()) return null
         val preferred = top.filter { it.id !in recentDreamIds }.ifEmpty { top }
@@ -1535,7 +1581,8 @@ class MemoryModel(context: Context) {
     private fun rememberDreamId(id: Int) {
         recentDreamIds.remove(id)
         recentDreamIds.addLast(id)
-        while (recentDreamIds.size > 12) recentDreamIds.removeFirst()
+        val recentTarget = kotlin.math.max(8, kotlin.math.sqrt(macros.size.coerceAtLeast(1).toDouble()).toInt())
+        while (recentDreamIds.size > recentTarget) recentDreamIds.removeFirst()
     }
 
     /**
@@ -1588,7 +1635,7 @@ class MemoryModel(context: Context) {
         lastRetrievedCount = retrieved.size
         lastExchangePairs = values.size
         lastMeanAbsExchange = if (values.isEmpty()) 0.0 else values.average()
-        enforceWorkingSetLimit()
+        enforceAdaptiveWorkingSet()
 
         hybridPlaybackSteps++
         lastHybridSeedId = seed.id
@@ -1637,7 +1684,6 @@ class MemoryModel(context: Context) {
         // relation index and therefore do not scan the entire memory on every tick.
         val top = macros.values
             .sortedWith(compareByDescending<MacroCode> { it.weight }.thenByDescending { it.level })
-            .take(24)
         if (top.isEmpty()) return null
         return top[(memoryPlaybackSteps % top.size.toLong()).toInt()]
     }
@@ -1654,7 +1700,6 @@ class MemoryModel(context: Context) {
                 other to weight
             }
             .sortedByDescending { it.second }
-            .take(4)
             .toList()
 
         if (local.isNotEmpty()) {
@@ -1670,7 +1715,6 @@ class MemoryModel(context: Context) {
             .asSequence()
             .filter { it.id != sourceId }
             .sortedWith(compareByDescending<MacroCode> { it.weight }.thenByDescending { it.level })
-            .take(24)
             .toList()
         if (fallback.isEmpty()) return sourceId
         return fallback[(memoryPlaybackSteps % fallback.size.toLong()).toInt()].id
@@ -1714,7 +1758,7 @@ class MemoryModel(context: Context) {
             .map { it.key }
             .toSet()
 
-        val selectedMacros = (1..MAX_ABSTRACTION_LEVEL).flatMap { level ->
+        val selectedMacros = macros.values.map { it.level }.distinct().sorted().flatMap { level ->
             macros.values
                 .filter { it.level == level }
                 .sortedWith(
@@ -1859,13 +1903,13 @@ class MemoryModel(context: Context) {
     }
 
     @Synchronized
-    fun workingSetSnapshot(maxNodes: Int = MAX_ACTIVE_MACROS): WorkingSetSnapshot {
+    fun workingSetSnapshot(maxNodes: Int = Int.MAX_VALUE): WorkingSetSnapshot {
         val selected = activeWorking.entries
             .filter { macros.containsKey(it.key) }
             .sortedByDescending { (_, state) ->
                 state.actual * 2.0 + state.expected + abs(state.exchangeBias) * 0.5
             }
-            .take(maxNodes)
+            .let { list -> if (maxNodes == Int.MAX_VALUE) list else list.take(maxNodes) }
 
         val selectedIds = selected.map { it.key }.toSet()
         val nodes = selected.mapNotNull { (id, state) ->
@@ -1901,14 +1945,12 @@ class MemoryModel(context: Context) {
                 ActiveExchange(a, b, value)
             }
             .sortedByDescending { abs(it.value) }
-            .take(maxNodes * 2)
-            .toList()
+            .let { seq -> if (maxNodes == Int.MAX_VALUE) seq.toList() else seq.take((maxNodes * 2).coerceAtLeast(maxNodes)).toList() }
 
         val predictions = currentPredictions
             .asSequence()
             .filter { it.sourceId in selectedIds && it.targetId in selectedIds }
             .sortedByDescending { it.confidence }
-            .take(MAX_PREDICTIONS_PER_EVENT)
             .toList()
 
         val crossModalLinks = selected.asSequence()
@@ -1927,7 +1969,6 @@ class MemoryModel(context: Context) {
                     confidence = (state.actual * 0.7 + state.expected * 0.3).coerceIn(0.0, 1.0)
                 )
             }
-            .take(12)
             .toList()
 
         return WorkingSetSnapshot(nodes, exchanges, predictions, crossModalLinks)
@@ -1992,8 +2033,8 @@ class MemoryModel(context: Context) {
             longestSequenceLength = longest,
             visualPersistentCodes = quants.values.count { it.modality.startsWith("vision") },
             crossModalRelations = macros.values.count { it.modality == "crossmodal" },
-            sequenceCapacity = MAX_PATTERN_CANDIDATES,
-            sequenceCapacityUsedPercent = candidates.size * 100.0 / MAX_PATTERN_CANDIDATES.toDouble(),
+            sequenceCapacity = 0,
+            sequenceCapacityUsedPercent = 0.0,
             activeMacros = activeWorking.size,
             retrievedMacros = activeWorking.values.count { it.retrieved },
             overexchangePairs = lastExchangePairs,
@@ -2297,7 +2338,7 @@ class MemoryModel(context: Context) {
             longTermStore.readMacroHeaders().forEach { h ->
                 val macro = MacroCode(
                     id = h.id,
-                    level = h.level.coerceIn(1, MAX_ABSTRACTION_LEVEL),
+                    level = h.level.coerceAtLeast(1),
                     modality = h.modality,
                     tokens = longTermStore.tokenList(h.tokenOffsetBytes, h.tokenCount),
                     weight = h.weight,
@@ -2355,7 +2396,7 @@ class MemoryModel(context: Context) {
                 for (j in 0 until tokenJson.length()) tokens += tokenJson.getInt(j)
                 val macro = MacroCode(
                     id = o.getInt("id"),
-                    level = o.optInt("level", 1).coerceIn(1, MAX_ABSTRACTION_LEVEL),
+                    level = o.optInt("level", 1).coerceAtLeast(1),
                     modality = o.optString("modality", "audio"),
                     tokens = tokens,
                     weight = o.optLong("weight", 0L),
@@ -2449,7 +2490,6 @@ class MemoryModel(context: Context) {
             val signature = templateSignature(macro.level, macro.modality, macro.tokens, slot)
             var bucket = templateBuckets[signature]
             if (bucket == null) {
-                if (templateBuckets.size >= MAX_TEMPLATE_BUCKETS) continue
                 val pattern = macro.tokens.toMutableList().apply { this[slot] = SLOT_TOKEN }
                 bucket = TemplateBucket(
                     signature = signature,
@@ -2475,20 +2515,15 @@ class MemoryModel(context: Context) {
                 )
 
                 // Count one unit of evidence per distinct structural role in which two
-                // macro tokens are observed as alternatives. The local cap keeps a very
-                // broad template from creating an unbounded pair burst.
+                // macro tokens are observed as alternatives. There is no global pair-count ceiling;
+                // only actually observed alternatives create sparse evidence.
                 bucket.variants.asSequence()
                     .filter { macros.containsKey(it) }
-                    .take(MAX_CLASS_VARIANTS_PER_TEMPLATE)
                     .forEach { other ->
                         if (other == variant) return@forEach
                         val key = canonicalPairKey(variant, other)
-                        if (substitutionPairSupport.containsKey(key) ||
-                            substitutionPairSupport.size < MAX_SUBSTITUTION_PAIR_INDEX
-                        ) {
-                            substitutionPairSupport[key] = (substitutionPairSupport[key] ?: 0) + 1
-                            substitutionClassesDirty = true
-                        }
+                        substitutionPairSupport[key] = (substitutionPairSupport[key] ?: 0) + 1
+                        substitutionClassesDirty = true
                     }
             }
 
@@ -2504,7 +2539,7 @@ class MemoryModel(context: Context) {
         substitutionTokenMeta.clear()
         substitutionClassesCache = emptyList()
         substitutionClassesDirty = true
-        // Higher-weight structures get first access if the bounded index ever fills.
+        // Rebuild all observed template roles; no global template-bucket ceiling remains.
         macros.values
             .sortedWith(compareByDescending<MacroCode> { it.weight }.thenByDescending { it.level })
             .forEach { indexMacroForTemplates(it) }
@@ -2647,7 +2682,7 @@ class MemoryModel(context: Context) {
      * candidates, not semantic categories.
      */
     @Synchronized
-    fun substitutionClassSnapshot(maxClasses: Int = 24): List<SubstitutionClassSummary> =
+    fun substitutionClassSnapshot(maxClasses: Int = Int.MAX_VALUE): List<SubstitutionClassSummary> =
         derivedSubstitutionClasses()
             .asSequence()
             .map { clazz ->
@@ -2667,8 +2702,7 @@ class MemoryModel(context: Context) {
                     .thenByDescending { it.roleEvidence }
                     .thenByDescending { it.members.size }
             )
-            .take(maxClasses.coerceAtLeast(0))
-            .toList()
+            .let { seq -> if (maxClasses == Int.MAX_VALUE) seq.toList() else seq.take(maxClasses.coerceAtLeast(0)).toList() }
 
     /**
      * Memory-only playback can use structural alternatives as a fallback when the
@@ -2684,7 +2718,6 @@ class MemoryModel(context: Context) {
             .asSequence()
             .filter { it != sourceId && macros[it]?.modality == modality }
             .sortedByDescending { macros[it]?.weight ?: 0L }
-            .take(12)
             .toList()
 
         if (alternatives.isEmpty()) return null
@@ -2748,7 +2781,10 @@ class MemoryModel(context: Context) {
         var examined = 0
 
         for ((_, group) in grouped) {
-            val pressure = group.size > MemoryCompetitionPolicy.HARD_MACROS_PER_STREAM
+            val groupLevel = group.maxOfOrNull { it.level } ?: 1
+            val targetForGroup = MemoryCompetitionPolicy.targetMacrosForStream(observations, groupLevel)
+            val pressureLimit = MemoryCompetitionPolicy.pressureMacrosForStream(observations, groupLevel)
+            val pressure = group.size > pressureLimit
             if (pressure) pressuredGroups++
 
             val candidatesForGroup = ArrayList<Candidate>()
@@ -2778,11 +2814,11 @@ class MemoryModel(context: Context) {
             }
 
             if (candidatesForGroup.isEmpty()) continue
-            val pressureNeed = (group.size - MemoryCompetitionPolicy.TARGET_MACROS_PER_STREAM).coerceAtLeast(0)
+            val pressureNeed = (group.size - targetForGroup).coerceAtLeast(0)
             val budget = if (pressure) {
-                pressureNeed.coerceAtMost(MemoryCompetitionPolicy.MAX_PRUNE_PER_RUN - removeIds.size)
+                pressureNeed
             } else if (force) {
-                minOf(16, MemoryCompetitionPolicy.MAX_PRUNE_PER_RUN - removeIds.size)
+                MemoryCompetitionPolicy.forcedPruneBudget(candidatesForGroup.size)
             } else 0
             if (budget <= 0) continue
 
@@ -2804,7 +2840,6 @@ class MemoryModel(context: Context) {
                 .take(budget)
                 .forEach { removeIds += it.macro.id }
 
-            if (removeIds.size >= MemoryCompetitionPolicy.MAX_PRUNE_PER_RUN) break
         }
 
         if (removeIds.isEmpty()) {
@@ -2860,7 +2895,7 @@ class MemoryModel(context: Context) {
             }
         }
 
-        // Rebuild bounded derived indexes from surviving identities. This is maintenance-time
+        // Rebuild sparse derived indexes from surviving identities. This is maintenance-time
         // work only and never runs per audio frame.
         macroParentUseCount.clear()
         rebuildCrossModalIndex()
@@ -2889,8 +2924,11 @@ class MemoryModel(context: Context) {
     }
 
     private fun pruneMacroRelations() {
-        if (macroRelations.size > 4096) {
-            val keep = macroRelations.entries.sortedByDescending { it.value }.take(3072)
+        // Relation storage scales with the amount of learned macro structure. This is a soft
+        // pressure policy, not a semantic relation-count ceiling.
+        val relationTarget = max(1_024, macros.size * 8 + activeWorking.size * 12)
+        if (macroRelations.size > relationTarget * 2) {
+            val keep = macroRelations.entries.sortedByDescending { it.value }.take(relationTarget)
             macroRelations.clear()
             relationIndex.clear()
             keep.forEach {
@@ -2899,10 +2937,11 @@ class MemoryModel(context: Context) {
             }
         }
 
-        if (exchangeMemory.size > 4096) {
+        val exchangeTarget = max(1_024, macros.size * 6 + activeWorking.size * 12)
+        if (exchangeMemory.size > exchangeTarget * 2) {
             val keepExchange = exchangeMemory.entries
                 .sortedByDescending { abs(it.value.ema) * min(64L, it.value.samples).toDouble() }
-                .take(3072)
+                .take(exchangeTarget)
             exchangeMemory.clear()
             keepExchange.forEach { exchangeMemory[it.key] = it.value }
         }
@@ -2968,11 +3007,22 @@ class MemoryModel(context: Context) {
         return DirectAudioQuantizer.projectionHzForId(-((macro.id % 65_536) + 1))
     }
 
-    private fun leafIdsOfModality(id: Int, modality: String, depth: Int = 0): List<Int> {
-        if (depth > MAX_ABSTRACTION_LEVEL + 2) return emptyList()
-        quants[id]?.let { q -> return if (q.modality == modality) listOf(id) else emptyList() }
-        val macro = macros[id] ?: return emptyList()
-        return macro.tokens.flatMap { leafIdsOfModality(it, modality, depth + 1) }
+    private fun leafIdsOfModality(id: Int, modality: String): List<Int> {
+        val out = ArrayList<Int>()
+        val stack = ArrayDeque<Int>()
+        val visited = HashSet<Int>()
+        stack.addLast(id)
+        while (stack.isNotEmpty()) {
+            val current = stack.removeLast()
+            if (!visited.add(current)) continue
+            val q = quants[current]
+            if (q != null) {
+                if (q.modality == modality) out += current
+                continue
+            }
+            macros[current]?.tokens?.forEach { stack.addLast(it) }
+        }
+        return out
     }
 
     private fun streamKey(level: Int, modality: String): String = "$modality|$level"

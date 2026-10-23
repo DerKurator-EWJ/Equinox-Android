@@ -2,16 +2,22 @@ package de.equinox.v05
 
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import java.util.PriorityQueue
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.sqrt
 
-/** One adaptive appearance identity observed at one sensor-grid role. */
+/** One adaptive appearance identity observed at one dynamically resolved region. */
 data class VisualObservation(
     val tokenId: Int,
     val packedRgb: Int,
     val cellIndex: Int,
     val prototypeCreated: Boolean,
-    val matchDistance: Double
+    val matchDistance: Double,
+    val resolutionDepth: Int = 0,
+    val centerX: Double = 0.5,
+    val centerY: Double = 0.5,
+    val familiarity: Double = 0.0
 )
 
 data class VisualFrameResult(
@@ -19,15 +25,23 @@ data class VisualFrameResult(
     val averageRgb: Int,
     val codebookSize: Int,
     val createdThisFrame: Int,
-    val meanMatchDistance: Double
+    val meanMatchDistance: Double,
+    val meanFamiliarity: Double = 0.0,
+    val maxResolutionDepth: Int = 0,
+    val sampledRegions: Int = 0
 )
 
 /**
- * Step 20 camera analyzer with two strictly separated outputs:
- * - slow 8x6 adaptive observations for learning,
- * - faster 48x27 RGB pigment frames for the read-only video renderer.
+ * Step 25 adaptive coarse-to-fine camera analyzer.
  *
- * The video frame is never persisted and never becomes a second memory representation.
+ * The old 8x6 learning raster is now only the entry lattice. Every coarse region may split
+ * into 2x2 children. Familiar regions receive progressively finer analysis, while new or
+ * surprising regions receive temporary exploratory refinement so that novelty is not trapped
+ * at low resolution. There is no configured maximum depth; recursion stops at the natural
+ * pixel granularity of the camera frame or when the current device-time budget is exhausted.
+ *
+ * Output pigment resolution is also dynamic. It scales with learned familiarity/detail and is
+ * bounded only by the source frame dimensions plus the adaptive work budget, not by 48x27.
  */
 class VisualGridAnalyzer(
     private val quantizer: AdaptiveVisualQuantizer,
@@ -36,16 +50,35 @@ class VisualGridAnalyzer(
 ) : ImageAnalysis.Analyzer {
 
     companion object {
-        const val GRID_W = 8
-        const val GRID_H = 6
-        const val VIDEO_W = 48
-        const val VIDEO_H = 27
+        const val BASE_GRID_W = 8
+        const val BASE_GRID_H = 6
         private const val MIN_LEARNING_FRAME_INTERVAL_MS = 650L
         private const val MIN_VIDEO_FRAME_INTERVAL_MS = 90L
+        private const val TARGET_LEARNING_WORK_MS = 70L
     }
+
+    private data class Region(
+        val x0: Int,
+        val y0: Int,
+        val x1: Int,
+        val y1: Int,
+        val depth: Int,
+        val priority: Double
+    ) {
+        val width: Int get() = (x1 - x0).coerceAtLeast(1)
+        val height: Int get() = (y1 - y0).coerceAtLeast(1)
+    }
+
+    private data class RegionSample(
+        val rgb: Int,
+        val features: DoubleArray
+    )
 
     private var lastLearningFrameMs = 0L
     private var lastVideoFrameMs = 0L
+    private var adaptivePatchBudget = BASE_GRID_W * BASE_GRID_H * 2
+    private var lastMeanFamiliarity = 0.0
+    private var lastMaxDepth = 0
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -63,85 +96,124 @@ class VisualGridAnalyzer(
 
             if (videoDue) {
                 lastVideoFrameMs = now
-                val raw = IntArray(VIDEO_W * VIDEO_H)
-                for (gy in 0 until VIDEO_H) {
-                    for (gx in 0 until VIDEO_W) {
-                        val x = (((gx + 0.5) / VIDEO_W) * width).toInt().coerceIn(0, width - 1)
-                        val y = (((gy + 0.5) / VIDEO_H) * height).toInt().coerceIn(0, height - 1)
-                        raw[gy * VIDEO_W + gx] = sampleRgb(x, y, yPlane, uPlane, vPlane)
+                val detailFactor = 1.0 + 1.7 * lastMeanFamiliarity + 0.22 * lastMaxDepth.toDouble()
+                val desiredCells = (48.0 * 27.0 * detailFactor).toInt().coerceAtLeast(48 * 27)
+                val aspect = width.toDouble() / height.coerceAtLeast(1).toDouble()
+                val videoH = sqrt(desiredCells / aspect).toInt().coerceIn(1, height)
+                val videoW = (videoH * aspect).toInt().coerceIn(1, width)
+                val raw = IntArray(videoW * videoH)
+                for (gy in 0 until videoH) {
+                    for (gx in 0 until videoW) {
+                        val x = (((gx + 0.5) / videoW) * width).toInt().coerceIn(0, width - 1)
+                        val y = (((gy + 0.5) / videoH) * height).toInt().coerceIn(0, height - 1)
+                        raw[gy * videoW + gx] = sampleRgb(x, y, yPlane, uPlane, vPlane)
                     }
                 }
-                val rotated = rotateGrid(raw, VIDEO_W, VIDEO_H, image.imageInfo.rotationDegrees)
+                val rotated = rotateGrid(raw, videoW, videoH, image.imageInfo.rotationDegrees)
                 onVideoFrame?.invoke(VideoFrameSnapshot(rotated.first, rotated.second, rotated.third, now))
             }
 
             if (!learningDue) return
             lastLearningFrameMs = now
+            val workStartNs = System.nanoTime()
 
-            val rgbGrid = IntArray(GRID_W * GRID_H)
-            val lum = DoubleArray(GRID_W * GRID_H)
-            var sumR = 0L
-            var sumG = 0L
-            var sumB = 0L
+            val observations = ArrayList<VisualObservation>()
+            val queue = PriorityQueue<Region>(compareByDescending<Region> { it.priority }.thenBy { it.depth })
 
-            for (gy in 0 until GRID_H) {
-                for (gx in 0 until GRID_W) {
-                    val x = (((gx + 0.5) / GRID_W) * width).toInt().coerceIn(0, width - 1)
-                    val y = (((gy + 0.5) / GRID_H) * height).toInt().coerceIn(0, height - 1)
-                    val rgb = sampleRgb(x, y, yPlane, uPlane, vPlane)
-                    val idx = gy * GRID_W + gx
-                    rgbGrid[idx] = rgb
-                    val r = (rgb shr 16) and 0xff
-                    val g = (rgb shr 8) and 0xff
-                    val b = rgb and 0xff
-                    lum[idx] = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
-                    sumR += r; sumG += g; sumB += b
+            // The base lattice guarantees whole-frame coverage before detail is allocated.
+            for (gy in 0 until BASE_GRID_H) {
+                val y0 = (gy * height) / BASE_GRID_H
+                val y1 = ((gy + 1) * height) / BASE_GRID_H
+                for (gx in 0 until BASE_GRID_W) {
+                    val x0 = (gx * width) / BASE_GRID_W
+                    val x1 = ((gx + 1) * width) / BASE_GRID_W
+                    queue.add(Region(x0, y0, x1, y1, 0, 1.0))
                 }
             }
 
-            val observations = ArrayList<VisualObservation>(GRID_W * GRID_H)
             var created = 0
             var distanceSum = 0.0
             var distanceCount = 0
+            var familiaritySum = 0.0
+            var maxDepth = 0
+            var rgbSumR = 0L
+            var rgbSumG = 0L
+            var rgbSumB = 0L
+            var processed = 0
 
-            for (gy in 0 until GRID_H) {
-                for (gx in 0 until GRID_W) {
-                    val idx = gy * GRID_W + gx
-                    val rgb = rgbGrid[idx]
-                    val r = (rgb shr 16) and 0xff
-                    val g = (rgb shr 8) and 0xff
-                    val b = rgb and 0xff
-                    val maxC = max(r, max(g, b))
-                    val minC = minOf(r, g, b)
-                    val saturation = (maxC - minC) / 255.0
-                    val chromaRg = ((r - g) / 510.0 + 0.5).coerceIn(0.0, 1.0)
-                    val chromaBg = ((b - g) / 510.0 + 0.5).coerceIn(0.0, 1.0)
+            while (queue.isNotEmpty() && processed < adaptivePatchBudget) {
+                val region = queue.remove()
+                val sample = sampleRegion(region, yPlane, uPlane, vPlane)
+                val q = quantizer.quantize(sample.features, sample.rgb)
+                val noveltyRatio = if (q.created || q.acceptanceRadius <= 1e-9) 2.0 else q.matchDistance / q.acceptanceRadius
 
-                    fun l(xx: Int, yy: Int): Double = lum[yy.coerceIn(0, GRID_H - 1) * GRID_W + xx.coerceIn(0, GRID_W - 1)]
-                    val center = lum[idx]
-                    val left = l(gx - 1, gy)
-                    val right = l(gx + 1, gy)
-                    val up = l(gx, gy - 1)
-                    val down = l(gx, gy + 1)
-                    val localContrast = ((abs(center - left) + abs(center - right) + abs(center - up) + abs(center - down)) * 0.25).coerceIn(0.0, 1.0)
-                    val gradX = ((right - left) * 0.5 + 0.5).coerceIn(0.0, 1.0)
-                    val gradY = ((down - up) * 0.5 + 0.5).coerceIn(0.0, 1.0)
+                val cx = (region.x0 + region.x1) * 0.5 / width.coerceAtLeast(1).toDouble()
+                val cy = (region.y0 + region.y1) * 0.5 / height.coerceAtLeast(1).toDouble()
+                observations += VisualObservation(
+                    tokenId = q.id,
+                    packedRgb = q.displayColor,
+                    cellIndex = processed,
+                    prototypeCreated = q.created,
+                    matchDistance = q.matchDistance,
+                    resolutionDepth = region.depth,
+                    centerX = cx.coerceIn(0.0, 1.0),
+                    centerY = cy.coerceIn(0.0, 1.0),
+                    familiarity = q.familiarity
+                )
+                processed++
+                if (q.created) created++
+                if (!q.created) { distanceSum += q.matchDistance; distanceCount++ }
+                familiaritySum += q.familiarity
+                maxDepth = max(maxDepth, region.depth)
+                rgbSumR += (sample.rgb shr 16) and 0xff
+                rgbSumG += (sample.rgb shr 8) and 0xff
+                rgbSumB += sample.rgb and 0xff
 
-                    val features = doubleArrayOf(
-                        center.coerceIn(0.0, 1.0), chromaRg, chromaBg,
-                        saturation.coerceIn(0.0, 1.0), localContrast, gradX, gradY
+                if (AdaptiveScalePolicy.shouldRefineVisual(
+                        familiarity = q.familiarity,
+                        noveltyRatio = noveltyRatio,
+                        created = q.created,
+                        depth = region.depth,
+                        regionWidthPx = region.width,
+                        regionHeightPx = region.height
                     )
-                    val q = quantizer.quantize(features, rgb)
-                    if (q.created) created++
-                    if (!q.created) { distanceSum += q.matchDistance; distanceCount++ }
-                    observations += VisualObservation(q.id, q.displayColor, idx, q.created, q.matchDistance)
+                ) {
+                    split(region).forEach { child ->
+                        queue.add(
+                            child.copy(
+                                priority = AdaptiveScalePolicy.visualRefinementPriority(
+                                    q.familiarity,
+                                    noveltyRatio,
+                                    q.created,
+                                    child.depth
+                                )
+                            )
+                        )
+                    }
                 }
             }
 
-            val count = GRID_W * GRID_H
-            val avg = if (count > 0) {
-                ((sumR / count).toInt() shl 16) or ((sumG / count).toInt() shl 8) or (sumB / count).toInt()
-            } else 0
+            // Stable spatial order: macro sequences encode image structure, not priority-queue order.
+            observations.sortWith(
+                compareBy<VisualObservation> { it.centerY }
+                    .thenBy { it.centerX }
+                    .thenBy { it.resolutionDepth }
+            )
+
+            val elapsedMs = (System.nanoTime() - workStartNs) / 1_000_000L
+            // Device-speed adaptation: faster hardware automatically resolves more regions.
+            adaptivePatchBudget = when {
+                elapsedMs < TARGET_LEARNING_WORK_MS / 2 -> (adaptivePatchBudget * 1.35).toInt().coerceAtLeast(adaptivePatchBudget + 1)
+                elapsedMs > TARGET_LEARNING_WORK_MS * 2 -> (adaptivePatchBudget * 0.72).toInt().coerceAtLeast(BASE_GRID_W * BASE_GRID_H)
+                else -> adaptivePatchBudget
+            }
+
+            val count = observations.size.coerceAtLeast(1)
+            val avg = ((rgbSumR / count).toInt().coerceIn(0,255) shl 16) or
+                ((rgbSumG / count).toInt().coerceIn(0,255) shl 8) or
+                (rgbSumB / count).toInt().coerceIn(0,255)
+            lastMeanFamiliarity = (familiaritySum / count.toDouble()).coerceIn(0.0, 1.0)
+            lastMaxDepth = maxDepth
 
             onFrame(
                 VisualFrameResult(
@@ -149,12 +221,78 @@ class VisualGridAnalyzer(
                     averageRgb = avg,
                     codebookSize = quantizer.stats().prototypes,
                     createdThisFrame = created,
-                    meanMatchDistance = if (distanceCount == 0) 0.0 else distanceSum / distanceCount.toDouble()
+                    meanMatchDistance = if (distanceCount == 0) 0.0 else distanceSum / distanceCount.toDouble(),
+                    meanFamiliarity = lastMeanFamiliarity,
+                    maxResolutionDepth = maxDepth,
+                    sampledRegions = observations.size
                 )
             )
         } finally {
             image.close()
         }
+    }
+
+    private fun split(region: Region): List<Region> {
+        val mx = (region.x0 + region.x1) / 2
+        val my = (region.y0 + region.y1) / 2
+        if (mx <= region.x0 || mx >= region.x1 || my <= region.y0 || my >= region.y1) return emptyList()
+        val d = region.depth + 1
+        return listOf(
+            Region(region.x0, region.y0, mx, my, d, region.priority),
+            Region(mx, region.y0, region.x1, my, d, region.priority),
+            Region(region.x0, my, mx, region.y1, d, region.priority),
+            Region(mx, my, region.x1, region.y1, d, region.priority)
+        )
+    }
+
+    private fun sampleRegion(
+        region: Region,
+        yPlane: ImageProxy.PlaneProxy,
+        uPlane: ImageProxy.PlaneProxy,
+        vPlane: ImageProxy.PlaneProxy
+    ): RegionSample {
+        val cx = ((region.x0 + region.x1) / 2).coerceAtLeast(0)
+        val cy = ((region.y0 + region.y1) / 2).coerceAtLeast(0)
+        val dx = max(1, region.width / 4)
+        val dy = max(1, region.height / 4)
+        val centerRgb = sampleRgb(cx, cy, yPlane, uPlane, vPlane)
+        val leftRgb = sampleRgb((cx - dx).coerceAtLeast(region.x0), cy, yPlane, uPlane, vPlane)
+        val rightRgb = sampleRgb((cx + dx).coerceAtMost(region.x1 - 1), cy, yPlane, uPlane, vPlane)
+        val upRgb = sampleRgb(cx, (cy - dy).coerceAtLeast(region.y0), yPlane, uPlane, vPlane)
+        val downRgb = sampleRgb(cx, (cy + dy).coerceAtMost(region.y1 - 1), yPlane, uPlane, vPlane)
+
+        fun luminance(rgb: Int): Double {
+            val r = (rgb shr 16) and 0xff
+            val g = (rgb shr 8) and 0xff
+            val b = rgb and 0xff
+            return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        }
+        val r = (centerRgb shr 16) and 0xff
+        val g = (centerRgb shr 8) and 0xff
+        val b = centerRgb and 0xff
+        val maxC = max(r, max(g, b))
+        val minC = minOf(r, g, b)
+        val saturation = (maxC - minC) / 255.0
+        val center = luminance(centerRgb)
+        val left = luminance(leftRgb)
+        val right = luminance(rightRgb)
+        val up = luminance(upRgb)
+        val down = luminance(downRgb)
+        val localContrast = ((abs(center-left)+abs(center-right)+abs(center-up)+abs(center-down))*0.25).coerceIn(0.0,1.0)
+        val gradX = ((right-left)*0.5+0.5).coerceIn(0.0,1.0)
+        val gradY = ((down-up)*0.5+0.5).coerceIn(0.0,1.0)
+        return RegionSample(
+            rgb = centerRgb,
+            features = doubleArrayOf(
+                center.coerceIn(0.0,1.0),
+                ((r-g)/510.0+0.5).coerceIn(0.0,1.0),
+                ((b-g)/510.0+0.5).coerceIn(0.0,1.0),
+                saturation.coerceIn(0.0,1.0),
+                localContrast,
+                gradX,
+                gradY
+            )
+        )
     }
 
     private fun rotateGrid(input: IntArray, w: Int, h: Int, degrees: Int): Triple<Int, Int, IntArray> {
@@ -174,7 +312,7 @@ class VisualGridAnalyzer(
                 val dy = x
                 out[dy * outW + dx] = input[y * w + x]
             }
-        } else { // 270 or uncommon value: use counter-clockwise 90 for 270, identity-ish fallback otherwise
+        } else {
             for (y in 0 until h) for (x in 0 until w) {
                 val dx = y
                 val dy = w - 1 - x

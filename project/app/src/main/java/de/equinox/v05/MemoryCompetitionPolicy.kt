@@ -1,9 +1,11 @@
 package de.equinox.v05
 
 import kotlin.math.ln
+import kotlin.math.max
+import kotlin.math.sqrt
 
 /**
- * v0.6 Step 14 — bounded, dependency-safe memory competition.
+ * v0.6 Step 25 — adaptive, dependency-safe memory competition.
  *
  * The policy does not decide semantic value. It estimates whether a LEAF macro still earns
  * its storage cost from recurrence, learned structural relevance, relations, template reuse,
@@ -31,10 +33,23 @@ data class MemoryCompetitionResult(
 )
 
 object MemoryCompetitionPolicy {
-    const val TARGET_MACROS_PER_STREAM = 320
-    const val HARD_MACROS_PER_STREAM = 384
-    const val MAX_PRUNE_PER_RUN = 128
     const val MIN_IDLE_OBSERVATIONS = 384L
+
+    /**
+     * No fixed macros-per-stream ceiling. A stream earns more persistent structure as
+     * evidence accumulates; deeper tiers also receive a larger structural allowance.
+     */
+    fun targetMacrosForStream(totalObservations: Long, abstractionLevel: Int): Int {
+        val experience = sqrt(totalObservations.coerceAtLeast(1L).toDouble())
+        val depthFactor = 1.0 + ln(1.0 + abstractionLevel.coerceAtLeast(1).toDouble()) * 0.45
+        return max(48, (experience * 2.4 * depthFactor).toInt())
+    }
+
+    fun pressureMacrosForStream(totalObservations: Long, abstractionLevel: Int): Int =
+        (targetMacrosForStream(totalObservations, abstractionLevel) * 1.35).toInt()
+
+    fun forcedPruneBudget(candidateCount: Int): Int =
+        if (candidateCount <= 0) 0 else max(1, sqrt(candidateCount.toDouble()).toInt())
 
     fun evaluate(
         weight: Long,
@@ -54,7 +69,7 @@ object MemoryCompetitionPolicy {
         val relationSupport = relationMass.coerceAtLeast(0L).toDouble() / (relationMass.coerceAtLeast(0L).toDouble() + 32.0)
         val relationBreadth = relationDegree.coerceAtLeast(0).toDouble() / (relationDegree.coerceAtLeast(0).toDouble() + 6.0)
         val templateSupport = templateRoleCount.coerceAtLeast(0).toDouble() / (templateRoleCount.coerceAtLeast(0).toDouble() + 4.0)
-        val levelSupport = (abstractionLevel.coerceAtLeast(0).toDouble() / 4.0).coerceIn(0.0, 1.0)
+        val levelSupport = (ln(1.0 + abstractionLevel.coerceAtLeast(0).toDouble()) / ln(16.0)).coerceIn(0.0, 1.0)
         val maturity = (ln(1.0 + profile.score.coerceAtLeast(0.0)) / ln(1.0 + 20.0)).coerceIn(0.0, 1.0)
 
         val utility = (

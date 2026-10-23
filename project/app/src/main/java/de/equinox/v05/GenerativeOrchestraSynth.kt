@@ -17,10 +17,10 @@ import kotlin.math.tanh
  * deterministic noise and envelopes.
  *
  * Interpretation used only for OUTPUT:
- * - L1 macros -> pulse / transient section
- * - L2 macros -> motif / arpeggio section
- * - L3 macros -> harmonic pad section
- * - L4+ macros -> drone / foundation section
+ * - F -> pulse / transient section
+ * - E/D -> motif / arpeggio section
+ * - C/B/A -> harmonic pad section
+ * - S and deeper -> drone / foundation section
  * - prediction -> anticipatory ghost energy
  * - overexchange -> tension / FM / detune
  * - cross-modal links -> spectral brightness / breath
@@ -44,8 +44,8 @@ data class OrchestraVoiceSpec(
     val section: String
         get() = when (level) {
             1 -> "PULSE"
-            2 -> "MOTIF"
-            3 -> "HARMONY"
+            2, 3 -> "MOTIF"
+            4, 5, 6 -> "HARMONY"
             else -> "DRONE"
         }
 }
@@ -97,12 +97,7 @@ object GenerativeOrchestraSceneBuilder {
             .take(maxVoices)
             .map { node ->
                 val macro = macroById.getValue(node.id)
-                val levelScale = when (node.abstractionLevel) {
-                    1 -> 1.0
-                    2 -> 0.75
-                    3 -> 0.50
-                    else -> 0.375
-                }
+                val levelScale = 1.0 / (1.0 + 0.22 * (node.abstractionLevel - 1).coerceAtLeast(0))
                 val prediction = (predictionsByTarget[node.id] ?: 0.0).coerceIn(0.0, 1.0)
                 val cross = (crossmodalByAudio[node.id] ?: 0.0).coerceIn(0.0, 1.0)
                 val amp = (
@@ -135,12 +130,7 @@ object GenerativeOrchestraSceneBuilder {
         val voices = if (active.isNotEmpty()) active else {
             // Quiet read-only memory bed until the active frontier contains audio.
             sound.macros.take(min(4, maxVoices)).mapIndexed { index, macro ->
-                val scale = when (macro.abstractionLevel) {
-                    1 -> 0.75
-                    2 -> 0.50
-                    3 -> 0.50
-                    else -> 0.375
-                }
+                val scale = 0.82 / (1.0 + 0.20 * (macro.abstractionLevel - 1).coerceAtLeast(0))
                 OrchestraVoiceSpec(
                     id = macro.id,
                     baseHz = fold(macro.hz * scale),

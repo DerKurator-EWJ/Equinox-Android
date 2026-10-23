@@ -1,82 +1,80 @@
-# Equinox v0.6 — Step 24: Long-Term Hard Test
+# Equinox v0.6 — Step 25: Unbounded Adaptive Resolution
 
-Step 24 does **not** add another learning rule. It adds the measurement layer needed to test whether the current architecture actually behaves better over long runs.
+Step 25 removes the major **semantic hard ceilings** that were still left over from the prototype architecture. Physical phone resources remain finite, but the model no longer says that memory ends at 4096 audio IDs, 1024 visual IDs, 48 active macros, L4, 6000 candidates or 12000 template buckets.
 
-## What is measured
+## 1. Adaptive visual resolution instead of a fixed learning raster
 
-Every hard-test sample records:
+The old 8×6 learning grid is now only the **entry lattice**. Each region can recursively split into 2×2 subregions.
 
-- total observations
-- persistent quant/code count
-- macro count and macro-relation count
-- crossmodal macro count
-- recent adaptive-audio novelty rate
-- recent adaptive-vision novelty rate
-- current hierarchy compression gain
-- cumulative prediction checks/hits
-- cumulative memory-competition pruning
-- indexed-store bytes
-- number of disk-backed macros
-- lazy token-read count
-- current Java heap use
+Refinement is driven by two signals:
 
-The app derives useful interval metrics from those snapshots, including:
+- **familiarity**: a repeatedly recognized region earns finer resolution;
+- **surprise/novelty**: a new region receives temporary exploratory resolution, so an unknown object cannot remain unknown merely because it started coarse.
 
-- macro growth per 10,000 observations
-- early vs. recent macro-growth rate
-- storage growth per 10,000 observations
-- prediction hit rate during the test interval
-- compression level
-- pruning activity
-- heap/storage deltas
+There is no configured maximum visual depth. Refinement stops naturally when the camera region is too small to split further or when the adaptive per-frame work budget is used. Faster hardware automatically earns a larger region budget.
 
-This is intentionally observational. A falling macro-growth or novelty rate is evidence of convergence only in context; it is not hard-coded as proof that the system has learned meaning.
+The read-only video pigment grid also scales dynamically from the current familiarity/detail state instead of being fixed to 48×27.
 
-## LAB controls
+## 2. Adaptive audio and visual codebooks have no identity-count ceiling
 
-`TEST START 5MIN`
+The former caps:
 
-Starts a new controlled session, clears the previous hard-test sample series, captures an initial baseline, then samples automatically every five minutes while the Activity remains alive.
+- audio: 4096 prototypes
+- vision: 1024 prototypes
 
-`SAMPLE`
+are removed.
 
-Captures an additional point immediately.
+A new ID is created when the current input is not represented closely enough by an existing local prototype. Familiar prototypes can gradually split more finely. This means resolution can increase with experience rather than stopping at an arbitrary codebook size.
 
-`STOP`
+Both adaptive quantizers now use a coarse local feature index, so lookup does not require scanning the entire learned codebook on every observation.
 
-Stops automatic sampling while preserving the captured series.
+## 3. Dynamic working set
 
-`CSV`
+The former fixed 48-macro working set is removed.
 
-Writes `equinox_v06_hard_test.csv` into the app's internal files directory.
+The active frontier now keeps enough nodes to cover about 97.5% of the current activation/expectation/exchange mass, while genuinely live nodes are always retained. A simple context may therefore use only a small number of macros; a complex state may materialize many more.
 
-`RESET`
+Neighbor retrieval and prediction are likewise selected by cumulative relation/probability mass instead of fixed `6 neighbors` or `Top-4` rules.
 
-Deletes the hard-test series only. It does **not** delete Equinox memory.
+## 4. RPG system is now the abstraction depth
 
-## Practical test protocol
+The old L1–L4 ceiling is removed. Q is the encoder alphabet; persistent compositions are labeled directly by depth:
 
-For a meaningful first test, let LIVE or HYBRID run for several hours in a reasonably repetitive environment. Do not judge the system from a single sample. Look for trends:
+`Q → F → E → D → C → B → A → S → SS → SSS → Ω → Ω+1 → Ω+2 → ...`
 
-1. adaptive audio/visual novelty should usually become lower in familiar conditions;
-2. macro creation per 10k observations should eventually stop accelerating indefinitely;
-3. compression should remain positive or improve rather than collapse;
-4. prediction should accumulate enough checks to become interpretable;
-5. memory competition should remove weak material under pressure rather than allowing unbounded useless growth;
-6. heap use should not grow in lockstep with the entire persistent store;
-7. the indexed store may grow, but its growth per observation should become measurable and comparable across runs.
+The internal depth is an ordinary unbounded integer. There is no `maxLevel` in the learning core.
 
-A changing environment can legitimately raise novelty again, so the hard test records the measurements rather than imposing a universal pass/fail threshold.
+**Tier is no longer a quality score.** Tier means abstraction depth only. Relevance, stability/maturity and recurrence remain separate measurements.
 
-## Storage
+Existing Step-24 macros remain compatible: old level 1 becomes F, level 2 becomes E, level 3 becomes D and level 4 becomes C. New learning may continue beyond that.
 
-The Step-23 indexed long-term store remains unchanged. Hard-test measurements live separately in:
+## 5. Sequence/template limits removed
 
-- `equinox_v06_hard_test.json`
-- `equinox_v06_hard_test.csv` (only after export)
+The old fixed candidate/template capacities are gone:
 
-Existing Step-23 memory remains compatible.
+- no 6000 temporary-pattern ceiling;
+- no 12000 template-bucket ceiling;
+- no fixed substitution-pair ceiling;
+- no fixed crossmodal-candidate count ceiling.
 
-## Build
+Temporary evidence is instead pressure-managed relative to the amount of persistent structure already learned. Pattern horizon grows logarithmically with experience rather than being permanently fixed to length 6.
 
-Open the folder `Equinox_v06_Step24_LongTermHardTest` directly in Android Studio and build the APK as before.
+## 6. Memory competition and relation storage scale with learned structure
+
+Macro competition no longer assumes fixed `320/384 macros per stream` or `128 deletions per run`. Stream capacity grows with accumulated evidence and abstraction depth. Relation/exchange cleanup uses soft targets derived from macro/working-set size rather than fixed 4096-entry cutoffs.
+
+## 7. Geometry
+
+The existing 17 geometry rules remain as a reusable **ground grammar**, not as an upper bound on learned identities or abstraction depth. They are output primitives; they do not constrain how many visual structures, macros or RPG tiers Equinox can learn.
+
+## Compatibility
+
+The Step-23 indexed long-term store remains the persistent backend. Step-24 memory can be loaded. Existing integer abstraction levels are reinterpreted through the new RPG tier labels without rewriting their identities.
+
+## Verification done here
+
+The Step-25 core (`MemoryModel`, open hierarchy, adaptive working set, adaptive quantizers, indexed storage, tier mapping) was compiled with Kotlin against API stubs. The adaptive visual analyzer was also compiled separately against CameraX stubs. The full Android Gradle/APK build still has to be done in Android Studio because this environment has no Android SDK.
+
+## Core stress check
+
+A synthetic repeated Direct-ID stream was run against the Step-25 core after compilation. It formed levels 1 through 6 (`F → E → D → C → B → A`), demonstrating that the old L4 stop is no longer present in the learning path. This is a mechanism check only, not evidence of semantic learning.

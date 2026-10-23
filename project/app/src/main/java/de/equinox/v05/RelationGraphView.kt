@@ -113,7 +113,7 @@ class RelationGraphView(context: Context) : View(context) {
             // z is renderer-only and deterministically derived from graph metadata.
             // It is never persisted in MemoryModel.
             val hashDepth = ((((node.id * 1103515245L + 12345L) ushr 16) and 0xffff).toFloat() / 65535f) - 0.5f
-            val levelDepth = (node.abstractionLevel.coerceAtMost(4) - 1.5f) * 0.10f
+            val levelDepth = (kotlin.math.ln(1.0 + node.abstractionLevel.coerceAtLeast(1).toDouble()) * 0.16 - 0.10).toFloat().coerceIn(-0.10f, 0.46f)
             val z = (hashDepth * 0.42f + levelDepth).coerceIn(-0.48f, 0.48f)
 
             positions[node.id] = P(
@@ -250,7 +250,7 @@ class RelationGraphView(context: Context) : View(context) {
             .eachCount()
             .toSortedMap()
             .entries
-            .joinToString(" · ") { "L${it.key}:${it.value}" }
+            .joinToString(" · ") { "${AbstractionTier.labelForMacroDepth(it.key)}:${it.value}" }
 
         val suffix = if (levels.isBlank()) "keine Makroebene" else levels
         val mode = if (displayMode == GraphDisplayMode.TWO_D) "2D" else "3D"
@@ -414,7 +414,7 @@ class RelationGraphView(context: Context) : View(context) {
             return
         }
 
-        val radius = baseRadius + (8f + node.abstractionLevel * 4f) * p.scale
+        val radius = baseRadius + (8f + (kotlin.math.ln(1.0 + node.abstractionLevel.toDouble()) * 8.0).toFloat()) * p.scale
         nodePaint.color = levelColor(node.abstractionLevel)
 
         if (displayMode == GraphDisplayMode.THREE_D) {
@@ -650,10 +650,10 @@ class RelationGraphView(context: Context) : View(context) {
         val alpha = ((55 + 190 * norm) * depthAlpha).toInt().coerceIn(0, 255)
         return when {
             edge.isMembership -> Color.argb(alpha, 235, 155, 55)
-            edge.abstractionLevel >= 4 -> Color.argb(alpha, 235, 90, 255)
-            edge.abstractionLevel == 3 -> Color.argb(alpha, 120, 110, 255)
-            edge.abstractionLevel == 2 -> Color.argb(alpha, 255, 95, 180)
-            edge.abstractionLevel == 1 -> Color.argb(alpha, 255, 180, 70)
+            edge.abstractionLevel > 0 -> {
+                val c = levelColor(edge.abstractionLevel)
+                Color.argb(alpha, Color.red(c), Color.green(c), Color.blue(c))
+            }
             else -> Color.argb(
                 alpha,
                 Color.red(displayPrefs.audioEdgeColor),
@@ -665,10 +665,15 @@ class RelationGraphView(context: Context) : View(context) {
 
     private fun levelColor(level: Int): Int {
         return when (level) {
-            1 -> displayPrefs.macroLevel1Color
-            2 -> displayPrefs.macroLevel2Color
-            3 -> displayPrefs.macroLevel3Color
-            else -> displayPrefs.macroLevel4Color
+            1 -> displayPrefs.macroLevel1Color // F
+            2 -> displayPrefs.macroLevel2Color // E
+            3 -> displayPrefs.macroLevel3Color // D
+            4 -> displayPrefs.macroLevel4Color // C
+            else -> {
+                // Higher RPG tiers get a deterministic cyclic hue instead of collapsing into L4.
+                val hue = ((286f + (level - 4) * 27.5f) % 360f + 360f) % 360f
+                Color.HSVToColor(floatArrayOf(hue, 0.62f, 1.0f))
+            }
         }
     }
 

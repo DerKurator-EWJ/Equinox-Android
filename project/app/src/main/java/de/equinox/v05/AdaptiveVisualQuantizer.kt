@@ -18,15 +18,14 @@ import kotlin.math.sqrt
  * luminance, two opponent chroma axes, saturation, local contrast and signed horizontal /
  * vertical gradients. The codebook starts empty and learns stable prototype IDs online.
  *
- * The ID deliberately contains no x/y coordinate. Spatial role comes from the fixed row-major
- * sensor stream and the higher macro sequences built by MemoryModel. This keeps appearance
- * identity reusable across the frame instead of creating a separate color ID for every cell.
+ * The ID deliberately contains no x/y coordinate. Step 25 removes the former 1024-prototype
+ * ceiling. Familiar appearance regions can split into finer identities as evidence accumulates,
+ * while spatial detail is handled independently by the adaptive coarse-to-fine camera analyzer.
  */
 class AdaptiveVisualQuantizer(private val context: Context) {
     companion object {
         private const val FILE_NAME = "equinox_v06_adaptive_visual_quantizer.json"
         private const val FORMAT_VERSION = 1
-        private const val MAX_PROTOTYPES = 1_024
         private const val ID_BASE = -50_000_000
         private const val SAVE_EVERY_ACCEPTED = 384L
         private const val RECENT_WINDOW = 256
@@ -39,7 +38,8 @@ class AdaptiveVisualQuantizer(private val context: Context) {
         val matchDistance: Double,
         val acceptanceRadius: Double,
         val codebookSize: Int,
-        val displayColor: Int
+        val displayColor: Int,
+        val familiarity: Double
     )
 
     data class Stats(
@@ -63,6 +63,9 @@ class AdaptiveVisualQuantizer(private val context: Context) {
 
     private val file = File(context.filesDir, FILE_NAME)
     private val prototypes = ArrayList<Prototype>()
+    // Coarse feature index keeps unbounded codebook growth from turning every frame into
+    // a full O(N) scan. Only the local bucket and one-axis neighbor buckets are searched.
+    private val prototypeBuckets = mutableMapOf<Int, MutableList<Prototype>>()
     private val recentNovelty = ArrayDeque<Boolean>()
     private var nextOrdinal = 1
     private var acceptedPatches = 0L
@@ -70,8 +73,15 @@ class AdaptiveVisualQuantizer(private val context: Context) {
     private var reusedIds = 0L
     private var matchDistanceSum = 0.0
     private var matchDistanceCount = 0L
+    private var learnedStructureCount = 0
 
     init { load() }
+
+
+    @Synchronized
+    fun updateStructureContext(totalVisualMacros: Int, crossModalMacros: Int) {
+        learnedStructureCount = totalVisualMacros.coerceAtLeast(0) + crossModalMacros.coerceAtLeast(0)
+    }
 
     @Synchronized
     fun quantize(features: DoubleArray, packedRgb: Int): Result {
@@ -80,7 +90,7 @@ class AdaptiveVisualQuantizer(private val context: Context) {
 
         var nearest: Prototype? = null
         var nearestDistance = Double.POSITIVE_INFINITY
-        for (p in prototypes) {
+        for (p in candidatePrototypes(features)) {
             val d = distance(features, p.center)
             if (d < nearestDistance) {
                 nearestDistance = d
@@ -90,8 +100,8 @@ class AdaptiveVisualQuantizer(private val context: Context) {
 
         val p = nearest
         val radius = if (p == null) 0.0 else acceptanceRadius(p)
-        val canCreate = prototypes.size < MAX_PROTOTYPES
-        val create = p == null || (nearestDistance > radius && canCreate)
+        val creationRadius = if (p == null) 0.0 else creationRadius(p)
+        val create = p == null || nearestDistance > creationRadius
 
         val chosen: Prototype
         val usedDistance: Double
@@ -105,6 +115,7 @@ class AdaptiveVisualQuantizer(private val context: Context) {
                 displayColor = packedRgb
             )
             prototypes += chosen
+            indexPrototype(chosen)
             createdIds++
             usedDistance = 0.0
             usedRadius = acceptanceRadius(chosen)
@@ -128,7 +139,8 @@ class AdaptiveVisualQuantizer(private val context: Context) {
             matchDistance = usedDistance,
             acceptanceRadius = usedRadius,
             codebookSize = prototypes.size,
-            displayColor = chosen.displayColor
+            displayColor = chosen.displayColor,
+            familiarity = familiarity(chosen)
         )
     }
 
@@ -141,7 +153,7 @@ class AdaptiveVisualQuantizer(private val context: Context) {
         recentNoveltyRate = if (recentNovelty.isEmpty()) 0.0 else recentNovelty.count { it }.toDouble() / recentNovelty.size.toDouble(),
         meanMatchDistance = if (matchDistanceCount <= 0L) 0.0 else matchDistanceSum / matchDistanceCount.toDouble(),
         strongestPrototypeCount = prototypes.maxOfOrNull { it.count } ?: 0L,
-        saturated = prototypes.size >= MAX_PROTOTYPES
+        saturated = false
     )
 
     @Synchronized
@@ -177,6 +189,7 @@ class AdaptiveVisualQuantizer(private val context: Context) {
     @Synchronized
     fun reset() {
         prototypes.clear()
+        prototypeBuckets.clear()
         recentNovelty.clear()
         nextOrdinal = 1
         acceptedPatches = 0L
@@ -188,11 +201,68 @@ class AdaptiveVisualQuantizer(private val context: Context) {
     }
 
     private fun updatePrototype(p: Prototype, x: DoubleArray, packedRgb: Int, distance: Double) {
+        val oldBucket = bucketKey(p.center)
         p.count++
         val lr = (1.0 / sqrt(p.count.toDouble() + 28.0)).coerceIn(0.006, 0.085)
         for (i in p.center.indices) p.center[i] += lr * (x[i] - p.center[i])
         p.radiusEma = 0.96 * p.radiusEma + 0.04 * distance.coerceIn(0.0, 1.0)
         p.displayColor = blendRgb(p.displayColor, packedRgb, lr.coerceIn(0.01, 0.08))
+        reindexPrototype(p, oldBucket)
+    }
+
+    private fun bucketCoords(values: DoubleArray): IntArray = IntArray(values.size) { i ->
+        (values[i].coerceIn(0.0, 1.0) * 5.0).toInt().coerceIn(0, 4)
+    }
+
+    private fun bucketKey(values: DoubleArray): Int = bucketKey(bucketCoords(values))
+
+    private fun bucketKey(coords: IntArray): Int {
+        var key = 0
+        for (c in coords) key = key * 5 + c.coerceIn(0, 4)
+        return key
+    }
+
+    private fun candidatePrototypes(values: DoubleArray): List<Prototype> {
+        if (prototypes.isEmpty()) return emptyList()
+        val coords = bucketCoords(values)
+        val out = LinkedHashSet<Prototype>()
+        prototypeBuckets[bucketKey(coords)]?.let { out.addAll(it) }
+        for (axis in coords.indices) {
+            val original = coords[axis]
+            if (original > 0) {
+                coords[axis] = original - 1
+                prototypeBuckets[bucketKey(coords)]?.let { out.addAll(it) }
+            }
+            if (original < 4) {
+                coords[axis] = original + 1
+                prototypeBuckets[bucketKey(coords)]?.let { out.addAll(it) }
+            }
+            coords[axis] = original
+        }
+        return out.toList()
+    }
+
+    private fun indexPrototype(p: Prototype) {
+        prototypeBuckets.getOrPut(bucketKey(p.center)) { ArrayList() }.add(p)
+    }
+
+    private fun reindexPrototype(p: Prototype, oldBucket: Int) {
+        val newBucket = bucketKey(p.center)
+        if (oldBucket == newBucket) return
+        prototypeBuckets[oldBucket]?.let { list ->
+            list.remove(p)
+            if (list.isEmpty()) prototypeBuckets.remove(oldBucket)
+        }
+        prototypeBuckets.getOrPut(newBucket) { ArrayList() }.add(p)
+    }
+
+    private fun familiarity(p: Prototype): Double =
+        (p.count.toDouble() / (p.count.toDouble() + 20.0)).coerceIn(0.0, 1.0)
+
+    private fun creationRadius(p: Prototype): Double {
+        val familiar = familiarity(p)
+        val structuralResolution = (1.0 - 1.0 / (1.0 + ln(1.0 + learnedStructureCount.toDouble()))).coerceIn(0.0, 0.85)
+        return (acceptanceRadius(p) * (1.10 - 0.38 * familiar - 0.18 * structuralResolution)).coerceAtLeast(0.032)
     }
 
     private fun acceptanceRadius(p: Prototype): Double {
@@ -250,8 +320,11 @@ class AdaptiveVisualQuantizer(private val context: Context) {
                     displayColor = o.optInt("displayColor", 0)
                 )
             }
+            prototypeBuckets.clear()
+            prototypes.forEach { indexPrototype(it) }
         }.onFailure {
             prototypes.clear()
+            prototypeBuckets.clear()
             nextOrdinal = 1
         }
     }

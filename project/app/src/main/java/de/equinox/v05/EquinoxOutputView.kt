@@ -142,7 +142,7 @@ class EquinoxOutputView(context: Context) : View(context) {
             val rr = radius * (0.45f + 0.55f * ((node.id ushr 3) and 255) / 255f)
             val x = cx + cos(a).toFloat() * rr
             val y = cy + sin(a).toFloat() * rr
-            val r = 3.5f + 2.0f * node.abstractionLevel +
+            val r = 3.5f + (kotlin.math.ln(1.0 + node.abstractionLevel.toDouble()) * 5.0).toFloat() +
                 min(6f, node.structuralRankIndex * 0.65f) +
                 (node.structuralRelevance * 4.0).toFloat()
             nodePaint.color = withAlpha(
@@ -160,7 +160,7 @@ class EquinoxOutputView(context: Context) : View(context) {
         val ny = ((h2 ushr 13) and 0xffff).toFloat() / 65535f
 
         // Higher abstractions drift closer to the visual centre; this is renderer-only.
-        val centrePull = (0.08f * node.abstractionLevel).coerceAtMost(0.32f)
+        val centrePull = (0.07f * kotlin.math.ln(1.0 + node.abstractionLevel.toDouble()).toFloat()).coerceAtMost(0.38f)
         val xNorm = nx * (1f - centrePull) + 0.5f * centrePull
         val yNorm = ny * (1f - centrePull) + 0.5f * centrePull
 
@@ -267,7 +267,7 @@ class EquinoxOutputView(context: Context) : View(context) {
     private fun drawActiveNode(canvas: Canvas, x: Float, y: Float, node: ActiveMacroNode) {
         val a = node.activation.coerceIn(0.0, 1.5).toFloat()
         val e = node.expectation.coerceIn(0.0, 1.5).toFloat()
-        val base = 7f + node.abstractionLevel * 3.5f
+        val base = 7f + (kotlin.math.ln(1.0 + node.abstractionLevel.toDouble()) * 7.0).toFloat()
         val rankBoost = min(0.55f, node.structuralRankIndex * 0.045f)
         val relevanceBoost = (node.structuralRelevance.coerceIn(0.0, 1.0) * 0.32).toFloat()
         val radius = base * (1f + 0.70f * a + rankBoost + relevanceBoost)
@@ -325,10 +325,14 @@ class EquinoxOutputView(context: Context) : View(context) {
     }
 
     private fun levelColor(level: Int): Int = when (level) {
-        1 -> Color.rgb(255, 176, 68)
-        2 -> Color.rgb(255, 92, 176)
-        3 -> Color.rgb(125, 105, 255)
-        else -> Color.rgb(226, 82, 255)
+        1 -> Color.rgb(255, 176, 68) // F
+        2 -> Color.rgb(255, 92, 176) // E
+        3 -> Color.rgb(125, 105, 255) // D
+        4 -> Color.rgb(226, 82, 255) // C
+        else -> {
+            val hue = ((286f + (level - 4) * 27.5f) % 360f + 360f) % 360f
+            Color.HSVToColor(floatArrayOf(hue, 0.62f, 1.0f))
+        }
     }
 
     private fun withAlpha(color: Int, alpha: Int): Int = Color.argb(

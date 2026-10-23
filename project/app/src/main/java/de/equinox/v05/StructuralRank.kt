@@ -3,13 +3,13 @@ package de.equinox.v05
 import kotlin.math.ln
 
 /**
- * Structural maturity rank.
+ * Step 25: tier and relevance are separate.
  *
- * Rank and relevance are separate:
- * - rank expresses accumulated maturity / abstraction,
- * - relevance is a bounded multidimensional read-only estimate.
+ * The visible RPG tier is now *only* abstraction depth:
+ * Q -> F -> E -> ... -> SSS -> Ω -> Ω+n.
  *
- * Neither directly changes learning.
+ * score remains a diagnostic maturity score, while relevance stays a bounded
+ * multidimensional estimate. Neither value changes the tier label.
  */
 data class StructuralRankProfile(
     val score: Double,
@@ -26,8 +26,6 @@ data class StructuralRankProfile(
 )
 
 object StructuralRankEngine {
-    private const val OMEGA_SCORE = 18.0
-    private const val OMEGA_STEP = 3.0
 
     fun evaluate(
         occurrenceWeight: Long,
@@ -62,11 +60,11 @@ object StructuralRankEngine {
             1.05 * relevance.persistence +
             1.10 * abstractionLevel.coerceAtLeast(0).toDouble()
 
-        val rankIndex = rankIndexFor(score)
+        val rankIndex = AbstractionTier.indexForMacroDepth(abstractionLevel)
         return StructuralRankProfile(
             score = score,
             rankIndex = rankIndex,
-            label = labelFor(rankIndex),
+            label = AbstractionTier.labelForMacroDepth(abstractionLevel),
             recurrence = relevance.frequency,
             reuse = relevance.reuse,
             relationSupport = relevance.relationSupport,
@@ -78,23 +76,7 @@ object StructuralRankEngine {
         )
     }
 
-    private fun rankIndexFor(score: Double): Int {
-        if (!score.isFinite() || score <= 0.0) return 0
-        if (score < OMEGA_SCORE) return (score / 2.0).toInt().coerceIn(0, 8)
-        return 9 + ((score - OMEGA_SCORE) / OMEGA_STEP).toInt().coerceAtLeast(0)
-    }
+    /** Compatibility helper for older UI call sites. */
+    fun labelFor(rankIndex: Int): String = AbstractionTier.labelForIndex(rankIndex)
 
-    fun labelFor(rankIndex: Int): String = when (rankIndex) {
-        0 -> "F"
-        1 -> "E"
-        2 -> "D"
-        3 -> "C"
-        4 -> "B"
-        5 -> "A"
-        6 -> "S"
-        7 -> "SS"
-        8 -> "SSS"
-        9 -> "Ω"
-        else -> "Ω+${rankIndex - 9}"
-    }
 }

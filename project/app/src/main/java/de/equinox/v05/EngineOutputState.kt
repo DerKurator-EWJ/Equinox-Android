@@ -1,5 +1,8 @@
 package de.equinox.v05
 
+import kotlin.math.max
+import kotlin.math.sqrt
+
 /**
  * Read-only projection of the memory for output devices.
  * Renderers and sonifiers consume this object; they do not mutate memory.
@@ -13,24 +16,34 @@ data class EngineOutputState(
 )
 
 class EngineOutputBridge(private val memory: MemoryModel) {
-    /** Lazy: snapshots are created only when an output asks for them. */
-    fun snapshot(
-        maxGraphMicro: Int = 34,
-        maxGraphMacrosPerLevel: Int = 12,
-        maxGraphEdges: Int = 360,
-        maxSoundMicro: Int = 8,
-        maxSoundMacros: Int = 8
-    ): EngineOutputState = EngineOutputState(
-        graph = memory.graphSnapshot(
-            maxMicroNodes = maxGraphMicro,
-            maxMacroNodesPerLevel = maxGraphMacrosPerLevel,
-            maxEdges = maxGraphEdges
-        ),
-        sound = memory.sonificationSnapshot(
-            maxMicro = maxSoundMicro,
-            maxMacros = maxSoundMacros
-        ),
-        stats = memory.stats(),
-        working = memory.workingSetSnapshot()
-    )
+    /**
+     * Step 25: output projection budgets follow the current active structure. They are not
+     * memory/model ceilings; a quiet scene renders little, a complex active scene exposes more.
+     */
+    fun snapshot(): EngineOutputState {
+        val stats = memory.stats()
+        val working = memory.workingSetSnapshot()
+        val active = working.nodes.size.coerceAtLeast(1)
+        val depthKinds = stats.levelCounts.size.coerceAtLeast(1)
+
+        val graphMicro = max(24, sqrt(stats.persistentCodes.coerceAtLeast(1).toDouble()).toInt() * 3)
+        val graphMacrosPerTier = max(8, (active * 1.35 / depthKinds).toInt() + 4)
+        val graphEdges = max(120, active * 6)
+        val soundMicro = max(4, sqrt(stats.adaptiveAudioCodes.coerceAtLeast(1).toDouble()).toInt())
+        val soundMacros = max(6, active)
+
+        return EngineOutputState(
+            graph = memory.graphSnapshot(
+                maxMicroNodes = graphMicro,
+                maxMacroNodesPerLevel = graphMacrosPerTier,
+                maxEdges = graphEdges
+            ),
+            sound = memory.sonificationSnapshot(
+                maxMicro = soundMicro,
+                maxMacros = soundMacros
+            ),
+            stats = stats,
+            working = working
+        )
+    }
 }

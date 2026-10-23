@@ -1,3 +1,3 @@
-# Equinox v0.6 Step 24
+Equinox v0.6 Step 25 — Unbounded Adaptive Resolution
 
-Long-Term Hard Test build. See `README_V06.md` for the measurement protocol and metrics.
+See README_V06.md for the architecture changes and build notes.
