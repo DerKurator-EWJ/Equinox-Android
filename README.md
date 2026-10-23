@@ -1,0 +1,27 @@
+# Equinox Android — Historical Development Archive
+
+This repository documents archived iterations of the early Equinox / Kira Android app.
+This Android development started before Equinox Forge and continued partly in parallel.
+
+**Retrospective import:** Git commit dates reflect publication/import, not original development dates.
+Version ordering is based on the provided filename list, not verified historic timestamps.
+In particular `Equinox_v05_Step065` and the `v06 Step46` variants should be reviewed.
+
+The source of each snapshot is in [`project/`](project/). Switch Git tags to inspect earlier versions.
+Each commit **replaces** the `project/` snapshot. The original ZIP archives remain unchanged locally.
+Known generated/build files, APKs, machine configs and signing material are omitted deliberately.
+Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a guarantee of safety.
+
+## Snapshot index
+
+| Tag | Source ZIP | Included files | Omitted files | Input ZIP SHA-256 |
+|---|---|---:|---:|---|
+| `android-eq25-1-cleanup` | `Eq25_1_Cleanup.zip` | 40 | 0 | `ac072c22e2809d92741566ccd1f160f803379a90364bf651d81944b658163f97` |
+
+## Security, licensing, and limitations
+
+Automatic filtering and secret-pattern scanning are incomplete. Review all commits and tags
+before public release for privacy, credentials, embedded metadata, and third-party licensing.
+Run instructions and system requirements may differ across historic snapshots.
+This archive is not a claim that all versions have been independently validated.
+No open-source license is granted merely by publishing code.
