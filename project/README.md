@@ -1,5 +1,5 @@
-# Equinox v0.6 — Step 28
+# Equinox v0.6 — Step 29
 
-GPU LIVE renderer on top of Step 27 low-latency frame synchronization.
+Stable Live / Tissue Canvas / Bottom Controls.
 
-See `README_STEP28.md` for the changes in this build and `README_V06.md` for the wider architecture.
+Siehe `README_STEP29.md` sowie die vorherigen Step-Readmes.

@@ -269,21 +269,39 @@ class MainActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
-        val topBar = LinearLayout(this).apply {
+        // Step 29: the only permanent controls live at the bottom, directly above the
+        // Android navigation area. This keeps the visual field clear and makes the two
+        // primary surfaces reachable with the thumb.
+        val controlBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            setBackgroundColor(Color.argb(178, 8, 10, 14))
+            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setBackgroundColor(Color.argb(205, 8, 10, 14))
         }
         val canvasTab = Button(this).apply { text = "CANVAS" }
         val liveTab = Button(this).apply { text = "LIVE"; isEnabled = false }
         val settingsButton = Button(this).apply { text = "⚙" }
-        topBar.addView(canvasTab, weightedButtonParams())
-        topBar.addView(liveTab, weightedButtonParams())
-        topBar.addView(settingsButton, LinearLayout.LayoutParams(dp(64), dp(52)))
-        rootFrame.addView(topBar, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP
-        ))
+        controlBar.addView(canvasTab, weightedButtonParams())
+        controlBar.addView(liveTab, weightedButtonParams())
+        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(64), dp(52)))
+        val controlBarParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM
+        )
+        rootFrame.addView(controlBar, controlBarParams)
+
+        // Some Android versions draw app content edge-to-edge. Keep the control strip
+        // above the system navigation buttons rather than underneath them.
+        rootFrame.setOnApplyWindowInsetsListener { _, insets ->
+            val lp = controlBar.layoutParams as FrameLayout.LayoutParams
+            val bottom = insets.systemWindowInsetBottom
+            if (lp.bottomMargin != bottom) {
+                lp.bottomMargin = bottom
+                controlBar.layoutParams = lp
+            }
+            insets
+        }
 
         settingsOverlay = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
@@ -304,7 +322,7 @@ class MainActivity : ComponentActivity() {
         ))
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 28 — GPU LIVE RENDERER / FRAME SYNC", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 29 — STABLE LIVE / TISSUE CANVAS / BOTTOM CONTROLS", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 

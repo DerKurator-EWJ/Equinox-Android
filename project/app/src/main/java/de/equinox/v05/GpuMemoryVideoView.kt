@@ -347,23 +347,25 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     float expectation = clamp(uSummary.z, 0.0, 1.0);
                     float prediction = clamp(uSummary.w, 0.0, 1.0);
 
+                    // Step 29: no global time-driven wobble. The camera stays spatially
+                    // stable; only currently active memory fields are allowed to deform it.
                     vec2 uv = vTex;
-                    float warp = 0.004 + 0.040 * memory + 0.018 * abs(signedEx);
-                    float tau = 6.28318530718;
-                    uv.x += sin((vTex.y * 2.7 + uPhase * 1.3) * tau) * warp * (0.55 + 0.45 * prediction);
-                    uv.y += cos((vTex.x * 2.2 - uPhase * 1.1) * tau) * warp * (0.55 + 0.45 * expectation);
-
                     float fieldGlow = 0.0;
                     for (int i = 0; i < 8; ++i) {
                         if (i < uFieldCount) {
                             vec4 f = uFields[i];
                             vec2 delta = vTex - f.xy;
                             float d2 = 0.018 + dot(delta, delta);
-                            float twist = 0.0008 + 0.0046 * f.z;
                             float direction = f.w >= 0.0 ? 1.0 : -1.0;
-                            float exchangeGain = 0.35 + 0.65 * min(1.0, abs(f.w));
+                            float exchangeGain = 0.25 + 0.75 * min(1.0, abs(f.w));
                             vec2 tangent = vec2(-delta.y, delta.x);
-                            uv += tangent * (twist * exchangeGain * direction / d2);
+
+                            // Local, state-locked lens/twist. There is deliberately no phase
+                            // term here, so a static scene no longer swims or wobbles by itself.
+                            float localPull = 0.00018 + 0.00105 * f.z;
+                            float localTwist = 0.00012 + 0.00110 * f.z * exchangeGain;
+                            uv -= delta * (localPull / d2);
+                            uv += tangent * (localTwist * direction / d2);
 
                             float d = sqrt(dot(delta, delta));
                             float radius = 0.035 + 0.040 * f.z;
@@ -388,9 +390,9 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     c += exchangeTint * abs(signedEx) * memory * 0.16;
                     c += exchangeTint * min(1.0, fieldGlow) * 0.10 * memory;
 
-                    // Small prediction shimmer without replacing the underlying camera pigment.
-                    float shimmer = 0.5 + 0.5 * sin((vTex.x + vTex.y + uPhase * 2.0) * tau * 3.0);
-                    c += vec3(0.03, 0.045, 0.055) * shimmer * prediction * memory;
+                    // Prediction changes tone locally, not by animating the whole frame.
+                    float predictionPresence = 0.30 + 0.70 * min(1.0, fieldGlow);
+                    c += vec3(0.025, 0.040, 0.052) * predictionPresence * prediction * memory;
 
                     gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
                 }
