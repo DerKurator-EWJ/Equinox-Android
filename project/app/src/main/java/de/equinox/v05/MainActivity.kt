@@ -5,6 +5,8 @@ import android.app.AlertDialog
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.Typeface
+import android.text.TextUtils
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -213,7 +215,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var adaptiveQuantizerStatus: TextView
     @Volatile private var parallelEncoderBenchmarkEnabled = false
 
-    private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
+    private var lastConsolidationSummary = "Noch keine Archiv-Konsolidierung in dieser Sitzung"
     @Volatile private var lastConsolidationMs = 0L
 
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -224,7 +226,7 @@ class MainActivity : ComponentActivity() {
             val ok = memory.memoryPlaybackStep()
             if (!ok) {
                 memoryPlaybackRunning = false
-                memoryModeStatus.text = "MEMORY: noch keine gelernten Makros"
+                memoryModeStatus.text = "ARCHIVE: noch keine gelernten Makros"
                 return
             }
 
@@ -249,7 +251,7 @@ class MainActivity : ComponentActivity() {
             val ok = memory.autonomousDreamStep()
             if (!ok) {
                 dreamPlaybackRunning = false
-                if (::dreamModeStatus.isInitialized) dreamModeStatus.text = "DREAM: noch keine gelernten Makros"
+                if (::dreamModeStatus.isInitialized) dreamModeStatus.text = "BRANCH WALK: noch keine gelernten Makros"
                 return
             }
 
@@ -465,8 +467,8 @@ class MainActivity : ComponentActivity() {
             topMargin = dp(8)
         })
 
-        settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("PRODUCT — HYPNO ONLY", 13f, 4).apply {
+        settingsRoot.addView(label("EQUINOX v0.6 · ARCHIVE CONTROL", 24f, 4))
+        settingsRoot.addView(label("ACTIVE INTERFACE · HYPNO", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
         captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Unified Audio AAC", 12f, 4).apply {
@@ -478,9 +480,9 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val inputSettings = productButton("INPUT")
-        val memorySettings = productButton("MEMORY")
-        val labSettings = productButton("LAB")
+        val inputSettings = productButton("INTAKE")
+        val memorySettings = productButton("ARCHIVE")
+        val labSettings = productButton("CONTROL")
         val closeSettings = productButton("✕")
         settingsNav.addView(inputSettings, weightedButtonParams())
         settingsNav.addView(memorySettings, weightedButtonParams())
@@ -588,11 +590,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildLivePage() {
-        livePage.addView(label("INPUT / LEARN", 20f, 18).apply {
+        livePage.addView(label("INTAKE / ANALYSIS", 20f, 18).apply {
             setTextColor(Color.rgb(105, 225, 235))
         })
         livePage.addView(label(
-            "Sensoren sind ein Werkzeug hinter den Settings. LEARN schreibt neue Erfahrung; PLAY erkennt nur bereits Bekanntes. DREAM nimmt keinen externen Input an.",
+            "Sensor-Intake liegt hinter der Oberfläche. LEARN schreibt neue Erfahrung in die Akte; PLAY prüft nur vorhandene Einträge. DREAM akzeptiert keinen externen Intake.",
             12f,
             6
         ).apply { setTextColor(Color.LTGRAY) })
@@ -612,28 +614,29 @@ class MainActivity : ComponentActivity() {
         }, weightedButtonParams())
         livePage.addView(cognitiveRow, buttonParams(8))
 
-        audioEncoderStatus = label("Audio-Encoder: ${audioEncoderMode.label}", 14f, 12).apply {
+        audioEncoderStatus = stableDiagnosticLabel("Signal-Parser: ${audioEncoderMode.label}", 14f, 12, 1).apply {
             setTextColor(Color.rgb(145, 210, 255))
         }
         livePage.addView(audioEncoderStatus)
 
-        status = label("Audio: AUS", 19f, 10)
-        frequency = label(
+        status = stableDiagnosticLabel("Audio-Feed: AUS", 17f, 10, 1)
+        frequency = stableDiagnosticLabel(
             when (audioEncoderMode) {
                 AudioEncoderMode.FFT_FREQUENCY -> "Dominante Frequenz: — Hz"
                 AudioEncoderMode.DIRECT_PATTERN -> "Direktmuster: —"
                 AudioEncoderMode.ADAPTIVE_PATTERN -> "Adaptive-ID: —"
             },
-            15f,
-            6
+            14f,
+            6,
+            1
         )
-        frequencyId = label(when (audioEncoderMode) {
+        frequencyId = stableDiagnosticLabel(when (audioEncoderMode) {
             AudioEncoderMode.FFT_FREQUENCY -> "Frequenz-ID: —"
             AudioEncoderMode.DIRECT_PATTERN -> "Pattern-ID: —"
             AudioEncoderMode.ADAPTIVE_PATTERN -> "Adaptive Pattern-ID: —"
-        }, 15f, 4)
-        strength = label("Signalstärke: —", 15f, 4)
-        frames = label("Frames verarbeitet: 0", 15f, 4)
+        }, 14f, 4, 1)
+        strength = stableDiagnosticLabel("Signalstärke: —", 14f, 4, 1)
+        frames = stableDiagnosticLabel("Frames verarbeitet: 0", 14f, 4, 1)
         livePage.addView(status)
         livePage.addView(frequency)
         livePage.addView(frequencyId)
@@ -652,11 +655,11 @@ class MainActivity : ComponentActivity() {
         livePage.addView(startButton, buttonParams(12))
         livePage.addView(stopButton, buttonParams(6))
 
-        cameraStatus = label("Kamera: AUS", 17f, 16).apply { setTextColor(Color.rgb(235, 175, 95)) }
-        cameraFrames = label("Visuelle Frames: 0 · visuelle Beobachtungen: 0", 13f, 5).apply {
+        cameraStatus = stableDiagnosticLabel("Optical Feed: AUS", 15f, 16, 1).apply { setTextColor(Color.rgb(235, 175, 95)) }
+        cameraFrames = stableDiagnosticLabel("Visuelle Frames: 0 · visuelle Beobachtungen: 0", 12f, 5, 2).apply {
             setTextColor(Color.rgb(205, 205, 205))
         }
-        adaptiveVisualQuantizerStatus = label(adaptiveVisualQuantizerText(), 12f, 4).apply {
+        adaptiveVisualQuantizerStatus = stableDiagnosticLabel(adaptiveVisualQuantizerText(), 11f, 4, 2).apply {
             setTextColor(Color.rgb(195, 175, 235))
         }
         livePage.addView(cameraStatus)
@@ -675,7 +678,7 @@ class MainActivity : ComponentActivity() {
         livePage.addView(cameraButton, buttonParams(8))
         livePage.addView(cameraStopButton, buttonParams(6))
 
-        livePage.addView(label("LIVE-VERZÖGERUNG / FRAME-SYNC", 14f, 12).apply {
+        livePage.addView(label("TEMPORAL SYNC / FRAME CONTROL", 14f, 12).apply {
             setTextColor(Color.rgb(120, 220, 205))
         })
         liveDelaySpinner = Spinner(this).apply {
@@ -699,12 +702,12 @@ class MainActivity : ComponentActivity() {
             }
         }
         livePage.addView(liveDelaySpinner, buttonParams(4))
-        liveLatencyStatus = label("Live-Sync: —", 12f, 6).apply {
+        liveLatencyStatus = stableDiagnosticLabel("Temporal Sync: —", 11f, 6, 2).apply {
             setTextColor(Color.rgb(185, 205, 215))
         }
         livePage.addView(liveLatencyStatus)
 
-        memoryStats = label(memoryText(), 13f, 16).apply { setTextColor(Color.rgb(180, 220, 215)) }
+        memoryStats = stableDiagnosticLabel(memoryText(), 11f, 16, 22).apply { setTextColor(Color.rgb(180, 220, 215)) }
         livePage.addView(memoryStats)
 
         livePage.addView(label(
@@ -839,21 +842,21 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildMemoryPage() {
-        memoryPage.addView(label("MEMORY — INTERNES SPIEL", 20f, 18).apply {
+        memoryPage.addView(label("ARCHIVE — INTERNAL ACCESS", 20f, 18).apply {
             setTextColor(Color.rgb(226, 130, 255))
         })
         memoryPage.addView(label(
-            "Kein Mikrofon, keine Kamera, kein neues Lernen. MEMORY traversiert gelernte Pfade; DREAM wechselt autonom zwischen Prediction, Relationen, Substitutionsklassen und Crossmodal-Brücken.",
+            "Kein Mikrofon, keine Kamera, kein neues Lernen. ARCHIVE traversiert gespeicherte Pfade; BRANCH WALK bewegt sich autonom zwischen Prediction, Relationen, Substitutionsklassen und Crossmodal-Brücken.",
             12f,
             6
         ).apply { setTextColor(Color.LTGRAY) })
 
-        memoryModeStatus = label("MEMORY: bereit", 15f, 14).apply {
+        memoryModeStatus = label("ARCHIVE: bereit", 15f, 14).apply {
             setTextColor(Color.rgb(225, 205, 255))
         }
         memoryPage.addView(memoryModeStatus)
 
-        dreamModeStatus = label("DREAM: bereit", 14f, 6).apply {
+        dreamModeStatus = label("BRANCH WALK: bereit", 14f, 6).apply {
             setTextColor(Color.rgb(255, 176, 112))
         }
         memoryPage.addView(dreamModeStatus)
@@ -869,7 +872,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
         }
         val start = Button(this).apply {
-            text = "MEMORY RUN"
+            text = "ARCHIVE RUN"
             setOnClickListener { startMemoryPlayback() }
         }
         val step = Button(this).apply {
@@ -881,7 +884,7 @@ class MainActivity : ComponentActivity() {
                 memory.setCognitiveMode(CognitiveMode.PLAY)
                 syncCognitiveModeUi()
                 val ok = memory.memoryPlaybackStep()
-                memoryModeStatus.text = if (ok) "MEMORY: Einzelschritt" else "MEMORY: noch keine gelernten Makros"
+                memoryModeStatus.text = if (ok) "ARCHIVE: Einzelschritt" else "ARCHIVE: noch keine gelernten Makros"
                 refreshMemoryPage()
                 updateMemoryStats()
             }
@@ -900,11 +903,11 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
         }
         dreamRow.addView(Button(this).apply {
-            text = "DREAM RUN"
+            text = "BRANCH RUN"
             setOnClickListener { startDreamPlayback() }
         }, weightedButtonParams())
         dreamRow.addView(Button(this).apply {
-            text = "DREAM STEP"
+            text = "BRANCH STEP"
             setOnClickListener {
                 stopMemoryPlayback(clear = false)
                 stopAudio()
@@ -913,13 +916,13 @@ class MainActivity : ComponentActivity() {
                 memory.setCognitiveMode(CognitiveMode.DREAM)
                 syncCognitiveModeUi()
                 val ok = memory.autonomousDreamStep()
-                dreamModeStatus.text = if (ok) "DREAM: Einzelschritt" else "DREAM: noch keine gelernten Makros"
+                dreamModeStatus.text = if (ok) "BRANCH WALK: Einzelschritt" else "BRANCH WALK: noch keine gelernten Makros"
                 refreshMemoryPage()
                 updateMemoryStats()
             }
         }, weightedButtonParams())
         dreamRow.addView(Button(this).apply {
-            text = "DREAM STOP"
+            text = "BRANCH STOP"
             setOnClickListener { enterPlayMode() }
         }, weightedButtonParams())
         memoryPage.addView(dreamRow, buttonParams(6))
@@ -937,7 +940,7 @@ class MainActivity : ComponentActivity() {
         memoryPage.addView(memoryOrchestraStatus)
 
         memoryPage.addView(Button(this).apply {
-            text = "MEMORY AUDIO PREVIEW"
+            text = "ARCHIVE AUDIO PREVIEW"
             setOnClickListener {
                 unifiedAudio.stop()
                 val state = outputBridge.snapshot()
@@ -945,7 +948,7 @@ class MainActivity : ComponentActivity() {
             }
         }, buttonParams(6))
 
-        memoryPage.addView(label("KNOWLEDGE BASE", 16f, 18).apply {
+        memoryPage.addView(label("CENTRAL ARCHIVE", 16f, 18).apply {
             setTextColor(Color.rgb(233, 211, 143))
         })
         memoryPage.addView(label(
@@ -973,27 +976,27 @@ class MainActivity : ComponentActivity() {
             }
         })
 
-        memoryPage.addView(label("EXTERNAL KNOWLEDGE IMPORT", 14f, 10).apply {
+        memoryPage.addView(label("ARCHIVE INTAKE", 14f, 10).apply {
             setTextColor(Color.rgb(205, 182, 245))
         })
         memoryPage.addView(label(
             "Step 46 importiert nur das kanonische equinox-external-knowledge-v1 Schema. Erst Dry-Run/Validierung, dann optionaler atomarer BASE-Install. Embeddings dürfen nur sparse Relationen zwischen bereits geerdeten Makros ableiten.",
             12f, 4
         ).apply { setTextColor(Color.LTGRAY) })
-        externalKnowledgeStatus = label("External Knowledge: bereit · noch kein Import", 12f, 5).apply {
+        externalKnowledgeStatus = label("Archive Intake: bereit · noch kein Import", 12f, 5).apply {
             setTextColor(Color.rgb(190, 205, 235))
         }
         memoryPage.addView(externalKnowledgeStatus)
         memoryPage.addView(Button(this).apply {
-            text = "EXTERNAL KNOWLEDGE DRY-RUN / IMPORT"
+            text = "ARCHIVE INTAKE · DRY-RUN / IMPORT"
             setOnClickListener { externalKnowledgeImportLauncher.launch(arrayOf("application/json", "text/json", "text/plain", "*/*")) }
         }, buttonParams(6))
 
-        memoryPage.addView(label("MEMORY PROFILES", 16f, 18).apply {
+        memoryPage.addView(label("CASE FILES", 16f, 18).apply {
             setTextColor(Color.rgb(233, 211, 143))
         })
         memoryPage.addView(label(
-            "Ein Profil enthält das indexierte Langzeitgedächtnis plus adaptive Audio- und Visual-Codebooks. UI-Einstellungen bleiben global.",
+            "Eine Case File enthält das indexierte Langzeitgedächtnis plus adaptive Audio- und Visual-Codebooks. UI-Einstellungen bleiben global.",
             12f, 5
         ).apply { setTextColor(Color.LTGRAY) })
 
@@ -1226,7 +1229,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun buildLabPage() {
-        labPage.addView(label("LAB — DEBUG / SPEICHER / PARAMETER", 20f, 18).apply {
+        labPage.addView(label("CONTROL BUREAU — DEBUG / ARCHIVE / PARAMETERS", 20f, 18).apply {
             setTextColor(Color.rgb(150, 175, 210))
         })
 
@@ -1293,7 +1296,7 @@ class MainActivity : ComponentActivity() {
             directEncoderButton.isEnabled = audioEncoderMode != AudioEncoderMode.DIRECT_PATTERN
             adaptiveEncoderButton.isEnabled = audioEncoderMode != AudioEncoderMode.ADAPTIVE_PATTERN
             labAudioEncoderStatus.text = "Aktiv: ${audioEncoderMode.label}"
-            if (::audioEncoderStatus.isInitialized) audioEncoderStatus.text = "Audio-Encoder: ${audioEncoderMode.label}"
+            if (::audioEncoderStatus.isInitialized) audioEncoderStatus.text = "Signal-Parser: ${audioEncoderMode.label}"
         }
         fftEncoderButton.setOnClickListener {
             setAudioEncoderMode(AudioEncoderMode.FFT_FREQUENCY)
@@ -1522,7 +1525,7 @@ class MainActivity : ComponentActivity() {
             labPage.addView(row)
         }
 
-        labPage.addView(label("LANGZEITDIAGNOSE", 16f, 16).apply { setTextColor(Color.rgb(130, 220, 210)) })
+        labPage.addView(label("ARCHIVE DIAGNOSTICS", 16f, 16).apply { setTextColor(Color.rgb(130, 220, 210)) })
         diagnosticsStatus = label("Noch keine Diagnose-Samples", 12f, 5).apply { setTextColor(Color.rgb(190, 205, 220)) }
         labPage.addView(diagnosticsStatus)
         fun refreshDiagnosticsStatus() {
@@ -1556,13 +1559,13 @@ class MainActivity : ComponentActivity() {
         labPage.addView(diagRow)
         refreshDiagnosticsStatus()
 
-        labPage.addView(label("LONG-TERM HARD TEST", 16f, 18).apply { setTextColor(Color.rgb(245, 190, 95)) })
+        labPage.addView(label("CONTINUITY AUDIT", 16f, 18).apply { setTextColor(Color.rgb(245, 190, 95)) })
         labPage.addView(label(
             "Misst nur. Der Test verändert keine Lernregeln. Automatisches Sample alle 5 Minuten; für verwertbare Trends sollte die App über längere Zeit mit ähnlichen Alltagsbedingungen laufen.",
             12f,
             4
         ).apply { setTextColor(Color.LTGRAY) })
-        hardTestStatus = label("Hard Test: noch keine Daten", 12f, 6).apply { setTextColor(Color.rgb(225, 215, 175)) }
+        hardTestStatus = label("Continuity Audit: noch keine Daten", 12f, 6).apply { setTextColor(Color.rgb(225, 215, 175)) }
         labPage.addView(hardTestStatus)
         val hardTestRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         hardTestRow1.addView(Button(this).apply {
@@ -1615,14 +1618,14 @@ class MainActivity : ComponentActivity() {
         intervalSpinner = Spinner(this)
         val intervals = arrayOf("5 Sekunden", "15 Sekunden", "30 Sekunden", "1 Minute", "5 Minuten", "15 Minuten", "30 Minuten")
         intervalSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, intervals)
-        consolidationStatus = label("Konsolidierung: 5 s · nächste: —\n$lastConsolidationSummary", 13f, 16).apply {
+        consolidationStatus = label("Archive Consolidation: 5 s · nächste: —\n$lastConsolidationSummary", 13f, 16).apply {
             setTextColor(Color.rgb(255, 205, 105))
         }
         labPage.addView(consolidationStatus)
         labPage.addView(intervalSpinner, buttonParams(6))
 
         labPage.addView(Button(this).apply {
-            text = "JETZT KONSOLIDIEREN"
+            text = "ARCHIVE CONSOLIDATION · JETZT"
             setOnClickListener {
                 val result = memory.consolidate()
                 lastConsolidationMs = System.currentTimeMillis()
@@ -1645,10 +1648,10 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(6))
 
         labPage.addView(Button(this).apply {
-            text = "MEMORY COMPETITION JETZT"
+            text = "PRUNING PROTOCOL · JETZT"
             setOnClickListener {
                 val r = memory.runMemoryCompetition(force = true)
-                lastConsolidationSummary = "Memory Competition: ${r.macrosExamined} geprüft · ${r.macrosPruned} Makros · ${r.relationsPruned} Relationen · ${r.candidatesPruned} Kandidaten entfernt · ${r.protectedMacros} geschützt"
+                lastConsolidationSummary = "Pruning Protocol: ${r.macrosExamined} geprüft · ${r.macrosPruned} Makros · ${r.relationsPruned} Relationen · ${r.candidatesPruned} Kandidaten gepruned · ${r.protectedMacros} geschützt"
                 updateConsolidationStatus()
                 updateMemoryStats()
                 refreshGraph()
@@ -1748,8 +1751,8 @@ class MainActivity : ComponentActivity() {
                 hybridPage.visibility = View.GONE
                 labPage.visibility = View.GONE
                 memoryPage.visibility = View.VISIBLE
-                memoryModeStatus.text = if (memory.hasLearnedMacros()) "MEMORY: bereit" else "MEMORY: noch keine gelernten Makros"
-                if (::dreamModeStatus.isInitialized) dreamModeStatus.text = if (memory.hasLearnedMacros()) "DREAM: bereit" else "DREAM: noch keine gelernten Makros"
+                memoryModeStatus.text = if (memory.hasLearnedMacros()) "ARCHIVE: bereit" else "ARCHIVE: noch keine gelernten Makros"
+                if (::dreamModeStatus.isInitialized) dreamModeStatus.text = if (memory.hasLearnedMacros()) "BRANCH WALK: bereit" else "BRANCH WALK: noch keine gelernten Makros"
             }
             AppPage.LAB -> {
                 stopMemoryPlayback(clear = false)
@@ -1859,10 +1862,10 @@ class MainActivity : ComponentActivity() {
         if (::hybridSensorStatus.isInitialized) {
             hybridSensorStatus.text = "Sensoren: Audio ${if (running) "AKTIV" else "AUS"} · Kamera ${if (cameraRunning) "AKTIV" else "AUS"}"
         }
-        if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio: AUS"
+        if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio-Feed: AUS"
         if (::startButton.isInitialized) startButton.isEnabled = !running
         if (::stopButton.isInitialized) stopButton.isEnabled = running
-        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · ${memory.cognitiveMode().label} · coarse→fine" else "Kamera: AUS"
+        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · ${memory.cognitiveMode().label} · coarse→fine" else "Optical Feed: AUS"
         if (::cameraButton.isInitialized) cameraButton.isEnabled = !cameraRunning
         if (::cameraStopButton.isInitialized) cameraStopButton.isEnabled = cameraRunning
     }
@@ -1870,7 +1873,7 @@ class MainActivity : ComponentActivity() {
     private fun startMemoryPlayback() {
         enterPlayMode(stopInternalPlayback = false)
         if (!memory.hasLearnedMacros()) {
-            memoryModeStatus.text = "MEMORY: noch keine gelernten Makros"
+            memoryModeStatus.text = "ARCHIVE: noch keine gelernten Makros"
             return
         }
         stopAudio()
@@ -1881,7 +1884,7 @@ class MainActivity : ComponentActivity() {
         stopDreamPlayback(clear = false)
         if (!memoryPlaybackRunning) {
             memoryPlaybackRunning = true
-            memoryModeStatus.text = "MEMORY: RUN · nur gelerntes Gedächtnis"
+            memoryModeStatus.text = "ARCHIVE: RUN · nur gelernte Aktenlage"
             uiHandler.removeCallbacks(memoryLoop)
             uiHandler.post(memoryLoop)
         }
@@ -1894,16 +1897,16 @@ class MainActivity : ComponentActivity() {
         uiHandler.removeCallbacks(dreamLoop)
         if (clear) memory.clearMomentaryState()
         if (::memoryModeStatus.isInitialized) {
-            memoryModeStatus.text = if (memory.hasLearnedMacros()) "MEMORY: gestoppt" else "MEMORY: noch keine gelernten Makros"
+            memoryModeStatus.text = if (memory.hasLearnedMacros()) "ARCHIVE: gestoppt" else "ARCHIVE: noch keine gelernten Makros"
         }
         if (::dreamModeStatus.isInitialized) {
-            dreamModeStatus.text = if (memory.hasLearnedMacros()) "DREAM: gestoppt" else "DREAM: noch keine gelernten Makros"
+            dreamModeStatus.text = if (memory.hasLearnedMacros()) "BRANCH WALK: gestoppt" else "BRANCH WALK: noch keine gelernten Makros"
         }
     }
 
     private fun startDreamPlayback() {
         if (!memory.hasLearnedMacros()) {
-            if (::dreamModeStatus.isInitialized) dreamModeStatus.text = "DREAM: noch keine gelernten Makros"
+            if (::dreamModeStatus.isInitialized) dreamModeStatus.text = "BRANCH WALK: noch keine gelernten Makros"
             return
         }
         stopAudio()
@@ -1915,7 +1918,7 @@ class MainActivity : ComponentActivity() {
         memory.setCognitiveMode(CognitiveMode.DREAM)
         syncCognitiveModeUi()
         dreamPlaybackRunning = true
-        dreamModeStatus.text = "DREAM: RUN · read-only autonome Exploration"
+        dreamModeStatus.text = "BRANCH WALK: RUN · read-only autonome Exploration"
         uiHandler.removeCallbacks(dreamLoop)
         uiHandler.post(dreamLoop)
     }
@@ -1925,7 +1928,7 @@ class MainActivity : ComponentActivity() {
         uiHandler.removeCallbacks(dreamLoop)
         if (clear) memory.clearMomentaryState()
         if (::dreamModeStatus.isInitialized) {
-            dreamModeStatus.text = if (memory.hasLearnedMacros()) "DREAM: gestoppt" else "DREAM: noch keine gelernten Makros"
+            dreamModeStatus.text = if (memory.hasLearnedMacros()) "BRANCH WALK: gestoppt" else "BRANCH WALK: noch keine gelernten Makros"
         }
     }
 
@@ -1935,11 +1938,11 @@ class MainActivity : ComponentActivity() {
         if (unifiedAudio.isRunning()) unifiedAudio.updateState(state.sound, state.working)
         val w = state.working
         if (settingsOpen && ::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
-            memoryModeStatus.text = "MEMORY: RUN · ${w.nodes.size} aktiv · ${w.exchanges.size} Austausch"
+            memoryModeStatus.text = "ARCHIVE: RUN · ${w.nodes.size} aktiv · ${w.exchanges.size} Austausch"
         }
         if (settingsOpen && ::dreamModeStatus.isInitialized && dreamPlaybackRunning) {
             val d = memory.stats()
-            dreamModeStatus.text = "DREAM: RUN · ${d.dreamLastMode} · Schritt ${d.dreamSteps} · ${w.nodes.size} aktiv"
+            dreamModeStatus.text = "BRANCH WALK: RUN · ${d.dreamLastMode} · Schritt ${d.dreamSteps} · ${w.nodes.size} aktiv"
         }
     }
 
@@ -2024,7 +2027,7 @@ class MainActivity : ComponentActivity() {
         val st = livePipeline.stats()
         val g = performanceGovernor.snapshot()
         liveLatencyStatus.text =
-            "Live-Sync: ${st.preset.label} · effektiv ${st.effectiveDelayMs} ms · Analyse Ø ${"%.1f".format(st.analysisCostEwmaMs)} ms · Render Ø ${"%.1f".format(st.renderCostEwmaMs)} ms · Frames ${st.renderedFrames}/${st.offeredFrames} · verworfen ${st.droppedFrames} · Buffer ${st.bufferedFrames} · Governor ${g.profile.label} (${g.profile.fieldBudget}F/${g.profile.linkBudget}L)"
+            "Temporal Sync: ${st.preset.label} · effektiv ${st.effectiveDelayMs} ms · Analyse Ø ${"%.1f".format(st.analysisCostEwmaMs)} ms · Render Ø ${"%.1f".format(st.renderCostEwmaMs)} ms · Frames ${st.renderedFrames}/${st.offeredFrames} · verworfen ${st.droppedFrames} · Buffer ${st.bufferedFrames} · Governor ${g.profile.label} (${g.profile.fieldBudget}F/${g.profile.linkBudget}L)"
     }
 
     private fun startUnifiedCapture(resultCode: Int, data: android.content.Intent) {
@@ -2216,7 +2219,7 @@ class MainActivity : ComponentActivity() {
         running = true
         startButton.isEnabled = false
         stopButton.isEnabled = true
-        status.text = "Audio: AKTIV"
+        status.text = "Audio-Feed: AKTIV"
         refreshSensorUiState()
         lastConsolidationMs = System.currentTimeMillis()
 
@@ -2443,7 +2446,7 @@ class MainActivity : ComponentActivity() {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
                 cameraRunning = true
-                cameraStatus.text = "Kamera: AKTIV · ${memory.cognitiveMode().label} · coarse→fine"
+                cameraStatus.text = "Optical Feed: AKTIV · ${memory.cognitiveMode().label} · coarse→fine"
                 cameraButton.isEnabled = false
                 cameraStopButton.isEnabled = true
                 refreshSensorUiState()
@@ -2465,7 +2468,7 @@ class MainActivity : ComponentActivity() {
         visualAnalyzer = null
         livePipeline.clearFrames()
         adaptiveVisualQuantizer.saveNow()
-        cameraStatus.text = "Kamera: AUS"
+        cameraStatus.text = "Optical Feed: AUS"
         if (::adaptiveVisualQuantizerStatus.isInitialized) adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
         cameraButton.isEnabled = true
         cameraStopButton.isEnabled = false
@@ -2492,7 +2495,7 @@ class MainActivity : ComponentActivity() {
         } else interval
         val seconds = (remaining + 999L) / 1000L
         val label = intervalSpinner.selectedItem?.toString() ?: "—"
-        consolidationStatus.text = "Konsolidierung: $label · nächste in ${seconds}s\n$lastConsolidationSummary"
+        consolidationStatus.text = "Archive Consolidation: $label · nächste in ${seconds}s\n$lastConsolidationSummary"
     }
 
     private fun refreshEncoderBenchmarkStatus() {
@@ -2524,7 +2527,7 @@ class MainActivity : ComponentActivity() {
         if (!::hardTestStatus.isInitialized || !::hardTest.isInitialized) return
         val h = hardTest.summary()
         if (h.samples == 0) {
-            hardTestStatus.text = "Hard Test: ${if (h.running) "LÄUFT" else "AUS"} · noch keine Samples"
+            hardTestStatus.text = "Continuity Audit: ${if (h.running) "LÄUFT" else "AUS"} · noch keine Samples"
             return
         }
         val hours = h.elapsedMs / 3_600_000.0
@@ -2535,9 +2538,9 @@ class MainActivity : ComponentActivity() {
         val early = h.earlyMacroRate?.let { "%.2f".format(it) } ?: "—"
         val recent = h.recentMacroRate?.let { "%.2f".format(it) } ?: "—"
         hardTestStatus.text =
-            "Hard Test: ${if (h.running) "LÄUFT" else "GESTOPPT"} · ${h.samples} Samples · ${"%.2f".format(hours)} h · ΔObs ${h.observationsDelta}\n" +
+            "Continuity Audit: ${if (h.running) "LÄUFT" else "GESTOPPT"} · ${h.samples} Samples · ${"%.2f".format(hours)} h · ΔObs ${h.observationsDelta}\n" +
             "Makros Δ ${h.macroDelta} · Relationen Δ ${h.relationDelta} · Makros/10k Obs ${"%.2f".format(h.macrosPer10kObservations)} · Trend $early→$recent (${h.macroGrowthTrend})\n" +
-            "Neuheit: Audio ${"%.1f".format(h.latestAudioNovelty * 100.0)}% · Vision ${"%.1f".format(h.latestVisualNovelty * 100.0)}% · Kompression ${"%.1f".format(h.latestCompressionGain * 100.0)}%\n" +
+            "Varianz: Audio ${"%.1f".format(h.latestAudioNovelty * 100.0)}% · Vision ${"%.1f".format(h.latestVisualNovelty * 100.0)}% · Kompression ${"%.1f".format(h.latestCompressionGain * 100.0)}%\n" +
             "Prediction Intervall: ${h.intervalPredictionHits}/${h.intervalPredictionChecks} (${"%.1f".format(h.intervalPredictionHitRate * 100.0)}%) · vergessen Δ ${h.prunedDelta}\n" +
             "Store ${"%.2f".format(storageMb)} MB (Δ ${"%+.2f".format(storageDeltaMb)} MB) · Heap ${"%.1f".format(heapMb)} MB (Δ ${"%+.1f".format(heapDeltaMb)} MB)\n" +
             "disk-backed ${h.latestDiskBackedMacros} Makros · Token-Reads ${h.latestTokenReads}"
@@ -2565,27 +2568,27 @@ class MainActivity : ComponentActivity() {
         adaptiveQuantizer.updateStructureContext(s.adaptiveAudioMacros, s.macroRelations)
         adaptiveVisualQuantizer.updateStructureContext(s.adaptiveVisualMacros, s.crossModalMacros)
         val levelText = if (s.levelCounts.isEmpty()) "noch keine" else s.levelCounts.entries.joinToString(" · ") { "${AbstractionTier.labelForMacroDepth(it.key)}:${it.value}" }
-        return "Cognitive Mode: ${memory.cognitiveMode().label} · ${if (memory.cognitiveMode() == CognitiveMode.LEARN) "PERSISTENT WRITES AN" else "READ-ONLY"}\n" +
+        return "Case State: ${memory.cognitiveMode().label} · ${if (memory.cognitiveMode() == CognitiveMode.LEARN) "PERSISTENT WRITES AN" else "READ-ONLY"}\n" +
             "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
             "Audio-Alphabete: FFT ${s.fftAudioCodes} Q/${s.fftAudioMacros} M · Direct ${s.directAudioCodes} Q/${s.directAudioMacros} M · Adaptive ${s.adaptiveAudioCodes} Q/${s.adaptiveAudioMacros} M\n" +
             "Vision: adaptive ${s.adaptiveVisualCodes} Q/${s.adaptiveVisualMacros} M · visuell gesamt ${s.visualPersistentCodes} Q\n" +
             "Crossmodal: ${s.crossModalMacros} Makros · ${s.crossModalCandidates} Kandidaten · Aktivierungen ${s.crossModalActivations} · stärkster Kandidat ${s.strongestCrossModalSupport}/4\n" +
             "Makros: ${s.macroCodes} | $levelText | Relationen: ${s.macroRelations}\n" +
-            "Knowledge Layers: BASE ${s.baseKnowledgeMacros} · PERSONAL ${s.personalKnowledgeMacros} · DERIVED ${s.derivedKnowledgeMacros} | Base ${if (s.basePackId.isBlank()) "—" else s.basePackId + " v" + s.basePackVersion} · ${if (s.baseKnowledgeEnabled) "AN" else "AUS/BLANK"} | kompatibel ${if (s.baseCompatibilityOk) "ja" else "NEIN"}\n" +
+            "Archive Layers: BASE ${s.baseKnowledgeMacros} · PERSONAL ${s.personalKnowledgeMacros} · DERIVED ${s.derivedKnowledgeMacros} | Base ${if (s.basePackId.isBlank()) "—" else s.basePackId + " v" + s.basePackVersion} · ${if (s.baseKnowledgeEnabled) "AN" else "AUS/BLANK"} | kompatibel ${if (s.baseCompatibilityOk) "ja" else "NEIN"}\n" +
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
-            "Recall Hardening: ${s.recallRetrieved}/${s.recallCandidates} materialisiert · verworfen ${s.recallRejected} · InfoGain Ø ${"%.3f".format(s.recallMeanInformationGain)} · Recall-Faktor ${"%.2f".format(s.recallFactor)} · schwach verfallen ${s.weakCandidatesExpired}\n" +
-            "Predictive Recall: ${s.predictionRawCandidates}→${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Coverage ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%) | Top-1 ${s.predictionTop1Hits}/${s.predictionTop1Checks} (${"%.1f".format(s.predictionTop1HitRate * 100.0)}%) vs Baseline ${"%.1f".format(s.predictionBaselineHitRate * 100.0)}% | Lift ${if (s.predictionLift >= 0.0) "+" else ""}${"%.1f".format(s.predictionLift * 100.0)} pp\n" +
-            "Hybrid: ${s.hybridSteps} interne Schritte | letzter Seed ${if (s.hybridSeedId == 0) "—" else s.hybridSeedId}\n" +
-            "Dream: ${s.dreamSteps} Schritte | P ${s.dreamPredictionHops} · R ${s.dreamRelationHops} · S ${s.dreamSubstitutionHops} · X ${s.dreamCrossModalHops} · Restart ${s.dreamRestarts} | letzter Modus ${s.dreamLastMode}\n" +
+            "Retrieval Control: ${s.recallRetrieved}/${s.recallCandidates} materialisiert · verworfen ${s.recallRejected} · InfoGain Ø ${"%.3f".format(s.recallMeanInformationGain)} · Recall-Faktor ${"%.2f".format(s.recallFactor)} · schwach verfallen ${s.weakCandidatesExpired}\n" +
+            "Branch Forecast: ${s.predictionRawCandidates}→${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Coverage ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%) | Top-1 ${s.predictionTop1Hits}/${s.predictionTop1Checks} (${"%.1f".format(s.predictionTop1HitRate * 100.0)}%) vs Baseline ${"%.1f".format(s.predictionBaselineHitRate * 100.0)}% | Lift ${if (s.predictionLift >= 0.0) "+" else ""}${"%.1f".format(s.predictionLift * 100.0)} pp\n" +
+            "Live Branch: ${s.hybridSteps} interne Schritte | letzter Seed ${if (s.hybridSeedId == 0) "—" else s.hybridSeedId}\n" +
+            "Branch Walk: ${s.dreamSteps} Schritte | P ${s.dreamPredictionHops} · R ${s.dreamRelationHops} · S ${s.dreamSubstitutionHops} · X ${s.dreamCrossModalHops} · Restart ${s.dreamRestarts} | letzter Modus ${s.dreamLastMode}\n" +
             "Höchster aktiver Tier: ${s.highestActiveTier} · höchste Reife ${"%.2f".format(s.highestActiveMaturityScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
             "Relevanz aktiv: Ø ${"%.3f".format(s.meanActiveRelevance)} | max ${"%.3f".format(s.highestActiveRelevance)} | Kontextentropie Ø ${"%.3f".format(s.meanActiveContextEntropy)} | Generalität max ${"%.3f".format(s.highestActiveGenerality)}\n" +
             "Adaptive Hierarchie: Q ${s.hierarchyBaseInputTokens} Token | Makro-Emissionen ${s.hierarchyBaseMacroEmissions} | gespart ${s.hierarchyBaseSavedTokens} (${"%.1f".format(s.hierarchyBaseCompressionGain * 100.0)}%) | ØSpan ${"%.2f".format(s.hierarchyMeanAcceptedSpan)} | Auto-Makros ${s.hierarchyAutoPromotions}\n" +
-            "Hierarchical Routing: Treffer ${s.routingHits}/${s.routingQueries} (${"%.1f".format(s.routingHitRate * 100.0)}%) | ØSpan ${"%.2f".format(s.routingMeanMatchedSpan)} | Signaturchecks ${s.routingSignatureChecks} | vermieden ${s.routingChecksAvoided} | Index ${s.routingIndexStreams} Streams/${s.routingIndexAnchors} Anker/${s.routingIndexSignatures} Makros\n" +
-            "Memory Competition: Läufe ${s.competitionRuns} | entfernt gesamt ${s.competitionMacrosPruned} M/${s.competitionRelationsPruned} R/${s.competitionCandidatesPruned} K | letzter Lauf ${s.competitionLastPruned} entfernt · ${s.competitionLastProtected} geschützt · Druckgruppen ${s.competitionLastPressuredGroups}\n" +
-            "Long-Term Store: ${s.storageBackend} · ${s.storageBytes} Bytes · disk-backed Makros ${s.storageDiskBackedMacros}/${s.macroCodes} · Token-Lesezugriffe ${s.storageTokenReads}\n" +
-            "Sequenz-/Kandidatenraum: offen · aktuell ${s.temporaryCodes} temporäre Kandidaten"
+            "Routing Desk: Treffer ${s.routingHits}/${s.routingQueries} (${"%.1f".format(s.routingHitRate * 100.0)}%) | ØSpan ${"%.2f".format(s.routingMeanMatchedSpan)} | Signaturchecks ${s.routingSignatureChecks} | vermieden ${s.routingChecksAvoided} | Index ${s.routingIndexStreams} Streams/${s.routingIndexAnchors} Anker/${s.routingIndexSignatures} Makros\n" +
+            "Pruning Protocol: Läufe ${s.competitionRuns} | entfernt gesamt ${s.competitionMacrosPruned} M/${s.competitionRelationsPruned} R/${s.competitionCandidatesPruned} K | letzter Lauf ${s.competitionLastPruned} entfernt · ${s.competitionLastProtected} geschützt · Druckgruppen ${s.competitionLastPressuredGroups}\n" +
+            "Deep Archive: ${s.storageBackend} · ${s.storageBytes} Bytes · disk-backed Makros ${s.storageDiskBackedMacros}/${s.macroCodes} · Token-Lesezugriffe ${s.storageTokenReads}\n" +
+            "Open Case Space: offen · aktuell ${s.temporaryCodes} temporäre Kandidaten"
     }
 
     private fun consolidationSummary(result: ConsolidationResult): String {
@@ -2601,7 +2604,7 @@ class MainActivity : ComponentActivity() {
         if (running) stopAudio()
         audioEncoderMode = mode
         audioEncoderModeStore.save(mode)
-        if (::audioEncoderStatus.isInitialized) audioEncoderStatus.text = "Audio-Encoder: ${mode.label}"
+        if (::audioEncoderStatus.isInitialized) audioEncoderStatus.text = "Signal-Parser: ${mode.label}"
         if (::labAudioEncoderStatus.isInitialized) labAudioEncoderStatus.text = "Aktiv: ${mode.label}"
         if (::frequency.isInitialized) {
             frequency.text = when (mode) {
@@ -2630,7 +2633,7 @@ class MainActivity : ComponentActivity() {
         audioRecord = null
         worker = null
         adaptiveQuantizer.saveNow()
-        status.text = "Audio: AUS"
+        status.text = "Audio-Feed: AUS"
         startButton.isEnabled = true
         stopButton.isEnabled = false
         refreshSensorUiState()
@@ -2715,6 +2718,35 @@ class MainActivity : ComponentActivity() {
         isClickable = true
         isFocusable = true
         attachPressMotion(this)
+    }
+
+    /**
+     * Fixed-height diagnostic slot for live values. The settings sheet must not relayout
+     * every time a counter grows, a percentage appears or a status string changes length.
+     * Keeping a stable line budget removes the visible vertical "jumping" while sensors run.
+     */
+    private fun stableDiagnosticLabel(
+        textValue: String,
+        size: Float = 13f,
+        top: Int = 4,
+        lines: Int = 1
+    ): TextView = TextView(this).apply {
+        text = textValue
+        textSize = size
+        typeface = Typeface.MONOSPACE
+        setTextColor(Color.rgb(218, 224, 228))
+        gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        setPadding(dp(8), dp(top), dp(8), dp(2))
+        minLines = lines
+        maxLines = lines
+        setLines(lines)
+        ellipsize = TextUtils.TruncateAt.END
+        background = roundedBackground(
+            Color.argb(22, 24, 38, 31),
+            8f,
+            Color.argb(28, 76, 226, 128),
+            1
+        )
     }
 
     private fun label(textValue: String, size: Float = 18f, top: Int = 16): TextView = TextView(this).apply {

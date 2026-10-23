@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 62
-        versionName = "0.6-step46.1-hypno-only-surface"
+        versionCode = 63
+        versionName = "0.6-step46.2-archive-ui-stability"
     }
 
     compileOptions {

@@ -1,18 +1,11 @@
-# Equinox v0.6 — Step 46.1
+# Equinox v0.6 — Step 46.2
 
-Current milestone: **Hypno-only Product Surface**.
+Current milestone: **Archive Vocabulary / Stable Live Diagnostics**.
 
-The product screen is now a single full-screen HYPNO experience. The old Reality <-> Memory control, labels and blend slider are removed from the startup surface. Live camera/audio can still activate the Unified State, but raw camera pigment is no longer exposed as a visible Reality mode.
+The product surface remains HYPNO-only. Step 46.2 is a UI-only polish pass:
 
-The bottom product dock is deliberately compact:
+- selected settings terminology now uses a playful archive / branch / variance / pruning bureaucracy vocabulary;
+- live audio/video diagnostic rows have fixed geometry, so changing counters and analysis strings no longer make the settings sheet jump;
+- no learning, memory, profile, BASE, import or renderer semantics were changed.
 
-- **LIVE / DREAM** — chooses the activation source, not the renderer.
-- **♪** — Unified Audio on/off.
-- **REC** — unified capture.
-- **⚙** — settings/lab.
-
-HYPNO always renders at full generative strength. STRUCTURE remains available only as a temporary LAB diagnostic preview and automatically returns to HYPNO when Settings is closed. LEARN remains inside Settings/Input.
-
-Step 46 External Knowledge Import, BASE/PERSONAL/DERIVED layers, profiles and persistent memory formats are unchanged.
-
-See `README_STEP46_1.md` for implementation notes.
+See `README_STEP46_2.md` for the terminology map and layout details.
