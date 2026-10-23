@@ -3,6 +3,7 @@ package de.equinox.v05
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
@@ -13,6 +14,7 @@ import android.os.Looper
 import android.os.Build
 import android.os.PowerManager
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
 import android.widget.AdapterView
@@ -72,6 +74,8 @@ class MainActivity : ComponentActivity() {
     private var lastLabRenderMs = 0L
     private lateinit var surfaceVideo: GpuMemoryVideoView
     private lateinit var settingsOverlay: ScrollView
+    private lateinit var settingsScrim: View
+    private lateinit var settingsSheet: FrameLayout
     private val livePipeline = LowLatencyLivePipeline()
     private val performanceGovernor = PerformanceGovernor()
     private var visualAnalyzer: VisualGridAnalyzer? = null
@@ -262,26 +266,39 @@ class MainActivity : ComponentActivity() {
         val controlBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(10), dp(5), dp(8), dp(5))
-            setBackgroundColor(Color.argb(205, 8, 10, 14))
+            setPadding(dp(12), dp(8), dp(10), dp(8))
+            background = roundedBackground(Color.argb(232, 12, 14, 20), 24f, Color.argb(46, 255, 255, 255), 1)
+            elevation = dp(12).toFloat()
         }
         val realityLabel = TextView(this).apply {
             text = "REALITY"
-            textSize = 11f
-            setTextColor(Color.rgb(200, 208, 220))
+            textSize = 10f
+            letterSpacing = 0.12f
+            setTextColor(Color.rgb(188, 197, 211))
             gravity = Gravity.CENTER
         }
         val blendSlider = SeekBar(this).apply {
             max = 100
             progress = 35
+            splitTrack = false
         }
         val memoryLabel = TextView(this).apply {
             text = "MEMORY 35%"
-            textSize = 11f
-            setTextColor(Color.rgb(225, 198, 116))
+            textSize = 10f
+            letterSpacing = 0.06f
+            setTextColor(Color.rgb(233, 211, 143))
             gravity = Gravity.CENTER
         }
-        val settingsButton = Button(this).apply { text = "⚙" }
+        val settingsButton = TextView(this).apply {
+            text = "⚙"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = roundedBackground(Color.argb(64, 255, 255, 255), 18f)
+            isClickable = true
+            isFocusable = true
+            attachPressMotion(this)
+        }
         controlBar.addView(realityLabel, LinearLayout.LayoutParams(dp(58), dp(48)))
         controlBar.addView(blendSlider, LinearLayout.LayoutParams(0, dp(48), 1f))
         controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(84), dp(48)))
@@ -290,39 +307,85 @@ class MainActivity : ComponentActivity() {
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM
-        )
+        ).apply {
+            marginStart = dp(12)
+            marginEnd = dp(12)
+            bottomMargin = dp(10)
+        }
         rootFrame.addView(controlBar, controlBarParams)
 
         rootFrame.setOnApplyWindowInsetsListener { _, insets ->
             val lp = controlBar.layoutParams as FrameLayout.LayoutParams
-            val bottom = insets.systemWindowInsetBottom
+            val bottom = insets.systemWindowInsetBottom + dp(10)
             if (lp.bottomMargin != bottom) {
                 lp.bottomMargin = bottom
                 controlBar.layoutParams = lp
             }
+            if (::settingsSheet.isInitialized) {
+                val sheetLp = settingsSheet.layoutParams as FrameLayout.LayoutParams
+                val sheetBottom = insets.systemWindowInsetBottom
+                if (sheetLp.bottomMargin != sheetBottom) {
+                    sheetLp.bottomMargin = sheetBottom
+                    settingsSheet.layoutParams = sheetLp
+                }
+            }
             insets
         }
 
-        settingsOverlay = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(16, 18, 22))
-            isFillViewport = true
+        // Step 35: settings are a true animated bottom sheet. The unified canvas remains
+        // visible beneath a dim scrim, so opening controls never feels like navigating away.
+        settingsScrim = View(this).apply {
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            alpha = 0f
             visibility = View.GONE
+            isClickable = true
+        }
+        rootFrame.addView(settingsScrim, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        settingsSheet = FrameLayout(this).apply {
+            background = roundedBackground(Color.rgb(17, 19, 25), 30f, Color.argb(38, 255, 255, 255), 1)
+            elevation = dp(24).toFloat()
+            visibility = View.INVISIBLE
+        }
+        val sheetParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            (resources.displayMetrics.heightPixels * 0.82f).roundToInt(),
+            Gravity.BOTTOM
+        ).apply {
+            marginStart = dp(8)
+            marginEnd = dp(8)
+        }
+        rootFrame.addView(settingsSheet, sheetParams)
+
+        settingsOverlay = ScrollView(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
         }
         val settingsRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(18), dp(20), dp(18), dp(36))
-            setBackgroundColor(Color.rgb(16, 18, 22))
+            setPadding(dp(18), dp(14), dp(18), dp(44))
+            setBackgroundColor(Color.TRANSPARENT)
         }
         settingsOverlay.addView(settingsRoot, ViewGroup.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
-        rootFrame.addView(settingsOverlay, FrameLayout.LayoutParams(
+        settingsSheet.addView(settingsOverlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
+        val grabber = View(this).apply {
+            background = roundedBackground(Color.argb(90, 235, 238, 245), 4f)
+        }
+        settingsSheet.addView(grabber, FrameLayout.LayoutParams(dp(42), dp(4), Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(8)
+        })
+
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 31 — UNIFIED CANVAS + ORCHESTRA / REALITY ↔ MEMORY", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 35 — PRODUCT UI / MOTION + HAPTICS", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -330,10 +393,10 @@ class MainActivity : ComponentActivity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val inputSettings = Button(this).apply { text = "INPUT" }
-        val memorySettings = Button(this).apply { text = "MEMORY" }
-        val labSettings = Button(this).apply { text = "LAB" }
-        val closeSettings = Button(this).apply { text = "✕" }
+        val inputSettings = productButton("INPUT")
+        val memorySettings = productButton("MEMORY")
+        val labSettings = productButton("LAB")
+        val closeSettings = productButton("✕")
         settingsNav.addView(inputSettings, weightedButtonParams())
         settingsNav.addView(memorySettings, weightedButtonParams())
         settingsNav.addView(labSettings, weightedButtonParams())
@@ -352,6 +415,7 @@ class MainActivity : ComponentActivity() {
         buildHybridPage()
         buildMemoryPage()
         buildLabPage()
+        polishProductTree(settingsRoot)
 
         if (::liveVideoCanvas.isInitialized) liveVideoCanvas.visibility = View.GONE
         if (::outputCanvas.isInitialized) outputCanvas.visibility = View.GONE
@@ -370,9 +434,41 @@ class MainActivity : ComponentActivity() {
             refreshGraph()
         }
 
+        fun openSettingsOverlay() {
+            if (settingsOpen) return
+            settingsOpen = true
+            showSettingsSection(currentPage)
+            settingsScrim.visibility = View.VISIBLE
+            settingsSheet.visibility = View.VISIBLE
+            settingsScrim.animate().alpha(1f).setDuration(180L).start()
+            settingsSheet.post {
+                settingsSheet.translationY = settingsSheet.height.toFloat()
+                settingsSheet.alpha = 0.96f
+                settingsSheet.animate()
+                    .translationY(0f)
+                    .alpha(1f)
+                    .setDuration(300L)
+                    .setInterpolator(android.view.animation.DecelerateInterpolator())
+                    .start()
+            }
+        }
+
         fun closeSettingsOverlay() {
+            if (!settingsOpen) return
             settingsOpen = false
-            settingsOverlay.visibility = View.GONE
+            settingsScrim.animate().alpha(0f).setDuration(170L).withEndAction {
+                settingsScrim.visibility = View.GONE
+            }.start()
+            settingsSheet.animate()
+                .translationY(settingsSheet.height.toFloat())
+                .alpha(0.96f)
+                .setDuration(240L)
+                .setInterpolator(android.view.animation.AccelerateInterpolator())
+                .withEndAction {
+                    settingsSheet.visibility = View.INVISIBLE
+                    settingsSheet.translationY = 0f
+                    settingsSheet.alpha = 1f
+                }.start()
             refreshGraph()
         }
 
@@ -384,15 +480,18 @@ class MainActivity : ComponentActivity() {
                 memoryLabel.text = "MEMORY ${progress.coerceIn(0, 100)}%"
                 refreshGraph()
             }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
-            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                seekBar?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                seekBar?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
         })
 
         settingsButton.setOnClickListener {
-            settingsOpen = !settingsOpen
-            settingsOverlay.visibility = if (settingsOpen) View.VISIBLE else View.GONE
-            if (settingsOpen) showSettingsSection(currentPage)
+            if (settingsOpen) closeSettingsOverlay() else openSettingsOverlay()
         }
+        settingsScrim.setOnClickListener { closeSettingsOverlay() }
         inputSettings.setOnClickListener { showSettingsSection(AppPage.LIVE) }
         memorySettings.setOnClickListener { showSettingsSection(AppPage.MEMORY) }
         labSettings.setOnClickListener { showSettingsSection(AppPage.LAB) }
@@ -2001,6 +2100,81 @@ class MainActivity : ComponentActivity() {
         updateMemoryStats()
         if (::encoderBenchmark.isInitialized && encoderBenchmark.isActive()) refreshEncoderBenchmarkStatus()
         refreshGraph()
+    }
+
+    private fun polishProductTree(root: ViewGroup) {
+        for (i in 0 until root.childCount) {
+            val child = root.getChildAt(i)
+            when (child) {
+                is Button -> {
+                    child.isAllCaps = false
+                    child.textSize = 13f
+                    child.setTextColor(Color.rgb(235, 237, 244))
+                    child.background = roundedBackground(
+                        Color.argb(46, 255, 255, 255), 16f, Color.argb(28, 255, 255, 255), 1
+                    )
+                    child.minHeight = dp(48)
+                    attachPressMotion(child)
+                }
+                is CheckBox -> {
+                    child.textSize = 13f
+                    child.setTextColor(Color.rgb(218, 222, 232))
+                    child.setPadding(child.paddingLeft, dp(8), child.paddingRight, dp(8))
+                    attachPressMotion(child)
+                }
+                is EditText -> {
+                    child.setTextColor(Color.WHITE)
+                    child.setHintTextColor(Color.rgb(130, 136, 150))
+                    child.background = roundedBackground(
+                        Color.argb(34, 255, 255, 255), 14f, Color.argb(34, 255, 255, 255), 1
+                    )
+                    child.setPadding(dp(12), dp(10), dp(12), dp(10))
+                }
+            }
+            if (child is ViewGroup) polishProductTree(child)
+        }
+    }
+
+    private fun roundedBackground(color: Int, radiusDp: Float, strokeColor: Int? = null, strokeWidthDp: Int = 0): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(color)
+            cornerRadius = radiusDp * resources.displayMetrics.density
+            if (strokeColor != null && strokeWidthDp > 0) {
+                setStroke(dp(strokeWidthDp), strokeColor)
+            }
+        }
+
+    private fun attachPressMotion(view: View) {
+        view.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    v.animate().scaleX(0.94f).scaleY(0.94f).alpha(0.82f).setDuration(70L).start()
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(150L)
+                        .setInterpolator(android.view.animation.OvershootInterpolator(1.15f)).start()
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(120L).start()
+                }
+            }
+            false
+        }
+    }
+
+    private fun productButton(textValue: String): TextView = TextView(this).apply {
+        text = textValue
+        textSize = 12f
+        letterSpacing = 0.08f
+        gravity = Gravity.CENTER
+        setTextColor(Color.rgb(232, 235, 242))
+        setPadding(dp(10), dp(12), dp(10), dp(12))
+        background = roundedBackground(Color.argb(38, 255, 255, 255), 16f, Color.argb(28, 255, 255, 255), 1)
+        isClickable = true
+        isFocusable = true
+        attachPressMotion(this)
     }
 
     private fun label(textValue: String, size: Float = 18f, top: Int = 16): TextView = TextView(this).apply {

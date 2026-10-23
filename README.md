@@ -26,6 +26,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-eq32-visualhierarchy` | `Eq32_VisualHierarchy.zip` | 49 | 0 | `e7e7e62cb20e7352872a7e5ef1e6d0f996ecb80bf9f255d2e7f38bb2bc6b4a12` |
 | `android-eq33-fluidhierarchy` | `Eq33_FluidHierarchy.zip` | 50 | 0 | `18a041bd79e86b6dd59a579aefdc8278255c025fb3c889ceb864b071272f2790` |
 | `android-eq34-governor` | `Eq34_Governor.zip` | 52 | 0 | `70ed0c1d79d8ae45de0064559695ed4fa3b87f43ac8441d68ce12e5701d75a3e` |
+| `android-eq35-productui` | `Eq35_ProductUI.zip` | 53 | 0 | `6408ca8a3d04dc3bd0e4125141bff697720030ba1ecd08f60d60e92f49d08bb1` |
 
 ## Security, licensing, and limitations
 
