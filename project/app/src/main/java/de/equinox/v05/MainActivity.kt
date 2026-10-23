@@ -1,6 +1,7 @@
 package de.equinox.v05
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -93,6 +94,29 @@ class MainActivity : ComponentActivity() {
             CaptureForegroundService.stop(this)
         }
     }
+    private val profileExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri == null || !::profiles.isInitialized) return@registerForActivityResult
+        val selected = selectedProfileInfo() ?: return@registerForActivityResult
+        val ok = runCatching {
+            contentResolver.openOutputStream(uri)?.let { profiles.exportProfile(selected.id, it) } ?: false
+        }.getOrDefault(false)
+        if (::profileStatus.isInitialized) profileStatus.text = if (ok) "Profil exportiert: ${selected.name}" else "Profil-Export fehlgeschlagen"
+    }
+
+    private val profileImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null || !::profiles.isInitialized) return@registerForActivityResult
+        val suggested = uri.lastPathSegment?.substringAfterLast('/') ?: "Imported Memory"
+        val imported = runCatching {
+            contentResolver.openInputStream(uri)?.let { profiles.importProfile(it, suggested) }
+        }.getOrNull()
+        if (imported != null) {
+            refreshProfileControls(selectId = imported.id)
+            if (::profileStatus.isInitialized) profileStatus.text = "Importiert: ${imported.name} · LOAD zum Aktivieren"
+        } else if (::profileStatus.isInitialized) {
+            profileStatus.text = "Profil-Import fehlgeschlagen"
+        }
+    }
+
     private val livePipeline = LowLatencyLivePipeline()
     private val performanceGovernor = PerformanceGovernor()
     private var visualAnalyzer: VisualGridAnalyzer? = null
@@ -151,6 +175,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraStopButton: Button
     private lateinit var displayPrefsStore: DisplayPrefsStore
     private lateinit var saveSlots: SaveSlotManager
+    private lateinit var profiles: MemoryProfileManager
+    private lateinit var profileSpinner: Spinner
+    private lateinit var profileStatus: TextView
+    private var profileSpinnerSyncing = false
     private lateinit var diagnostics: DiagnosticsManager
     private lateinit var diagnosticsStatus: TextView
     private lateinit var hardTest: LongTermHardTestManager
@@ -250,6 +278,7 @@ class MainActivity : ComponentActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         displayPrefsStore = DisplayPrefsStore(this)
         saveSlots = SaveSlotManager(this)
+        profiles = MemoryProfileManager(this)
         diagnostics = DiagnosticsManager(this)
         hardTest = LongTermHardTestManager(this)
         audioEncoderModeStore = AudioEncoderModeStore(this)
@@ -415,7 +444,7 @@ class MainActivity : ComponentActivity() {
         })
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 36 — UNIFIED CAPTURE / EXPORT", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 37 — MEMORY PROFILES / PORTABLE IDENTITIES", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
         captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Orchestra AAC", 12f, 4).apply {
@@ -881,6 +910,107 @@ class MainActivity : ComponentActivity() {
             }
         }, buttonParams(6))
 
+        memoryPage.addView(label("MEMORY PROFILES", 16f, 18).apply {
+            setTextColor(Color.rgb(233, 211, 143))
+        })
+        memoryPage.addView(label(
+            "Ein Profil enthält das indexierte Langzeitgedächtnis plus adaptive Audio- und Visual-Codebooks. UI-Einstellungen bleiben global.",
+            12f, 5
+        ).apply { setTextColor(Color.LTGRAY) })
+
+        profileStatus = label("Aktiv: ${profiles.activeProfileName()}", 13f, 6).apply {
+            setTextColor(Color.rgb(205, 220, 235))
+        }
+        memoryPage.addView(profileStatus)
+        profileSpinner = Spinner(this)
+        memoryPage.addView(profileSpinner, buttonParams(4))
+        refreshProfileControls()
+
+        val profileRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        profileRow1.addView(Button(this).apply {
+            text = "NEW"
+            setOnClickListener { askProfileName("Neues Gedächtnis", "Memory ${profiles.listProfiles().size + 1}") { name ->
+                stopAllForProfileSwitch()
+                saveLiveIdentity()
+                val created = profiles.createFresh(name)
+                if (created != null) {
+                    reloadLearnedIdentity()
+                    refreshProfileControls(selectId = created.id)
+                    profileStatus.text = "Neu und aktiv: ${created.name}"
+                } else profileStatus.text = "Neues Profil konnte nicht erstellt werden"
+            } }
+        }, weightedButtonParams())
+        profileRow1.addView(Button(this).apply {
+            text = "SAVE"
+            setOnClickListener {
+                saveLiveIdentity()
+                val ok = profiles.saveActive()
+                refreshProfileControls()
+                profileStatus.text = if (ok) "Gespeichert: ${profiles.activeProfileName()}" else "Profil konnte nicht gespeichert werden"
+            }
+        }, weightedButtonParams())
+        profileRow1.addView(Button(this).apply {
+            text = "LOAD"
+            setOnClickListener {
+                val target = selectedProfileInfo() ?: return@setOnClickListener
+                stopAllForProfileSwitch()
+                saveLiveIdentity()
+                val ok = profiles.switchTo(target.id)
+                if (ok) {
+                    reloadLearnedIdentity()
+                    refreshProfileControls(selectId = target.id)
+                    profileStatus.text = "Aktiv: ${target.name}"
+                } else profileStatus.text = "Profil konnte nicht geladen werden"
+            }
+        }, weightedButtonParams())
+        memoryPage.addView(profileRow1, buttonParams(4))
+
+        val profileRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        profileRow2.addView(Button(this).apply {
+            text = "DUP"
+            setOnClickListener {
+                val source = selectedProfileInfo() ?: return@setOnClickListener
+                askProfileName("Profil duplizieren", "${source.name} Copy") { name ->
+                    saveLiveIdentity()
+                    val copy = profiles.duplicate(source.id, name)
+                    refreshProfileControls(selectId = copy?.id)
+                    profileStatus.text = if (copy != null) "Dupliziert: ${copy.name}" else "Duplizieren fehlgeschlagen"
+                }
+            }
+        }, weightedButtonParams())
+        profileRow2.addView(Button(this).apply {
+            text = "EXPORT"
+            setOnClickListener {
+                val selected = selectedProfileInfo() ?: return@setOnClickListener
+                saveLiveIdentity()
+                profileExportLauncher.launch(selected.name.replace(Regex("[^A-Za-z0-9._-]+"), "_") + ".eqx")
+            }
+        }, weightedButtonParams())
+        profileRow2.addView(Button(this).apply {
+            text = "IMPORT"
+            setOnClickListener { profileImportLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) }
+        }, weightedButtonParams())
+        memoryPage.addView(profileRow2, buttonParams(4))
+
+        memoryPage.addView(Button(this).apply {
+            text = "PROFIL LÖSCHEN"
+            setOnClickListener {
+                val selected = selectedProfileInfo() ?: return@setOnClickListener
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Profil löschen?")
+                    .setMessage(selected.name)
+                    .setNegativeButton("Abbrechen", null)
+                    .setPositiveButton("Löschen") { _, _ ->
+                        stopAllForProfileSwitch()
+                        val wasActive = selected.active
+                        val ok = profiles.delete(selected.id)
+                        if (ok && wasActive) reloadLearnedIdentity()
+                        refreshProfileControls()
+                        profileStatus.text = if (ok) "Profil gelöscht" else "Mindestens ein Profil muss bestehen bleiben"
+                    }.show()
+            }
+        }, buttonParams(4))
+
         memoryPage.addView(Button(this).apply {
             text = "AKTIVES FELD LEEREN"
             setOnClickListener {
@@ -888,6 +1018,68 @@ class MainActivity : ComponentActivity() {
                 refreshMemoryPage()
             }
         }, buttonParams(6))
+    }
+
+    private fun refreshProfileControls(selectId: String? = null) {
+        if (!::profileSpinner.isInitialized || !::profiles.isInitialized) return
+        val items = profiles.listProfiles()
+        val labels = items.map { (if (it.active) "● " else "") + it.name + if (it.bytes > 0L) " · ${it.bytes / 1024} KB" else "" }
+        profileSpinnerSyncing = true
+        profileSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+        val targetId = selectId ?: profiles.activeProfileId()
+        val index = items.indexOfFirst { it.id == targetId }.coerceAtLeast(0)
+        if (items.isNotEmpty()) profileSpinner.setSelection(index, false)
+        profileSpinnerSyncing = false
+    }
+
+    private fun selectedProfileInfo(): MemoryProfileManager.ProfileInfo? {
+        if (!::profileSpinner.isInitialized || !::profiles.isInitialized) return null
+        val items = profiles.listProfiles()
+        return items.getOrNull(profileSpinner.selectedItemPosition)
+    }
+
+    private fun askProfileName(title: String, initial: String, onName: (String) -> Unit) {
+        val input = EditText(this).apply {
+            setText(initial)
+            selectAll()
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(input)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("OK") { _, _ -> onName(input.text.toString()) }
+            .show()
+    }
+
+    private fun saveLiveIdentity() {
+        if (::memory.isInitialized) memory.saveNow()
+        if (::adaptiveQuantizer.isInitialized) adaptiveQuantizer.saveNow()
+        if (::adaptiveVisualQuantizer.isInitialized) adaptiveVisualQuantizer.saveNow()
+    }
+
+    private fun stopAllForProfileSwitch() {
+        stopAudio()
+        stopCameraLearning()
+        stopMemoryPlayback(clear = true)
+        stopDreamPlayback(clear = true)
+        if (hybridPlaybackRunning) stopHybridPlayback(clear = true)
+        if (continuousOrchestra.isRunning()) continuousOrchestra.stop()
+    }
+
+    /** Reloads only learned identity; UI/display preferences remain untouched. */
+    private fun reloadLearnedIdentity() {
+        memory.reloadFromDisk()
+        adaptiveQuantizer = AdaptiveAudioQuantizer(this)
+        adaptiveVisualQuantizer = AdaptiveVisualQuantizer(this)
+        visualAnalyzer = null
+        visualFrameCount = 0L
+        visualObservationCount = 0L
+        refreshMemoryPage()
+        updateMemoryStats()
+        refreshGraph()
+        if (::adaptiveQuantizerStatus.isInitialized) adaptiveQuantizerStatus.text = adaptiveQuantizerText()
+        if (::adaptiveVisualQuantizerStatus.isInitialized) adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
     }
 
     private fun buildLabPage() {

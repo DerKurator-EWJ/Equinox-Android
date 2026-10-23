@@ -28,6 +28,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-eq34-governor` | `Eq34_Governor.zip` | 52 | 0 | `70ed0c1d79d8ae45de0064559695ed4fa3b87f43ac8441d68ce12e5701d75a3e` |
 | `android-eq35-productui` | `Eq35_ProductUI.zip` | 53 | 0 | `6408ca8a3d04dc3bd0e4125141bff697720030ba1ecd08f60d60e92f49d08bb1` |
 | `android-eq36-record` | `Eq36_Record.zip` | 56 | 0 | `71e81c53fdbbee10b78969ce12b5254f7a2ab8787d0a06b8dcd536d4134c276d` |
+| `android-eq37-profiles` | `Eq37_Profiles.zip` | 58 | 0 | `1ca92e7c111969f60b5273316593f18cabd8a31e268a80835f0b800d1e592acb` |
 
 ## Security, licensing, and limitations
 
