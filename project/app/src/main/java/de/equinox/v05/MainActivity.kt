@@ -65,6 +65,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraStopButton: Button
     private lateinit var displayPrefsStore: DisplayPrefsStore
     private lateinit var saveSlots: SaveSlotManager
+    private lateinit var diagnostics: DiagnosticsManager
+    private lateinit var diagnosticsStatus: TextView
     private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
     @Volatile private var lastConsolidationMs = 0L
 
@@ -74,6 +76,7 @@ class MainActivity : ComponentActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         displayPrefsStore = DisplayPrefsStore(this)
         saveSlots = SaveSlotManager(this)
+        diagnostics = DiagnosticsManager(this)
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
@@ -99,7 +102,7 @@ class MainActivity : ComponentActivity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 11 — SAVE / LAB / SETTINGS", 18f, 16).apply {
+        root.addView(label("STEP 12 — LONG-TERM / PERFORMANCE", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -348,6 +351,72 @@ class MainActivity : ComponentActivity() {
             root.addView(row)
         }
 
+        root.addView(label("LANGZEITDIAGNOSE", 17f, 18).apply {
+            setTextColor(Color.rgb(130, 220, 210))
+        })
+
+        diagnosticsStatus = label("Noch keine Diagnose-Samples", 13f, 8).apply {
+            setTextColor(Color.rgb(190, 205, 220))
+        }
+        root.addView(diagnosticsStatus)
+
+        fun refreshDiagnosticsStatus() {
+            val d = diagnostics.summary()
+            diagnosticsStatus.text = if (d.samples == 0) {
+                "Noch keine Diagnose-Samples"
+            } else {
+                "Samples: ${d.samples} · ΔObs ${d.observationsSinceFirst}\n" +
+                    "ΔMikro ${d.newMicroSinceFirst} · ΔMakro ${d.newMacroSinceFirst} · ΔSeq ${d.newSequencesSinceFirst}\n" +
+                    "Neue Mikro/1000 Obs: ${"%.3f".format(d.microPer1000Observations)} · neue Seq/1000 Obs: ${"%.3f".format(d.sequencePer1000Observations)}\n" +
+                    "Memory-Datei: ${d.latestMemoryBytes / 1024} KB · Java-Heap: ${d.latestHeapBytes / (1024 * 1024)} MB"
+            }
+        }
+
+        val diagRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val sampleButton = Button(this).apply {
+            text = "DIAG SAMPLE"
+            setOnClickListener {
+                memory.saveNow()
+                diagnostics.capture(memory.stats())
+                refreshDiagnosticsStatus()
+            }
+        }
+
+        val csvButton = Button(this).apply {
+            text = "CSV SCHREIBEN"
+            setOnClickListener {
+                val f = diagnostics.writeCsvExport()
+                refreshDiagnosticsStatus()
+                diagnosticsStatus.text = diagnosticsStatus.text.toString() +
+                    "\nCSV intern: ${f.name} (${f.length()} Bytes)"
+            }
+        }
+
+        val resetDiagButton = Button(this).apply {
+            text = "DIAG RESET"
+            setOnClickListener {
+                diagnostics.reset()
+                refreshDiagnosticsStatus()
+            }
+        }
+
+        diagRow.addView(sampleButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        diagRow.addView(csvButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        diagRow.addView(resetDiagButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(diagRow)
+
+        root.addView(label(
+            "Härtetest-Ziel: In einer bekannten Umgebung sollten Beobachtungen weiter steigen, während die Rate neuer stabiler Mikrocodes und Sequenzen langfristig sinkt. Das wäre ein Hinweis auf Wiederverwendung/Kompression statt bloßer Struktur-Explosion.",
+            13f,
+            12
+        ).apply { setTextColor(Color.rgb(210, 190, 125)) })
+
+        refreshDiagnosticsStatus()
+
         root.addView(label(
             "2D und 3D zeigen exakt dasselbe relationale Gedächtnis. Die räumliche Tiefe existiert nur im Renderer. Höhere Knoten bekommen Formvorschläge aus einem kleinen mathematischen Geometrie-Grundgedächtnis; diese Formen sind Vorlagen, keine fundamentalen Raumobjekte.",
             12f,
@@ -445,7 +514,7 @@ class MainActivity : ComponentActivity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Step 11 ergänzt drei lokale Speicherstände sowie ein Lab für Darstellungseinstellungen. Die Speicherstände kopieren ausschließlich den internen Equinox-Gedächtniszustand. UI-Farben/Glow liegen separat in SharedPreferences; Kernlogik und Renderer bleiben getrennt.",
+            "Step 12 ergänzt Langzeitdiagnose statt neuer Kernfunktionen. Diagnose-Samples messen Wachstum von Mikro-, Makro- und Sequenzcodes, Beobachtungen, Relationszahl, interne Dateigröße und Java-Heap. Ziel ist zu prüfen, ob Equinox bei vertrauten Daten zunehmend vorhandene Strukturen wiederverwendet.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
@@ -700,6 +769,7 @@ class MainActivity : ComponentActivity() {
             "Makro gesamt: ${s.macroCodes} | Makrorelationen: ${s.macroRelations}\n" +
             "Sequenzen: ${s.sequenceCodes} Codes | ${s.promotedSequences} verdichtet | max Länge ${s.longestSequenceLength} | stärkstes Gewicht ${s.strongestSequenceWeight}\n" +
             "Vision: ${s.visualPersistentCodes} persistente Codes | Crossmodal: ${s.crossModalRelations} Relationen\n" +
+            "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}\n" +
             "Beobachtungen gesamt: ${s.observations} | stärkstes Mikrogewicht: ${s.strongestWeight}"
     }
 

@@ -28,7 +28,9 @@ data class MemoryStats(
     val strongestSequenceWeight: Long,
     val longestSequenceLength: Int,
     val visualPersistentCodes: Int,
-    val crossModalRelations: Int
+    val crossModalRelations: Int,
+    val sequenceCapacity: Int,
+    val sequenceCapacityUsedPercent: Double
 )
 
 data class GraphNode(
@@ -703,7 +705,11 @@ class MemoryModel(context: Context) {
                 val a = persistent[keyFrom(key)]?.modality
                 val b = persistent[keyTo(key)]?.modality
                 a != null && b != null && a != b
-            }
+            },
+            sequenceCapacity = MAX_SEQUENCE_NODES,
+            sequenceCapacityUsedPercent = if (MAX_SEQUENCE_NODES > 0) {
+                sequences.size * 100.0 / MAX_SEQUENCE_NODES.toDouble()
+            } else 0.0
         )
     }
 

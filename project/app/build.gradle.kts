@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.5-step11"
+        versionCode = 12
+        versionName = "0.5-step12"
     }
 
     compileOptions {
