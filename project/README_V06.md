@@ -1,27 +1,36 @@
-# Equinox v0.6 — Step 01: Core / Output Split
+# Equinox v0.6 — Step 02: Quant Alphabet + Macro Memory + Lazy Activation
 
-Basis: letzter stabiler Step12-Quellstand.
+Basis: v0.6 Step 01 Core/Output Split.
 
-Dieser Schritt ist absichtlich klein und build-orientiert:
-- AudioQuantizer kapselt Frequenz -> ID. Die FFT ist weiterhin nur Sensor-Frontend.
-- EngineOutputBridge erzeugt read-only Output-Snapshots nur bei Bedarf (lazy).
-- Graph und Sonifier greifen über die Output-Schicht auf den Zustand zu.
-- Bestehendes Memory-Dateiformat bleibt unverändert, damit vorhandenes Lernen erhalten bleibt.
-- Keine Step13/14-API-Annahmen wurden übernommen.
+## Was sich jetzt wirklich geändert hat
 
-Noch NICHT in diesem Schritt:
-- neues Makro-only Relationsmodell
-- Überaustausch
-- Slot/Templates
-- F..SSS..Omega Ranking
-- Vollbild Live/Memory/Hybrid UI
-- neuer generativer Canvas/Orchester-Renderer
+- **Level 0 ist nur noch ein Quant-Alphabet.** Audio- und Kamera-IDs werden erkannt und gezählt, aber zwischen Grundquanten wird **kein persistenter Relationsgraph** mehr aufgebaut.
+- **Gedächtnis beginnt bei wiederkehrenden Mustern.** Kurze Folgen von 2–6 Tokens sammeln zunächst nur temporäre Evidenz. Erst bei wiederholtem Auftreten werden sie zu persistenten Makroknoten.
+- **Relationen existieren nur zwischen Makroknoten.** Das verhindert den alten Mikro-Relationsgraphen.
+- **Lazy / event-driven.** Pro neuem Token werden nur die aktuellen kurzen Stream-Enden geprüft. Es gibt keinen Scan über alle gespeicherten Makros.
+- **Rekursive Abstraktion bis L4.** Wird ein Makro erkannt, wird seine ID als einzelnes Token in die nächste Ebene gespeist. So können Muster aus Makros wiederum Makros werden.
+- **Audio und Vision bleiben in Step 02 getrennte Streams.** Crossmodal-Bindung kommt später wieder gezielt hinein.
+- **Neue Memory-Datei `equinox_v06_memory.json`.** Der alte Step12/Step01-Graph wird absichtlich nicht als neues Modell uminterpretiert.
 
-Diese Punkte folgen nach erfolgreichem Build dieser Basis.
+## Warum das kleiner rechnet
 
-Build in Android Studio:
-1. Diesen Ordner als eigenes Projekt öffnen (nicht den alten Step12-Ordner).
-2. Breadcrumb/Projektpfad auf Equinox_v06_Step01_CoreSplit prüfen.
-3. Build > Build APK(s).
+Die Arbeit pro Input hängt primär von der kleinen aktiven Tail-Länge (max. 6) und den maximal vier Abstraktionsebenen ab. Gespeicherte Makros werden direkt über ihre Signatur adressiert. Das gesamte Gedächtnis muss nicht permanent berechnet werden.
 
-Hinweis: In der Erstellungsumgebung ist kein Android SDK installiert; der Quellstand wurde statisch geprüft, aber hier nicht zu einer APK kompiliert.
+## Noch nicht enthalten
+
+- Doppelrekursiver Überaustausch / Spiegelmatrix
+- mehrdimensionale Gewichte (Spezifität, Entropie usw.)
+- Template-/Slot-Erkennung
+- F → SSS → Ω+n Ranking
+- neuer Vollbild Live/Memory/Hybrid Output
+- neuer Canvas/Orchester-Generator
+- neuer direkter Audioencoder ohne FFT
+
+## Build
+
+1. Diesen Ordner als eigenes Projekt in Android Studio öffnen.
+2. Prüfen, dass der Projektpfad `Equinox_v06_Step02_QuantMacroLazy` ist.
+3. `Build > Build APK(s)`.
+4. Wegen gleicher Application-ID aktualisiert die APK die vorhandene App, sofern derselbe Signing-Key verwendet wird.
+
+Hinweis: In der Erstellungsumgebung ist kein Android SDK installiert. Der Quellstand wurde statisch geprüft, aber hier nicht als APK kompiliert.
