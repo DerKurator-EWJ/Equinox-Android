@@ -1,15 +1,11 @@
-# Equinox v0.6 Step 42 — Learn / Play / Dream Separation
+# Equinox v0.6 — Step 43
 
-Current project state through Step 42.
+Current milestone: **Hypno Mode**.
 
-Step 38 spatial compression, Step 39 hierarchical routing, Step 40 recall/prediction hardening and Step 41 unified audio/macro voices remain intact.
+The normal app now starts in HYPNO: the existing Unified State is rendered as a continuous organic field rather than a technical node/tissue representation. HYPNO remains strictly read-only and uses the same GPU surface, WorkingSetSnapshot and Reality <-> Memory blend.
 
-Step 42 introduces an explicit runtime contract:
+For comparison, open **Settings -> LAB -> PRODUCT RENDERER** and switch temporarily to **STRUCTURE**.
 
-- **LEARN** writes new experience,
-- **PLAY** lets live input activate only already learned knowledge,
-- **DREAM** is internal read-only activation.
+LEARN / PLAY / DREAM semantics from Step 42 are unchanged. Existing memory profiles and codebooks remain compatible.
 
-Adaptive audio/visual codebooks also have true read-only classification paths, so PLAY does not silently teach the encoder. Learning controls stay under Settings; the persistent unified canvas remains the product surface.
-
-See `README_STEP38.md` through `README_STEP42.md` for the recent implementation history.
+See `README_STEP43.md` for implementation and verification notes.

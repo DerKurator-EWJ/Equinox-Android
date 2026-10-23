@@ -302,7 +302,8 @@ class MainActivity : ComponentActivity() {
         }
 
         surfaceVideo = GpuMemoryVideoView(this).apply {
-            setModeLabel("UNIFIED")
+            setModeLabel("HYPNO")
+            setPresentationMode(UnifiedPresentationMode.HYPNO)
             setMemoryBlend(0.35f)
             unifiedAudio.setMemoryBlend(0.35f)
             visibility = View.VISIBLE
@@ -472,7 +473,7 @@ class MainActivity : ComponentActivity() {
         })
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 42 — LEARN / PLAY / DREAM", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 43 — HYPNO MODE", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
         captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Unified Audio AAC", 12f, 4).apply {
@@ -1142,6 +1143,45 @@ class MainActivity : ComponentActivity() {
         labPage.addView(label("LAB — DEBUG / SPEICHER / PARAMETER", 20f, 18).apply {
             setTextColor(Color.rgb(150, 175, 210))
         })
+
+        labPage.addView(label("PRODUCT RENDERER", 16f, 12).apply {
+            setTextColor(Color.rgb(178, 140, 255))
+        })
+        val productRendererStatus = label("Primär: HYPNO · organische Unified-State-Projektion", 13f, 5).apply {
+            setTextColor(Color.rgb(210, 190, 255))
+        }
+        labPage.addView(productRendererStatus)
+        labPage.addView(label(
+            "HYPNO ist die Consumer-Darstellung. STRUCTURE hält die technische Tier-/Gewebe-Projektion zum Vergleichen bereit. Beide lesen denselben WorkingSetSnapshot und schreiben niemals in MemoryModel zurück.",
+            12f,
+            4
+        ).apply { setTextColor(Color.LTGRAY) })
+        val rendererRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        val hypnoRendererButton = Button(this).apply { text = "HYPNO"; isEnabled = false }
+        val structureRendererButton = Button(this).apply { text = "STRUCTURE" }
+        fun refreshRendererButtons() {
+            val hypno = surfaceVideo.presentationMode() == UnifiedPresentationMode.HYPNO
+            hypnoRendererButton.isEnabled = !hypno
+            structureRendererButton.isEnabled = hypno
+            productRendererStatus.text = if (hypno)
+                "Primär: HYPNO · organische Unified-State-Projektion"
+            else
+                "Lab: STRUCTURE · technische Tier-/Gewebe-Projektion"
+        }
+        hypnoRendererButton.setOnClickListener {
+            surfaceVideo.setPresentationMode(UnifiedPresentationMode.HYPNO)
+            surfaceVideo.setModeLabel("HYPNO")
+            refreshRendererButtons()
+        }
+        structureRendererButton.setOnClickListener {
+            surfaceVideo.setPresentationMode(UnifiedPresentationMode.STRUCTURE)
+            surfaceVideo.setModeLabel("STRUCTURE")
+            refreshRendererButtons()
+        }
+        rendererRow.addView(hypnoRendererButton, weightedButtonParams())
+        rendererRow.addView(structureRendererButton, weightedButtonParams())
+        labPage.addView(rendererRow, buttonParams(6))
+        refreshRendererButtons()
 
         labPage.addView(label("AUDIO-ENCODER HARD TEST", 16f, 12).apply {
             setTextColor(Color.rgb(145, 210, 255))

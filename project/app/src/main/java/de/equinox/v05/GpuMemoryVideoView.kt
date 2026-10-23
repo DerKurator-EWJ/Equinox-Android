@@ -25,6 +25,8 @@ import kotlin.math.min
  *
  * The renderer never writes pixels, positions or blend state back into MemoryModel.
  */
+enum class UnifiedPresentationMode { HYPNO, STRUCTURE }
+
 class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
     private val gpuRenderer = GpuRenderer {
         postOnAnimation { requestRender() }
@@ -64,6 +66,13 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
 
     fun memoryBlend(): Float = gpuRenderer.memoryBlend
 
+    fun setPresentationMode(mode: UnifiedPresentationMode) {
+        gpuRenderer.presentationMode = mode
+        requestRender()
+    }
+
+    fun presentationMode(): UnifiedPresentationMode = gpuRenderer.presentationMode
+
     fun setModeLabel(label: String) {
         gpuRenderer.modeLabel = label.trim().uppercase().ifEmpty { "UNIFIED" }
     }
@@ -85,6 +94,10 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             val signedExchange: Float,
             val expectation: Float,
             val prediction: Float,
+            val noveltyProxy: Float,
+            val crossmodal: Float,
+            val tierDepth: Float,
+            val retrievalShare: Float,
             val fields: FloatArray,
             val fieldIds: IntArray,
             val fieldCount: Int,
@@ -95,8 +108,9 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         )
 
         @Volatile var lastRenderCostMs: Double = 0.0
-        @Volatile var modeLabel: String = "UNIFIED"
+        @Volatile var modeLabel: String = "HYPNO"
         @Volatile var memoryBlend: Float = 0.35f
+        @Volatile var presentationMode: UnifiedPresentationMode = UnifiedPresentationMode.HYPNO
         @Volatile var fieldBudget: Int = MAX_FIELDS
         @Volatile var linkBudget: Int = MAX_LINKS
 
@@ -138,7 +152,12 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         private var displaySignedExchange = 0f
         private var displayExpectation = 0f
         private var displayPrediction = 0f
+        private var displayNoveltyProxy = 0f
+        private var displayCrossmodal = 0f
+        private var displayTierDepth = 0f
+        private var displayRetrievalShare = 0f
         private var displayBlend = 0.35f
+        private var displayHypno = 1f
         private var lastAnimNanos = 0L
         private var animationActive = false
 
@@ -152,7 +171,9 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         private var aTexCoord = -1
         private var uTexture = -1
         private var uSummary = -1
+        private var uHypnoSummary = -1
         private var uBlend = -1
+        private var uPresentation = -1
         private var uTexel = -1
         private var uFieldCount = -1
         private var uFields = -1
@@ -183,6 +204,18 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             val exchangeEnergy = if (exchanges.isEmpty()) 0.0 else exchanges.sumOf { abs(it.value).coerceIn(0.0, 2.0) } / exchanges.size
             val signedExchange = if (exchanges.isEmpty()) 0.0 else exchanges.sumOf { it.value.coerceIn(-2.0, 2.0) } / exchanges.size
             val predictionEnergy = if (predictions.isEmpty()) 0.0 else predictions.sumOf { it.confidence.coerceIn(0.0, 1.0) } / predictions.size
+            val directNodes = nodes.filter { !it.retrieved }
+            val directActivation = if (directNodes.isEmpty()) 0.0 else directNodes.sumOf { it.activation.coerceIn(0.0, 1.0) } / directNodes.size
+            // Presentation-only novelty proxy: active live evidence that is not yet strongly
+            // explained by expectation/prediction. This is deliberately NOT persisted or fed back
+            // into MemoryModel and must not be confused with a learned novelty variable.
+            val noveltyProxy = (directActivation * (1.0 - (0.68 * meanExpectation + 0.32 * predictionEnergy))).coerceIn(0.0, 1.0)
+            val crossmodalEnergy = if (working?.crossModalLinks.isNullOrEmpty()) 0.0 else
+                working!!.crossModalLinks.sumOf { it.confidence.coerceIn(0.0, 1.0) } / working.crossModalLinks.size
+            val weightedTierDen = nodes.sumOf { max(it.activation, it.expectation).coerceIn(0.0, 1.0) }
+            val tierDepth = if (weightedTierDen <= 1e-9) 0.0 else
+                (nodes.sumOf { it.abstractionTierIndex.coerceAtLeast(0) * max(it.activation, it.expectation).coerceIn(0.0, 1.0) } / weightedTierDen / 10.0).coerceIn(0.0, 1.0)
+            val retrievalShare = if (nodes.isEmpty()) 0.0 else nodes.count { it.retrieved }.toDouble() / nodes.size.toDouble()
 
             val memoryEnergy = (
                 0.26 * meanActivation +
@@ -284,6 +317,10 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     signedExchange = signedExchange.coerceIn(-1.0, 1.0).toFloat(),
                     expectation = meanExpectation.coerceIn(0.0, 1.0).toFloat(),
                     prediction = predictionEnergy.coerceIn(0.0, 1.0).toFloat(),
+                    noveltyProxy = noveltyProxy.toFloat(),
+                    crossmodal = crossmodalEnergy.toFloat(),
+                    tierDepth = tierDepth.toFloat(),
+                    retrievalShare = retrievalShare.toFloat(),
                     fields = fieldData,
                     fieldIds = fieldIds,
                     fieldCount = strongest.size,
@@ -302,7 +339,9 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
             uTexture = GLES20.glGetUniformLocation(program, "uTexture")
             uSummary = GLES20.glGetUniformLocation(program, "uSummary")
+            uHypnoSummary = GLES20.glGetUniformLocation(program, "uHypnoSummary")
             uBlend = GLES20.glGetUniformLocation(program, "uBlend")
+            uPresentation = GLES20.glGetUniformLocation(program, "uPresentation")
             uTexel = GLES20.glGetUniformLocation(program, "uTexel")
             uFieldCount = GLES20.glGetUniformLocation(program, "uFieldCount")
             uFields = GLES20.glGetUniformLocation(program, "uFields[0]")
@@ -357,7 +396,15 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 displayExpectation,
                 displayPrediction
             )
+            GLES20.glUniform4f(
+                uHypnoSummary,
+                displayNoveltyProxy,
+                displayCrossmodal,
+                displayTierDepth,
+                displayRetrievalShare
+            )
             GLES20.glUniform1f(uBlend, displayBlend)
+            GLES20.glUniform1f(uPresentation, displayHypno)
             GLES20.glUniform2f(
                 uTexel,
                 1f / textureW.coerceAtLeast(1).toFloat(),
@@ -444,11 +491,21 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             val targetExchange = packet?.signedExchange ?: 0f
             val targetExpectation = packet?.expectation ?: 0f
             val targetPrediction = packet?.prediction ?: 0f
+            val targetNovelty = packet?.noveltyProxy ?: 0f
+            val targetCrossmodal = packet?.crossmodal ?: 0f
+            val targetTierDepth = packet?.tierDepth ?: 0f
+            val targetRetrievalShare = packet?.retrievalShare ?: 0f
+            val targetHypno = if (presentationMode == UnifiedPresentationMode.HYPNO) 1f else 0f
             displayMemoryEnergy += (targetMemory - displayMemoryEnergy) * medium
             displaySignedExchange += (targetExchange - displaySignedExchange) * medium
             displayExpectation += (targetExpectation - displayExpectation) * medium
             displayPrediction += (targetPrediction - displayPrediction) * medium
+            displayNoveltyProxy += (targetNovelty - displayNoveltyProxy) * medium
+            displayCrossmodal += (targetCrossmodal - displayCrossmodal) * medium
+            displayTierDepth += (targetTierDepth - displayTierDepth) * slow
+            displayRetrievalShare += (targetRetrievalShare - displayRetrievalShare) * medium
             displayBlend += (memoryBlend - displayBlend) * fast
+            displayHypno += (targetHypno - displayHypno) * fast
 
             smoothFields.values.forEach { f ->
                 f.x += (f.targetX - f.x) * slow
@@ -478,7 +535,12 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 kotlin.math.abs(targetExchange - displaySignedExchange) > 0.003f ||
                 kotlin.math.abs(targetExpectation - displayExpectation) > 0.003f ||
                 kotlin.math.abs(targetPrediction - displayPrediction) > 0.003f ||
-                kotlin.math.abs(memoryBlend - displayBlend) > 0.003f
+                kotlin.math.abs(targetNovelty - displayNoveltyProxy) > 0.003f ||
+                kotlin.math.abs(targetCrossmodal - displayCrossmodal) > 0.003f ||
+                kotlin.math.abs(targetTierDepth - displayTierDepth) > 0.003f ||
+                kotlin.math.abs(targetRetrievalShare - displayRetrievalShare) > 0.003f ||
+                kotlin.math.abs(memoryBlend - displayBlend) > 0.003f ||
+                kotlin.math.abs(targetHypno - displayHypno) > 0.003f
             return fieldMotion || linkMotion || summaryMotion
         }
 
@@ -639,7 +701,11 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 uniform sampler2D uTexture;
                 // x=memory energy, y=signed exchange, z=expectation, w=prediction
                 uniform vec4 uSummary;
+                // x=novelty proxy, y=crossmodal coherence, z=active tier depth, w=retrieval share
+                uniform vec4 uHypnoSummary;
                 uniform float uBlend;
+                // 0=technical structure/tissue, 1=primary organic Hypno projection
+                uniform float uPresentation;
                 uniform vec2 uTexel;
                 uniform int uFieldCount;
                 // x/y=renderer-only position, z=strength, w=zero-based abstraction tier
@@ -664,6 +730,11 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     float signedEx = clamp(uSummary.y, -1.0, 1.0);
                     float expectation = clamp(uSummary.z, 0.0, 1.0);
                     float prediction = clamp(uSummary.w, 0.0, 1.0);
+                    float novelty = clamp(uHypnoSummary.x, 0.0, 1.0);
+                    float crossmodal = clamp(uHypnoSummary.y, 0.0, 1.0);
+                    float tierDepth = clamp(uHypnoSummary.z, 0.0, 1.0);
+                    float retrievalShare = clamp(uHypnoSummary.w, 0.0, 1.0);
+                    float hypno = clamp(uPresentation, 0.0, 1.0);
 
                     // Tier-aware organization:
                     // F/E/D are fine local fibers, C..SS become membranes/tissue,
@@ -676,7 +747,10 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     float densityField = 0.0;
                     float domainField = 0.0;
                     float coreSpark = 0.0;
+                    float hypnoAura = 0.0;
+                    float hypnoInterference = 0.0;
                     vec2 hierarchyWarp = vec2(0.0);
+                    vec2 hypnoWarp = vec2(0.0);
 
                     for (int i = 0; i < 7; ++i) {
                         if (i < uFieldCount) {
@@ -713,11 +787,22 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                             float domain = (1.0 - smoothstep(0.22, 0.62, d)) * strength * omega;
                             domainField += domain;
 
+                            // Hypno does not draw a node graph. The same fields become overlapping
+                            // continuous auras and state-locked interference bands. There is no
+                            // clock/time term here: motion can only come from changing/interpolated state.
+                            float auraRadius = 0.12 + 0.035 * tier + 0.08 * strength;
+                            float aura = (1.0 - smoothstep(auraRadius, auraRadius + 0.22, d)) * strength;
+                            float band = 0.5 + 0.5 * sin(d * (34.0 + 24.0 * novelty) - tier * 0.72 + signedEx * 2.4);
+                            hypnoAura += aura;
+                            hypnoInterference += aura * band * (0.35 + 0.65 * (prediction + crossmodal) * 0.5);
+
                             vec2 radial = delta / max(0.08, d);
                             vec2 tangent = vec2(-radial.y, radial.x);
                             hierarchyWarp -= radial * (0.00010 * fineFiber / d2);
                             hierarchyWarp += tangent * (0.00018 * localTissue / d2) * sign(signedEx + 0.0001);
                             hierarchyWarp -= radial * domain * (0.0010 + 0.0012 * memory);
+                            hypnoWarp += tangent * aura * (0.0010 + 0.0018 * crossmodal) * sign(signedEx + 0.0001);
+                            hypnoWarp -= radial * aura * (0.00045 + 0.0012 * prediction);
                         }
                     }
 
@@ -726,9 +811,13 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     densityField = min(1.25, densityField);
                     domainField = min(1.0, domainField);
                     coreSpark = min(1.0, coreSpark);
+                    hypnoAura = min(1.35, hypnoAura);
+                    hypnoInterference = min(1.25, hypnoInterference);
 
-                    // Memory depth shapes the same camera pigment. No time-based wobble.
-                    uv += hierarchyWarp * (0.30 + 0.70 * reality);
+                    // Memory depth shapes the same camera pigment. Hypno adds only state-driven
+                    // field flow; there is still no artificial time wobble.
+                    uv += mix(hierarchyWarp * (0.30 + 0.70 * reality),
+                              (hierarchyWarp * 0.18 + hypnoWarp) * (0.42 + 0.58 * memory), hypno);
                     uv = clamp(uv, vec2(0.002), vec2(0.998));
 
                     vec2 chroma = vec2(0.0017 * signedEx * memory * reality, -0.0012 * signedEx * memory * reality);
@@ -788,6 +877,33 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     finalColor += mix(tissueCyan, tissueGold, prediction) * fineFiber * memory * reality * 0.022;
                     finalColor += mix(tissueMagenta, tissueCyan, 0.5) * domainField * memory * reality * 0.012;
 
+                    // HYPNO: an organic, continuous projection of the exact same Unified State.
+                    // Activity controls presence; prediction controls coherence; signed exchange
+                    // controls flow polarity; novelty sharpens interference; tier depth broadens
+                    // the field; crossmodal confidence fuses the cyan/gold families. Explicit
+                    // relation lines are intentionally absent from this consumer presentation.
+                    vec3 hypnoDeep = vec3(0.004, 0.006, 0.014);
+                    vec3 hypnoCool = vec3(0.06, 0.58, 0.92);
+                    vec3 hypnoWarm = vec3(0.98, 0.55, 0.16);
+                    vec3 hypnoViolet = vec3(0.58, 0.12, 0.86);
+                    vec3 coherent = mix(hypnoViolet, hypnoCool, 0.34 + 0.58 * crossmodal);
+                    coherent = mix(coherent, hypnoWarm, 0.12 + 0.42 * prediction);
+                    float organic = clamp(0.56 * hypnoAura + 0.62 * hypnoInterference, 0.0, 1.4);
+                    float noveltyRim = pow(clamp(hypnoInterference, 0.0, 1.0), 1.6) * novelty;
+                    float calmDepth = tierDepth * (0.18 + 0.38 * retrievalShare);
+                    vec3 hypnoMemory = hypnoDeep;
+                    hypnoMemory += coherent * organic * (0.14 + 0.56 * memory);
+                    hypnoMemory += mix(hypnoCool, hypnoWarm, 0.5 + 0.5 * signedEx) * noveltyRim * 0.30;
+                    hypnoMemory += mix(hypnoViolet, hypnoCool, crossmodal) * calmDepth * hypnoAura * 0.16;
+                    // Camera is pigment, not geometry authority. Toward Reality it remains legible;
+                    // toward Memory the organic state projection takes over.
+                    vec3 hypnoCamera = camera * (0.90 + 0.08 * prediction);
+                    hypnoCamera += coherent * cameraEdge * (0.025 + 0.09 * crossmodal) * memory;
+                    vec3 hypnoColor = mix(hypnoCamera, hypnoMemory, blend);
+                    // A small state trace remains at the Reality side without exposing graph lines.
+                    hypnoColor += coherent * organic * memory * reality * 0.025;
+
+                    finalColor = mix(finalColor, hypnoColor, hypno);
                     gl_FragColor = vec4(clamp(finalColor, 0.0, 1.0), 1.0);
                 }
             """
