@@ -78,3 +78,6 @@ The Step-25 core (`MemoryModel`, open hierarchy, adaptive working set, adaptive 
 ## Core stress check
 
 A synthetic repeated Direct-ID stream was run against the Step-25 core after compilation. It formed levels 1 through 6 (`F → E → D → C → B → A`), demonstrating that the old L4 stop is no longer present in the learning path. This is a mechanism check only, not evidence of semantic learning.
+
+## Step 25 fixed build
+- Fixed `MainActivity.memoryText()` to use the actual field name `adaptiveQuantizer` instead of the stale `adaptiveAudioQuantizer` reference.

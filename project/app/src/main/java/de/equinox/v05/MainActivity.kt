@@ -1711,7 +1711,7 @@ class MainActivity : ComponentActivity() {
 
     private fun memoryText(): String {
         val s = memory.stats()
-        adaptiveAudioQuantizer.updateStructureContext(s.adaptiveAudioMacros, s.macroRelations)
+        adaptiveQuantizer.updateStructureContext(s.adaptiveAudioMacros, s.macroRelations)
         adaptiveVisualQuantizer.updateStructureContext(s.adaptiveVisualMacros, s.crossModalMacros)
         val levelText = if (s.levelCounts.isEmpty()) "noch keine" else s.levelCounts.entries.joinToString(" · ") { "${AbstractionTier.labelForMacroDepth(it.key)}:${it.value}" }
         return "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
