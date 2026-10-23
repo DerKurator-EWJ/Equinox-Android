@@ -975,7 +975,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 21 ergänzt das read-only Generative Orchestra. Makroebenen werden zu Sektionen (Pulse, Motif, Harmony, Drone), Prediction wird als Vorahnung hörbar, Überaustausch als Spannung/FM und Crossmodalität als Klangfarbe. Es werden ausschließlich Oszillatoren, Hüllkurven und deterministisches Rauschen erzeugt — keine Sound-Library und keine Samples.",
+            "Step 23 ersetzt den monolithischen Memory-JSON-Checkpoint durch einen indexierten Binärspeicher. Makro-Header bleiben kompakt verfügbar; ihre Tokenfolgen liegen disk-backed in tokens.bin und werden erst beim tatsächlichen Zugriff gelesen. Alte Step-22-JSON-Daten werden beim ersten Start automatisch migriert. Save-Slots archivieren jetzt den Store plus adaptive Audio-/Visual-Codebooks.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1630,6 +1630,7 @@ class MainActivity : ComponentActivity() {
             "Relevanz aktiv: Ø ${"%.3f".format(s.meanActiveRelevance)} | max ${"%.3f".format(s.highestActiveRelevance)} | Kontextentropie Ø ${"%.3f".format(s.meanActiveContextEntropy)} | Generalität max ${"%.3f".format(s.highestActiveGenerality)}\n" +
             "Adaptive Hierarchie: L0 ${s.hierarchyBaseInputTokens} Token | Makro-Emissionen ${s.hierarchyBaseMacroEmissions} | gespart ${s.hierarchyBaseSavedTokens} (${"%.1f".format(s.hierarchyBaseCompressionGain * 100.0)}%) | ØSpan ${"%.2f".format(s.hierarchyMeanAcceptedSpan)} | Auto-Makros ${s.hierarchyAutoPromotions}\n" +
             "Memory Competition: Läufe ${s.competitionRuns} | entfernt gesamt ${s.competitionMacrosPruned} M/${s.competitionRelationsPruned} R/${s.competitionCandidatesPruned} K | letzter Lauf ${s.competitionLastPruned} entfernt · ${s.competitionLastProtected} geschützt · Druckgruppen ${s.competitionLastPressuredGroups}\n" +
+            "Long-Term Store: ${s.storageBackend} · ${s.storageBytes} Bytes · disk-backed Makros ${s.storageDiskBackedMacros}/${s.macroCodes} · Token-Lesezugriffe ${s.storageTokenReads}\n" +
             "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}"
     }
 

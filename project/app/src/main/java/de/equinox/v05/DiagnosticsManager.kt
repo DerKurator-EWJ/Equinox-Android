@@ -32,7 +32,6 @@ data class DiagnosticSummary(
 
 class DiagnosticsManager(private val context: Context) {
     private val file = File(context.filesDir, "equinox_v06_diagnostics.json")
-    private val memoryFile = File(context.filesDir, "equinox_v06_memory.json")
     private val samples = mutableListOf<DiagnosticSample>()
     private var nextSampleIndex = 1L
 
@@ -54,7 +53,7 @@ class DiagnosticsManager(private val context: Context) {
             sequenceCodes = stats.sequenceCodes,
             relations = stats.relations + stats.macroRelations,
             crossModalRelations = stats.crossModalRelations,
-            memoryFileBytes = if (memoryFile.exists()) memoryFile.length() else 0L,
+            memoryFileBytes = stats.storageBytes,
             javaHeapUsedBytes = heapUsed
         )
 

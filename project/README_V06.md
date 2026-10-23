@@ -1,78 +1,109 @@
-# Equinox v0.6 — Step 22: Autonomous Memory Dream
+# Equinox v0.6 — Step 23: Indexed Long-Term Storage
 
 ## Ziel
-Step 22 erweitert den bisherigen MEMORY-Modus um einen zweiten, vollständig **read-only autonomen DREAM-Lauf**. Statt immer nur dem stärksten gelernten Pfad zu folgen, kann Equinox während eines internen Laufs zwischen mehreren bereits gelernten Strukturarten wechseln.
+Step 23 ersetzt den bisherigen monolithischen `equinox_v06_memory.json`-Checkpoint durch einen **indexierten, binären Langzeitspeicher** ohne zusätzliche Datenbank- oder Storage-Library.
 
-Der DREAM-Modus erzeugt **keine neuen Erfahrungen**. Kamera und Mikrofon bleiben aus; Beobachtungszähler, Makrogewichte, Relationsgewichte, Kandidaten und persistentes Überaustausch-Gedächtnis werden nicht verändert.
+Der Lernkern aus Step 22 bleibt unverändert. Die Änderung betrifft die Persistenz- und Abrufschicht.
 
-## Vier mögliche Traum-Sprünge
-Ein aktueller Makroknoten kann seinen nächsten internen Fokus aus vier Quellen wählen:
-
-1. **PREDICTION** — bereits gelernte gerichtete Folgemakros aus Step 15.
-2. **RELATION** — starke lokale Nachbarn aus dem sparsamen Relationsindex.
-3. **SUBSTITUTION** — Makros, die in mehreren gelernten Template-Rollen strukturell austauschbar waren.
-4. **CROSSMODAL** — Sprünge zwischen einem Audio-/Visual-Makro und einem bereits gelernten gemeinsamen Crossmodal-Makro; von einem Joint-Makro kann DREAM wieder zu seinen sensorischen Bestandteilen zurückspringen.
-
-Damit bleibt die Suche lokal. Für Crossmodalität gibt es jetzt zusätzlich einen `member -> joint macro`-Index; DREAM muss nicht bei jedem Schritt alle Crossmodal-Makros durchsuchen.
-
-## Reproduzierbare Exploration
-DREAM nimmt nicht immer stumpf den höchsten Score. Eine deterministische Explorationsfolge bevorzugt abwechselnd Prediction, Relation, Crossmodalität und Substitution. Kürzlich besuchte Knoten werden vorübergehend abgewertet, damit kurze Schleifen weniger wahrscheinlich werden.
-
-Die Auswahl berücksichtigt zusätzlich die bereits vorhandene strukturelle Relevanz, den Rang und die Nähe der Abstraktionsstufen. Es wird kein Zufall in das persistente Gedächtnis geschrieben.
-
-## Output
-Der gewählte interne Fokus materialisiert nur ein temporäres Working Set:
+## Neue Speicherstruktur
+Im App-internen Speicher entsteht jetzt der Ordner:
 
 ```text
-Langzeitgedächtnis
-      ↓ read-only
-Prediction / Relation / Substitution / Crossmodal
-      ↓
-Autonomous DREAM Working Set
-      ↓
-Überaustausch (nur transient)
-      ↓
-Leinwand + Generative Orchestra
+equinox_v06_store/
+  meta.bin
+  quants.bin
+  macros.idx
+  tokens.bin
+  relations.bin
+  exchange.bin
 ```
 
-Crossmodal-Joint-Makros können ihre beiden gelernten Komponenten ebenfalls als Kontext auf die Leinwand bzw. ins Orchester holen. Auch das ist nur Ausgabe und keine neue Crossmodal-Evidenz.
+Dabei werden unterschiedliche Datentypen nicht mehr in einem großen JSON-Dokument zusammengefasst.
 
-## UI
-Auf der MEMORY-Seite gibt es jetzt zusätzlich:
+### `macros.idx`
+Enthält nur kompakte Makro-Header:
+- ID
+- Abstraktionsstufe
+- Modalität
+- Gewicht
+- Repräsentationsfrequenz
+- erste/letzte Aktivierungsbeobachtung
+- Offset und Länge der Tokenfolge
+- exakte Makrosignatur
 
-- `DREAM RUN`
-- `DREAM STEP`
-- `DREAM STOP`
-- einen eigenen DREAM-Status
-- DREAM-Diagnostik in den Memory-Statistiken
+### `tokens.bin`
+Enthält die eigentlichen Bestandteile der Makros als dicht gepackte 32-Bit-IDs.
 
-Der normale MEMORY-Lauf bleibt erhalten. MEMORY und DREAM laufen bewusst nicht gleichzeitig.
+Ein Makro kann deshalb im RAM existieren, **ohne dass seine komplette Tokenfolge resident sein muss**. Erst wenn eine Funktion die Bestandteile tatsächlich benötigt, liest eine `DiskTokenList` die entsprechenden Werte über den gespeicherten Offset aus `tokens.bin`.
+
+## Lazy statt Vollmaterialisierung
+Beim Start werden weiterhin kompakte Header und die kleinen Runtime-Indizes geladen. Die Makro-Tokenfolgen selbst bleiben disk-backed.
+
+```text
+Langzeitspeicher auf Flash
+        ↓ Header/Index
+leichter Makro-Katalog im RAM
+        ↓ nur bei Zugriff
+Token-Slice aus tokens.bin
+        ↓
+Working Set / Template / Recall / DREAM
+```
+
+Das bedeutet nicht, dass nie über den gesamten Bestand iteriert wird: beim Wiederaufbau abgeleiteter Indizes kann Equinox die Tokenfolgen einmal sequenziell vom Datenträger lesen. Sie werden dabei aber nicht als vollständiger Makrobestand dauerhaft im RAM gehalten.
+
+## Konsistente Checkpoints
+Ein Save schreibt zuerst einen vollständigen neuen Store in einen temporären Ordner. Erst wenn alle Dateien fertig sind, wird der Store atomar ausgetauscht. Danach werden existierende Makros an ihre neuen Token-Offets gebunden.
+
+Damit wird vermieden, dass ein halbfertiger Checkpoint den aktuellen Langzeitspeicher überschreibt.
+
+## Automatische Migration
+Wenn beim ersten Start noch ein Step-22/älterer
+
+```text
+equinox_v06_memory.json
+```
+
+existiert und noch kein Indexed Store vorhanden ist, wird die JSON-Struktur einmal geladen, direkt in das neue Binärformat geschrieben und anschließend als
+
+```text
+equinox_v06_memory.migrated.json
+```
+
+zur Seite gelegt.
+
+Bestehendes Lernen wird dadurch nicht absichtlich verworfen.
+
+## Save Slots
+Save Slots sind jetzt ZIP-Archive statt einzelner JSON-Dateien. Sie enthalten:
+- den kompletten `equinox_v06_store`-Ordner
+- das adaptive Audio-Codebook
+- das adaptive Visual-Codebook
+
+Dadurch gehört der gelernte Quantisierer wieder zum gespeicherten Gedächtnisstand.
 
 ## Diagnostik
-Die Statistiken zählen separat:
+Im LAB wird zusätzlich angezeigt:
+- Storage-Backend
+- Größe des Indexed Stores
+- Anzahl disk-backed Makros
+- Anzahl tatsächlicher Token-Lesezugriffe
 
-- DREAM-Schritte
-- Prediction-Hops
-- Relations-Hops
-- Substitution-Hops
-- Crossmodal-Hops
-- Restarts
-- zuletzt gewählte Übergangsart
+Die Langzeitdiagnostik misst nun die Größe des gesamten Store-Ordners statt der alten JSON-Datei.
 
-Diese Zähler sind nur Laufzeitdiagnostik und werden nicht als Wissen interpretiert.
+## Was Step 23 bewusst noch nicht macht
+- Kein Remote-/Cloud-Speicher.
+- Keine semantische Änderung der Makros.
+- Kein neues Lernverfahren.
+- Kein vollständiges Paging sämtlicher Header aus RAM; kompakte Makro-Metadaten bleiben verfügbar.
+- Kein externer SQL/Room-Stack.
 
-## Read-only-Härtetest
-Der Core wurde mit einer künstlich wiederkehrenden Sequenz getestet. Nach 30 DREAM-Schritten blieben Beobachtungszahl, Makroanzahl und persistente Relationsanzahl unverändert, während DREAM intern weiterlief und zwischen gelernten Pfaden wechselte.
+Der Hauptgewinn dieses Steps ist: **große variable Token-Payloads und der monolithische JSON-Parse verschwinden aus dem normalen Startpfad.**
 
-## Technische Änderungen
-- `MemoryModel.autonomousDreamStep()`
-- lokaler DREAM-Cursor und kurzer Recent-History-Puffer
-- gewichtete, deterministisch explorative Übergangsauswahl
-- Crossmodal-Member-Index für lokalen Joint-Abruf
-- DREAM-Zähler in `MemoryStats`
-- DREAM-Steuerung auf der MEMORY-Seite
-- `versionCode = 36`
-- `versionName = 0.6-step22-autonomous-memory-dream`
+## Version
+- `versionCode = 37`
+- `versionName = 0.6-step23-indexed-long-term-storage`
 
-## Build
-Wie bei den vorherigen Steps ist das Projekt für Android Studio vorgesehen. In dieser Umgebung wurde der neue Memory-Core mit `kotlinc` gegen Stubs kompiliert und der read-only DREAM-Lauf als JVM-Test ausgeführt. Ein vollständiger Android-Gradle/APK-Build ist hier weiterhin nicht möglich, weil kein Android-SDK installiert ist.
+## Build/Test
+Der neue Storage-Core und `MemoryModel` wurden mit `kotlinc` gegen kleine Android/JSON-Stubs kompiliert. Zusätzlich wurde der Binärstore als JVM-Test geschrieben, neu geöffnet und lazy über Token-Offets gelesen.
+
+Ein vollständiger Android-Gradle/APK-Build ist in dieser Umgebung weiterhin nicht möglich, da kein Android-SDK installiert ist.

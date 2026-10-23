@@ -59,7 +59,7 @@ private const val MAX_CROSSMODAL_PARTNERS_PER_EVENT = 3
 private const val MAX_CROSSMODAL_CANDIDATES = 4_000
 
 /**
- * v0.6 Step 22
+ * v0.6 Step 23
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -73,6 +73,8 @@ private const val MAX_CROSSMODAL_CANDIDATES = 4_000
  * and only after repeated near-simultaneous evidence. Raw quants remain modality-local.
  * Step 22 adds an autonomous read-only DREAM traversal that can switch among learned
  * predictions, ordinary relations, substitution alternatives and cross-modal bridges.
+ * Step 23 replaces the monolithic JSON checkpoint with a compact indexed long-term store.
+ * Macro headers stay lightweight in RAM while token payloads are disk-backed and read lazily.
  * The coincidence clock is runtime-only and is never persisted into the learned identities.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
@@ -162,7 +164,11 @@ data class MemoryStats(
     val dreamCrossModalHops: Long = 0L,
     val dreamRestarts: Long = 0L,
     val dreamLastMode: String = "—",
-    val dreamCursorId: Int = 0
+    val dreamCursorId: Int = 0,
+    val storageBackend: String = "indexed-binary",
+    val storageBytes: Long = 0L,
+    val storageDiskBackedMacros: Int = 0,
+    val storageTokenReads: Long = 0L
 )
 
 data class GraphNode(
@@ -337,7 +343,7 @@ class MemoryModel(context: Context) {
         val id: Int,
         val level: Int,
         val modality: String,
-        val tokens: List<Int>,
+        var tokens: List<Int>,
         var weight: Long,
         var representativeHz: Double,
         var firstActivatedObservation: Long = 0L,
@@ -397,9 +403,10 @@ class MemoryModel(context: Context) {
         var samples: Long
     )
 
-    // New file on purpose. Step 02 changes the meaning of the memory graph and
-    // therefore does not silently reinterpret Step12/Step01 relations.
-    private val file = File(context.filesDir, "equinox_v06_memory.json")
+    // Step 23: indexed binary store is primary. The old JSON file is retained only as
+    // a one-time migration source for users upgrading from Step 22 or earlier.
+    private val legacyFile = File(context.filesDir, "equinox_v06_memory.json")
+    private val longTermStore = IndexedLongTermStore(context)
 
     // Level 0: observed members of the fixed encoder alphabet. These counters are
     // diagnostics / lookup metadata only. No persistent level-0 relations exist.
@@ -1966,6 +1973,7 @@ class MemoryModel(context: Context) {
             .count()
         val strongestSubstitutionSupport =
             substitutionClassesNow.maxOfOrNull { it.strongestPairSupport } ?: 0
+        val storageStats = longTermStore.stats()
 
         return MemoryStats(
             persistentCodes = quants.size,
@@ -2046,7 +2054,11 @@ class MemoryModel(context: Context) {
             dreamCrossModalHops = dreamCrossModalHops,
             dreamRestarts = dreamRestarts,
             dreamLastMode = dreamLastMode,
-            dreamCursorId = dreamPlaybackCursor ?: 0
+            dreamCursorId = dreamPlaybackCursor ?: 0,
+            storageBackend = "indexed-binary",
+            storageBytes = storageStats.bytes,
+            storageDiskBackedMacros = macros.values.count { it.tokens.javaClass.name.contains("DiskTokenList") },
+            storageTokenReads = storageStats.tokenReads
         )
     }
 
@@ -2192,74 +2204,134 @@ class MemoryModel(context: Context) {
         nextMacroId = MACRO_ID_BASE
         macroFrozen = false
         observations = 0L
-        if (file.exists()) file.delete()
+        longTermStore.deleteAll()
+        if (legacyFile.exists()) legacyFile.delete()
     }
 
     private fun save() {
         try {
-            val root = JSONObject()
-                .put("formatVersion", 60_19)
-                .put("observations", observations)
-                .put("nextMacroId", nextMacroId)
-                .put("macroFrozen", macroFrozen)
-
-            val quantArray = JSONArray()
-            quants.forEach { (id, q) ->
-                quantArray.put(
-                    JSONObject()
-                        .put("id", id)
-                        .put("weight", q.weight)
-                        .put("hz", q.representativeHz)
-                        .put("modality", q.modality)
-                        .put("displayColor", q.displayColor)
+            val macroSnapshot = macros.values.map { m ->
+                IndexedLongTermStore.StoredMacro(
+                    id = m.id,
+                    level = m.level,
+                    modality = m.modality,
+                    tokens = m.tokens,
+                    weight = m.weight,
+                    hz = m.representativeHz,
+                    firstObs = m.firstActivatedObservation,
+                    lastObs = m.lastActivatedObservation,
+                    signature = patternSignature(
+                        level = (m.level - 1).coerceAtLeast(0),
+                        modality = m.modality,
+                        tokens = m.tokens
+                    )
                 )
             }
-            root.put("quants", quantArray)
 
-            val macroArray = JSONArray()
-            macros.values.forEach { m ->
-                val tokenArray = JSONArray()
-                m.tokens.forEach { tokenArray.put(it) }
-                macroArray.put(
-                    JSONObject()
-                        .put("id", m.id)
-                        .put("level", m.level)
-                        .put("modality", m.modality)
-                        .put("tokens", tokenArray)
-                        .put("weight", m.weight)
-                        .put("hz", m.representativeHz)
-                        .put("firstActivatedObservation", m.firstActivatedObservation)
-                        .put("lastActivatedObservation", m.lastActivatedObservation)
-                )
+            val result = longTermStore.writeSnapshot(
+                meta = IndexedLongTermStore.Meta(
+                    observations = observations,
+                    nextMacroId = nextMacroId,
+                    macroFrozen = macroFrozen
+                ),
+                quants = quants.map { (id, q) ->
+                    IndexedLongTermStore.StoredQuant(
+                        id = id,
+                        weight = q.weight,
+                        hz = q.representativeHz,
+                        modality = q.modality,
+                        displayColor = q.displayColor
+                    )
+                },
+                macros = macroSnapshot,
+                relations = macroRelations.map { (key, weight) ->
+                    IndexedLongTermStore.StoredRelation(key, weight)
+                },
+                exchanges = exchangeMemory.map { (key, memory) ->
+                    IndexedLongTermStore.StoredExchange(key, memory.ema, memory.samples)
+                }
+            )
+
+            // Rebind every persistent macro to the just-written token index. The token arrays
+            // no longer need to remain resident after a checkpoint; reads become on-demand.
+            macros.values.forEach { macro ->
+                val location = result.macroLocations[macro.id] ?: return@forEach
+                macro.tokens = longTermStore.tokenList(location.offsetBytes, location.tokenCount)
             }
-            root.put("macros", macroArray)
-
-            val relationArray = JSONArray()
-            macroRelations.forEach { (key, weight) ->
-                relationArray.put(JSONObject().put("key", key).put("weight", weight))
-            }
-            root.put("macroRelations", relationArray)
-
-            val exchangeArray = JSONArray()
-            exchangeMemory.forEach { (key, memory) ->
-                exchangeArray.put(
-                    JSONObject()
-                        .put("key", key)
-                        .put("ema", memory.ema)
-                        .put("samples", memory.samples)
-                )
-            }
-            root.put("overexchange", exchangeArray)
-
-            file.writeText(root.toString())
         } catch (_: Exception) {
         }
     }
 
     private fun load() {
-        if (!file.exists()) return
+        if (longTermStore.exists()) {
+            loadIndexedStore()
+            return
+        }
+
+        // One-time compatibility path for Step 22 and earlier. After a successful parse the
+        // legacy JSON is immediately checkpointed into the indexed store and renamed.
+        if (legacyFile.exists() && loadLegacyJson()) {
+            save()
+            runCatching {
+                legacyFile.renameTo(File(legacyFile.parentFile, "equinox_v06_memory.migrated.json"))
+            }
+        }
+    }
+
+    private fun loadIndexedStore() {
         try {
-            val root = JSONObject(file.readText())
+            val meta = longTermStore.readMeta() ?: return
+            observations = meta.observations
+            nextMacroId = meta.nextMacroId
+            macroFrozen = meta.macroFrozen
+
+            longTermStore.readQuants().forEach { q ->
+                quants[q.id] = QuantCode(
+                    weight = q.weight,
+                    representativeHz = q.hz,
+                    modality = q.modality,
+                    displayColor = q.displayColor
+                )
+            }
+
+            longTermStore.readMacroHeaders().forEach { h ->
+                val macro = MacroCode(
+                    id = h.id,
+                    level = h.level.coerceIn(1, MAX_ABSTRACTION_LEVEL),
+                    modality = h.modality,
+                    tokens = longTermStore.tokenList(h.tokenOffsetBytes, h.tokenCount),
+                    weight = h.weight,
+                    representativeHz = h.hz,
+                    firstActivatedObservation = h.firstObs,
+                    lastActivatedObservation = h.lastObs
+                )
+                macros[macro.id] = macro
+                macroBySignature[h.signature] = macro.id
+                nextMacroId = max(nextMacroId, macro.id + 1)
+            }
+
+            // These are compact runtime indexes. Rebuilding them scans token payload from disk
+            // but does not retain every token list in RAM.
+            rebuildCrossModalIndex()
+            rebuildMacroCompositionIndex()
+            rebuildTemplateIndex()
+
+            longTermStore.readRelations().forEach { r ->
+                macroRelations[r.key] = r.weight
+                indexRelation(r.key)
+            }
+
+            longTermStore.readExchanges().forEach { e ->
+                exchangeMemory[e.key] = ExchangeMemory(e.ema, e.samples)
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun loadLegacyJson(): Boolean {
+        if (!legacyFile.exists()) return false
+        return try {
+            val root = JSONObject(legacyFile.readText())
             observations = root.optLong("observations", 0L)
             nextMacroId = root.optInt("nextMacroId", MACRO_ID_BASE)
             macroFrozen = root.optBoolean("macroFrozen", false)
@@ -2324,7 +2396,9 @@ class MemoryModel(context: Context) {
                     samples = o.optLong("samples", 0L)
                 )
             }
+            true
         } catch (_: Exception) {
+            false
         }
     }
 
