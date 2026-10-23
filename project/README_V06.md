@@ -1,61 +1,34 @@
-# Equinox v0.6 — Step 03: Active Working Set + Lazy Retrieval + Überaustausch
+# Equinox v0.6 — Step 04: Output Canvas + Orchestra
 
-Basis: der korrigierte Step 02 (`QuantMacroLazy_fixed`). Dieser Schritt baut die neue Laufzeitlogik auf, ohne den funktionierenden Audio-/Kamera-/UI-Pfad neu zu schreiben.
+This step is based on the working Step 03 Active/Lazy/Exchange project.
 
-## Neu in Step 03
+## New in Step 04
 
-### 1. Begrenztes Working Set
-Das persistente Gedächtnis rechnet nicht permanent komplett. Nur aktuell erkannte Makros und wenige aus ihrem bekannten Umfeld abgerufene Makros werden kurzfristig materialisiert.
+- `EquinoxOutputView.kt`: a read-only live-state canvas.
+  - consumes `EngineOutputState`
+  - visualizes only the currently active/retrieved working set
+  - uses activation, expectation and overexchange as visual input
+  - renderer coordinates are projection-only and are not written back into the core
+- `OrchestraSonifier.kt`: library-free generative audio projection.
+  - no samples or sound library
+  - uses oscillator synthesis only
+  - active macro state controls voice importance
+  - abstraction level changes register/harmonic character
+  - exchange bias changes modulation/harmonic balance
+  - if no active audio macro exists it can fall back to stored audio macros
+- `MainActivity` now shows:
+  - a dedicated OUTPUT / LIVE STATE CANVAS
+  - the old graph below it as LAB / DEBUG VIEW
+  - an `AKTIVEN STATE ALS ORCHESTER SPIELEN` button
+- Output remains read-only: neither canvas nor orchestra changes `MemoryModel`.
 
-- maximal 48 aktive Makros
-- aktive Zustände verfallen automatisch
-- Working-Set-Zustände werden nicht dauerhaft gespeichert
+## Important audio note
 
-### 2. Indexed Lazy Retrieval
-Makrorelationen bekommen einen lokalen Index. Bei einem Live-Ereignis werden nur bis zu 6 starke bekannte Nachbarn des gerade aktiven Makros abgerufen.
-
-Es gibt keinen Vollscan über alle gespeicherten Makros oder Relationen für die Live-Reaktion.
-
-### 3. Erster Überaustausch
-Für Step 03 sind A und B bewusst operational definiert:
-
-- `A_i` = aktuelle/live Aktivierung eines Makros
-- `B_i` = aus bekannten Relationen abgerufene Kontext-Erwartung
-- `R_ij = A_i * B_j - B_i * A_j`
-
-Der Überaustausch wird nur innerhalb der kleinen gerade aktiven Frontier berechnet. Ein geglätteter Langzeitwert wird pro Makropaar gespeichert.
-
-Das ist noch keine physikalische Interpretation der Spiegelmatrix, sondern ein testbarer Informationsmechanismus.
-
-### 4. Output-State erweitert
-`EngineOutputState` enthält jetzt zusätzlich einen read-only `WorkingSetSnapshot` mit:
-
-- aktiven Makros
-- tatsächlicher Aktivierung
-- Erwartung
-- Exchange-Bias
-- gespeicherten Überaustauschwerten
-
-Der vorhandene Renderer muss diese Daten noch nicht verwenden; sie stehen ab jetzt sauber für spätere Live-/Memory-Ausgabe bereit.
-
-### 5. Sichtbare Diagnose
-Im bestehenden UI erscheint zusätzlich:
-
-`Working Set: ... aktiv | ... erinnert | Überaustausch: ... Paare | Ø|R| ...`
-
-Damit lässt sich auf dem Telefon prüfen, ob der neue Mechanismus tatsächlich nur lokal arbeitet.
-
-## Speicher-Kompatibilität
-Step 03 verwendet weiterhin `equinox_v06_memory.json`. Ein Step-02-Gedächtnis kann geladen werden; die neuen Überaustauschdaten fehlen dann zunächst und entstehen erst durch weitere Beobachtungen.
+The orchestra button stops microphone learning before playback. This is intentional in this step so the phone does not immediately learn its own loudspeaker output. True simultaneous microphone + speaker operation needs either headphone mode or deliberate echo/feedback handling and is reserved for a later step.
 
 ## Build
-Projektordner direkt in Android Studio öffnen:
 
-`Equinox_v06_Step03_ActiveLazyExchange`
+Open the folder `Equinox_v06_Step04_OutputCanvasOrchestra` directly in Android Studio and build the APK from that project.
 
-Dann `Build > Build APK(s)`.
-
-Version: `0.6-step03-active-lazy-exchange` / VersionCode 17.
-
-## Nächster logischer Schritt
-Wenn dieser Build stabil läuft: Step 04 — Output-Engine. Live-Modus bekommt einen echten read-only Scene/Audio State; Visualisierung und Klang reagieren auf Aktivierung, Erwartung und Überaustausch, ohne das Gedächtnis selbst zu verändern.
+Application ID remains `de.equinox.v05`.
+Version: `0.6-step04-output-canvas-orchestra`.

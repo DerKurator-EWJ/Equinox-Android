@@ -54,10 +54,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var stopButton: Button
     private lateinit var memoryStats: TextView
     private lateinit var intervalSpinner: Spinner
+    private lateinit var outputCanvas: EquinoxOutputView
     private lateinit var graphView: RelationGraphView
     private lateinit var memory: MemoryModel
     private lateinit var outputBridge: EngineOutputBridge
     private val sonifier = Sonifier()
+    private val orchestra = OrchestraSonifier()
     private lateinit var sonificationStatus: TextView
     private lateinit var consolidationStatus: TextView
     private lateinit var cameraStatus: TextView
@@ -104,7 +106,7 @@ class MainActivity : ComponentActivity() {
         }
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 01 — CORE / OUTPUT SPLIT", 18f, 16).apply {
+        root.addView(label("STEP 04 — OUTPUT CANVAS / ORCHESTRA", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -142,6 +144,25 @@ class MainActivity : ComponentActivity() {
 
         memoryStats = label(memoryText(), 15f, 18).apply { setTextColor(Color.rgb(180, 220, 215)) }
         root.addView(memoryStats)
+
+        root.addView(label("OUTPUT — LIVE STATE CANVAS", 17f, 20).apply {
+            setTextColor(Color.rgb(105, 225, 235))
+        })
+        root.addView(label(
+            "Nur Projektion: Aktivierung, Erinnerung und Überaustausch aus dem Core. Die Leinwand schreibt nichts ins Gedächtnis zurück.",
+            12f,
+            7
+        ).apply { setTextColor(Color.LTGRAY) })
+
+        outputCanvas = EquinoxOutputView(this)
+        root.addView(outputCanvas, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(420)
+        ).apply { topMargin = dp(12) })
+
+        root.addView(label("LAB — GRAPH DEBUG VIEW", 15f, 16).apply {
+            setTextColor(Color.rgb(150, 175, 210))
+        })
 
         graphView = RelationGraphView(this)
         graphView.setDisplayPrefs(displayPrefsStore.load())
@@ -492,6 +513,34 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(stopSoundButton, buttonParams(8))
 
+        val orchestraStatus = label("Orchester: AUS", 14f, 14).apply {
+            setTextColor(Color.rgb(125, 220, 255))
+        }
+        root.addView(orchestraStatus)
+
+        val orchestraButton = Button(this).apply {
+            text = "AKTIVEN STATE ALS ORCHESTER SPIELEN"
+            setOnClickListener {
+                // Static projection of one read-only state. Stop microphone first to avoid
+                // uncontrolled acoustic feedback into the learner. Full-duplex monitoring
+                // can be added later with echo handling/headphone mode.
+                if (running) stopAudio()
+                sonifier.stop()
+                val state = outputBridge.snapshot(maxSoundMacros = 12)
+                orchestra.play(state) { text -> runOnUiThread { orchestraStatus.text = text } }
+            }
+        }
+        root.addView(orchestraButton, buttonParams(8))
+
+        val orchestraStopButton = Button(this).apply {
+            text = "ORCHESTER STOPP"
+            setOnClickListener {
+                orchestra.stop()
+                orchestraStatus.text = "Orchester: AUS"
+            }
+        }
+        root.addView(orchestraStopButton, buttonParams(8))
+
         val resetButton = Button(this).apply {
             text = "GEDÄCHTNIS LÖSCHEN"
             setOnClickListener {
@@ -516,7 +565,7 @@ class MainActivity : ComponentActivity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Step 12 ergänzt Langzeitdiagnose statt neuer Kernfunktionen. Diagnose-Samples messen Wachstum von Mikro-, Makro- und Sequenzcodes, Beobachtungen, Relationszahl, interne Dateigröße und Java-Heap. Ziel ist zu prüfen, ob Equinox bei vertrauten Daten zunehmend vorhandene Strukturen wiederverwendet.",
+            "Step 04 trennt den sicht- und hörbaren Output weiter vom Core. Die Live-State-Leinwand visualisiert nur den aktuell abgerufenen Working Set. Das Orchester synthetisiert denselben Zustand ohne Samples oder Sound-Library.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
@@ -532,7 +581,9 @@ class MainActivity : ComponentActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     private fun refreshGraph() {
-        graphView.setSnapshot(outputBridge.snapshot().graph)
+        val state = outputBridge.snapshot()
+        outputCanvas.setState(state)
+        graphView.setSnapshot(state.graph)
     }
 
     private fun ensurePermissionAndStart() {
@@ -808,6 +859,7 @@ class MainActivity : ComponentActivity() {
         try { cameraExecutor.shutdownNow() } catch (_: Exception) { }
         stopAudio()
         sonifier.stop()
+        orchestra.stop()
         super.onDestroy()
     }
 }

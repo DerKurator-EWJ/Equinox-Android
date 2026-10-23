@@ -50,6 +50,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step02-quantmacrolazy` | `Equinox_v06_Step02_QuantMacroLazy.zip` | 20 | 0 | `00afb69f69675a3f4fcdbc5ae71c39a09638a2f7b04ee51e1c9bc64f42916a8b` |
 | `android-v06-step02-quantmacrolazy-fixed` | `Equinox_v06_Step02_QuantMacroLazy_fixed.zip` | 20 | 0 | `235295f1b398ad824d1c5f1431fb0ed6e24fde3ca778ffc850e580a6f62255d7` |
 | `android-v06-step03-activelazyexchange` | `Equinox_v06_Step03_ActiveLazyExchange.zip` | 20 | 0 | `0b92fc2644ee358ca57eade1674619b7bc2dea813fabdb9d2181c0853bea0f17` |
+| `android-v06-step04-outputcanvasorchestra` | `Equinox_v06_Step04_OutputCanvasOrchestra.zip` | 22 | 0 | `b3314749046a3eed74d3af47160ee20ec0d0fa4dd281354795a1734af931a4cd` |
 
 ## Security, licensing, and limitations
 
