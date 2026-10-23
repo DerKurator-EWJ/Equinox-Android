@@ -1,8 +1,22 @@
-# Equinox v0.5 — Step 01
-Minimaler Basistest. Keine Kamera, kein Mikrofon, kein Speicher, keine Relationen.
-Ziel: zuerst sicherstellen, dass Android Studio -> Gradle -> Emulator/Telefon -> App funktioniert.
+# Equinox v0.5 — Step 02
 
-Erwarteter Bildschirm:
-EQUINOX v0.5
-STEP 01 OK
-Basis-App läuft.
+Minimaler Audio-Härtetest auf echter Android-Hardware.
+
+Enthalten:
+- RECORD_AUDIO Runtime-Berechtigung
+- AudioRecord, 48 kHz, Mono, PCM 16 Bit
+- 2048-Sample-Frames
+- Hann-Fenster
+- Radix-2-FFT
+- dominante Frequenz 40–18.000 Hz
+- logarithmische Frequenz-ID: round(24 * log2(hz / 55))
+- Live-Anzeige von Hz, ID, Signalstärke und Framezahl
+
+Noch bewusst NICHT enthalten:
+- persistentes Gedächtnis
+- Relationen
+- Makroknoten
+- Kamera
+- Save/Load
+
+Ziel: Erst beweisen, dass Audioaufnahme + FFT + Quantisierung auf dem echten Telefon stabil laufen.
