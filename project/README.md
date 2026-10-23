@@ -1,14 +1,18 @@
-# Equinox v0.5 — Step 05
+# Equinox v0.5 — Step 06: Memory Sonification
 
-Step 05 adds the first abstraction layer to the working Step 04 audio-memory graph.
+Step 06 extends the working Step 05 project without changing the application ID (`de.equinox.v05`) or the persistent memory file.
 
-- Existing micro codes and directed relations remain intact.
-- Consolidation promotes sufficiently repeated micro relations into first-level macro nodes.
-- Macro nodes receive IDs starting at 1,000,000.
-- Existing macros react when one of their members is observed and can form macro-to-macro relations.
-- Macro creation can be frozen independently; existing macro weights/relations still update.
-- Renderer distinguishes micro nodes (circles) and macro nodes (orange rounded rectangles).
-- Coordinates remain display-only and are not persisted as part of the model.
-- Uses the same memory file as Step 03/04, so prior learned micro memory can be loaded.
+## New in Step 06
+- `GEDÄCHTNIS HÖRBAR MACHEN` outputs a read-only snapshot of learned memory through the phone speaker.
+- Strong microcodes are rendered as short tones.
+- Macrocodes are rendered as chords built from their member micro frequencies.
+- Learned representative frequencies are octave-folded into 110–1760 Hz for practical phone-speaker playback while preserving octave relationships.
+- Weight affects tone duration.
+- `KLANG STOPP` stops playback.
+- The microphone is deliberately stopped before sonification so the system does not immediately learn its own speaker output.
+- No sonification event is written back to MemoryModel.
 
-This is deliberately a first-level macro proof. Recursive macro-of-macro promotion is deferred until the first abstraction mechanism is stable on-device.
+## Build
+Open this folder as a new Android Studio project, wait for Gradle sync, then generate/build the debug APK. No emulator or target device is required for APK generation.
+
+The application ID remains `de.equinox.v05`, so installation updates the existing Equinox app and retains the Step 03/04/05 memory.

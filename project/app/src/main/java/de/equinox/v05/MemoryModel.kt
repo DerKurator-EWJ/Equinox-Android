@@ -39,6 +39,25 @@ data class GraphSnapshot(
     val edges: List<GraphEdge>
 )
 
+
+data class SonificationNode(
+    val id: Int,
+    val hz: Double,
+    val weight: Long
+)
+
+data class SonificationMacro(
+    val id: Int,
+    val hz: Double,
+    val weight: Long,
+    val memberHz: List<Double>
+)
+
+data class SonificationSnapshot(
+    val micro: List<SonificationNode>,
+    val macros: List<SonificationMacro>
+)
+
 class MemoryModel(context: Context) {
     private data class Code(var weight: Long, val representativeHz: Double)
     private data class Candidate(var hits: Int, var hzSum: Double)
@@ -227,6 +246,29 @@ class MemoryModel(context: Context) {
             .forEach { edges += it }
 
         return GraphSnapshot(nodes.sortedWith(compareBy<GraphNode> { it.isMacro }.thenBy { it.id }), edges)
+    }
+
+
+    @Synchronized
+    fun sonificationSnapshot(maxMicro: Int = 8, maxMacros: Int = 6): SonificationSnapshot {
+        val micro = persistent.entries
+            .sortedByDescending { it.value.weight }
+            .take(maxMicro)
+            .map { (id, code) -> SonificationNode(id, code.representativeHz, code.weight) }
+
+        val macro = macros.values
+            .sortedByDescending { it.weight }
+            .take(maxMacros)
+            .map { m ->
+                SonificationMacro(
+                    id = m.id,
+                    hz = m.representativeHz,
+                    weight = m.weight,
+                    memberHz = m.members.mapNotNull { persistent[it]?.representativeHz }
+                )
+            }
+
+        return SonificationSnapshot(micro, macro)
     }
 
     @Synchronized

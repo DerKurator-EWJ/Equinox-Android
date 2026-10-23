@@ -43,6 +43,8 @@ class MainActivity : Activity() {
     private lateinit var intervalSpinner: Spinner
     private lateinit var graphView: RelationGraphView
     private lateinit var memory: MemoryModel
+    private val sonifier = Sonifier()
+    private lateinit var sonificationStatus: TextView
     @Volatile private var lastConsolidationMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,7 +75,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 05 — MACRO NODES", 18f, 16).apply {
+        root.addView(label("STEP 06 — MEMORY SONIFICATION", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -139,6 +141,32 @@ class MainActivity : Activity() {
         }
         root.addView(macroFreezeButton, buttonParams(8))
 
+        sonificationStatus = label("Sonifikation: AUS", 14f, 18).apply {
+            setTextColor(Color.rgb(255, 190, 90))
+        }
+        root.addView(sonificationStatus)
+
+        val sonifyButton = Button(this).apply {
+            text = "GEDÄCHTNIS HÖRBAR MACHEN"
+            setOnClickListener {
+                // Deliberately stop the microphone first: otherwise Equinox would immediately
+                // hear and learn its own speaker output, creating an uncontrolled feedback loop.
+                if (running) stopAudio()
+                val snap = memory.sonificationSnapshot()
+                sonifier.play(snap) { state -> runOnUiThread { sonificationStatus.text = state } }
+            }
+        }
+        root.addView(sonifyButton, buttonParams(8))
+
+        val stopSoundButton = Button(this).apply {
+            text = "KLANG STOPP"
+            setOnClickListener {
+                sonifier.stop()
+                sonificationStatus.text = "Sonifikation: AUS"
+            }
+        }
+        root.addView(stopSoundButton, buttonParams(8))
+
         val resetButton = Button(this).apply {
             text = "GEDÄCHTNIS LÖSCHEN"
             setOnClickListener {
@@ -163,7 +191,7 @@ class MainActivity : Activity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Der Kern speichert keine x/y-Positionen. Die Ansicht erzeugt ihre Koordinaten nur aus dem Relationsgraphen.",
+            "Sonifikation liest nur das persistente Gedächtnis. Mikrocodes werden Töne; Makrocodes werden Akkorde aus ihren Mitgliedern. Während der Ausgabe wird das Mikrofon gestoppt, damit Equinox nicht unkontrolliert sich selbst lernt.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
@@ -338,6 +366,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         stopAudio()
+        sonifier.stop()
         super.onDestroy()
     }
 }
