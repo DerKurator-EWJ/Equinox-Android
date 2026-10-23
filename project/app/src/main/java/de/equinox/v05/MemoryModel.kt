@@ -38,12 +38,13 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 08
+ * v0.6 Step 09
  *
- * Keeps the bounded active working set, indexed lazy retrieval, structural ranks
- * and one-slot templates. Step 08 derives sparse substitution classes from repeated
- * template roles: macro tokens that can replace each other in multiple distinct
- * structural contexts become members of the same read-only structural class.
+ * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
+ * templates and substitution classes. Step 09 adds a read-only multidimensional
+ * relevance profile so recurrence, reuse, relation support, contextual entropy,
+ * specificity and temporal persistence remain distinguishable instead of collapsing
+ * into one raw weight.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
  *
@@ -87,7 +88,11 @@ data class MemoryStats(
     val substitutionClasses: Int = 0,
     val activeSubstitutionClasses: Int = 0,
     val substitutionMembers: Int = 0,
-    val strongestSubstitutionSupport: Int = 0
+    val strongestSubstitutionSupport: Int = 0,
+    val meanActiveRelevance: Double = 0.0,
+    val highestActiveRelevance: Double = 0.0,
+    val meanActiveContextEntropy: Double = 0.0,
+    val highestActiveGenerality: Double = 0.0
 )
 
 data class GraphNode(
@@ -103,7 +108,11 @@ data class GraphNode(
     val expectation: Double = 0.0,
     val structuralRank: String = "F",
     val structuralRankIndex: Int = 0,
-    val structuralScore: Double = 0.0
+    val structuralScore: Double = 0.0,
+    val structuralRelevance: Double = 0.0,
+    val contextEntropy: Double = 0.0,
+    val persistence: Double = 0.0,
+    val generality: Double = 0.0
 ) {
     val isMacro: Boolean get() = abstractionLevel > 0
 }
@@ -138,7 +147,11 @@ data class SonificationMacro(
     val abstractionLevel: Int,
     val structuralRank: String = "F",
     val structuralRankIndex: Int = 0,
-    val structuralScore: Double = 0.0
+    val structuralScore: Double = 0.0,
+    val structuralRelevance: Double = 0.0,
+    val contextEntropy: Double = 0.0,
+    val persistence: Double = 0.0,
+    val generality: Double = 0.0
 )
 
 data class SonificationSnapshot(
@@ -160,7 +173,11 @@ data class ActiveMacroNode(
     val recurrence: Double = 0.0,
     val reuse: Double = 0.0,
     val relationSupport: Double = 0.0,
-    val specificity: Double = 0.0
+    val specificity: Double = 0.0,
+    val contextEntropy: Double = 0.0,
+    val persistence: Double = 0.0,
+    val generality: Double = 0.0,
+    val structuralRelevance: Double = 0.0
 )
 
 data class ActiveExchange(
@@ -234,6 +251,7 @@ class MemoryModel(context: Context) {
         val tokens: List<Int>,
         var weight: Long,
         var representativeHz: Double,
+        var firstActivatedObservation: Long = 0L,
         var lastActivatedObservation: Long = 0L
     )
 
@@ -432,6 +450,9 @@ class MemoryModel(context: Context) {
 
     private fun activateMacro(macro: MacroCode) {
         macro.weight++
+        if (macro.firstActivatedObservation <= 0L) {
+            macro.firstActivatedObservation = observations
+        }
         macro.lastActivatedObservation = observations
 
         decayAndPruneWorkingSet()
@@ -643,6 +664,7 @@ class MemoryModel(context: Context) {
                     tokens = c.tokens.toList(),
                     weight = c.hits,
                     representativeHz = representativeHzForTokens(c.tokens),
+                    firstActivatedObservation = observations,
                     lastActivatedObservation = observations
                 )
                 macros[macro.id] = macro
@@ -898,7 +920,11 @@ class MemoryModel(context: Context) {
                 expectation = activeWorking[m.id]?.expected ?: 0.0,
                 structuralRank = rank.label,
                 structuralRankIndex = rank.rankIndex,
-                structuralScore = rank.score
+                structuralScore = rank.score,
+                structuralRelevance = rank.relevance,
+                contextEntropy = rank.contextEntropy,
+                persistence = rank.persistence,
+                generality = rank.generality
             )
         }
 
@@ -972,7 +998,11 @@ class MemoryModel(context: Context) {
                     abstractionLevel = m.level,
                     structuralRank = rank.label,
                     structuralRankIndex = rank.rankIndex,
-                    structuralScore = rank.score
+                    structuralScore = rank.score,
+                    structuralRelevance = rank.relevance,
+                    contextEntropy = rank.contextEntropy,
+                    persistence = rank.persistence,
+                    generality = rank.generality
                 )
             }
 
@@ -1006,7 +1036,11 @@ class MemoryModel(context: Context) {
                 recurrence = rank.recurrence,
                 reuse = rank.reuse,
                 relationSupport = rank.relationSupport,
-                specificity = rank.specificity
+                specificity = rank.specificity,
+                contextEntropy = rank.contextEntropy,
+                persistence = rank.persistence,
+                generality = rank.generality,
+                structuralRelevance = rank.relevance
             )
         }
 
@@ -1033,11 +1067,18 @@ class MemoryModel(context: Context) {
             candidates.values.maxOfOrNull { it.tokens.size } ?: 0,
             macros.values.maxOfOrNull { it.tokens.size } ?: 0
         )
-        val highestActiveRank = activeWorking.keys
+        val activeProfiles = activeWorking.keys
             .asSequence()
             .mapNotNull { macros[it] }
             .map { structuralRankFor(it) }
-            .maxByOrNull { it.score }
+            .toList()
+        val highestActiveRank = activeProfiles.maxByOrNull { it.score }
+        val meanActiveRelevance =
+            if (activeProfiles.isEmpty()) 0.0 else activeProfiles.map { it.relevance }.average()
+        val highestActiveRelevance = activeProfiles.maxOfOrNull { it.relevance } ?: 0.0
+        val meanActiveContextEntropy =
+            if (activeProfiles.isEmpty()) 0.0 else activeProfiles.map { it.contextEntropy }.average()
+        val highestActiveGenerality = activeProfiles.maxOfOrNull { it.generality } ?: 0.0
 
         val learnedTemplates = learnedTemplateBuckets()
         val activeTemplateCount = learnedTemplates.count { bucket ->
@@ -1090,7 +1131,11 @@ class MemoryModel(context: Context) {
             substitutionClasses = substitutionClassesNow.size,
             activeSubstitutionClasses = activeSubstitutionClasses,
             substitutionMembers = substitutionMembers,
-            strongestSubstitutionSupport = strongestSubstitutionSupport
+            strongestSubstitutionSupport = strongestSubstitutionSupport,
+            meanActiveRelevance = meanActiveRelevance,
+            highestActiveRelevance = highestActiveRelevance,
+            meanActiveContextEntropy = meanActiveContextEntropy,
+            highestActiveGenerality = highestActiveGenerality
         )
     }
 
@@ -1162,7 +1207,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_07)
+                .put("formatVersion", 60_09)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
@@ -1192,6 +1237,7 @@ class MemoryModel(context: Context) {
                         .put("tokens", tokenArray)
                         .put("weight", m.weight)
                         .put("hz", m.representativeHz)
+                        .put("firstActivatedObservation", m.firstActivatedObservation)
                         .put("lastActivatedObservation", m.lastActivatedObservation)
                 )
             }
@@ -1251,6 +1297,10 @@ class MemoryModel(context: Context) {
                     tokens = tokens,
                     weight = o.optLong("weight", 0L),
                     representativeHz = o.optDouble("hz", 0.0),
+                    firstActivatedObservation = o.optLong(
+                        "firstActivatedObservation",
+                        o.optLong("lastActivatedObservation", observations)
+                    ),
                     lastActivatedObservation = o.optLong("lastActivatedObservation", 0L)
                 )
                 macros[macro.id] = macro
@@ -1298,7 +1348,10 @@ class MemoryModel(context: Context) {
             occurrenceWeight = macro.weight,
             abstractionLevel = macro.level,
             parentReuseCount = macroParentUseCount[macro.id] ?: 0,
-            relationWeights = relationWeights
+            relationWeights = relationWeights,
+            firstActivatedObservation = macro.firstActivatedObservation,
+            lastActivatedObservation = macro.lastActivatedObservation,
+            currentObservation = observations
         )
     }
 

@@ -607,7 +607,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 08 bildet aus wiederholt geteilten Slot-Rollen sparsame Substitutionsklassen. Erst wenn Makro-Tokens sich in mindestens zwei unterschiedlichen gelernten Strukturrollen gegenseitig ersetzen konnten, werden sie als strukturell ähnlich gruppiert. Das ist weiterhin keine eingebaute Wortbedeutung.",
+            "Step 09 trennt strukturelle Relevanz in mehrere Messachsen: Häufigkeit, Wiederverwendung, Relationsstütze, Kontextentropie, Spezifität und zeitliche Persistenz. Häufig heißt dadurch nicht automatisch wichtig. Die Werte sind weiterhin keine eingebaute Wortbedeutung und verändern das Lernen nicht direkt.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -918,6 +918,7 @@ class MainActivity : ComponentActivity() {
             "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
+            "Relevanz aktiv: Ø ${"%.3f".format(s.meanActiveRelevance)} | max ${"%.3f".format(s.highestActiveRelevance)} | Kontextentropie Ø ${"%.3f".format(s.meanActiveContextEntropy)} | Generalität max ${"%.3f".format(s.highestActiveGenerality)}\n" +
             "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}"
     }
 

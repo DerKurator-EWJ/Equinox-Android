@@ -11,7 +11,7 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Step 08: library-free generative audio projection of EngineOutputState.
+ * Step 09: library-free generative audio projection of EngineOutputState.
  * It uses only oscillators. No sample pack, no media library and no writes to memory.
  */
 class OrchestraSonifier {
@@ -98,14 +98,19 @@ class OrchestraSonifier {
         val activation: Double,
         val expectation: Double,
         val exchangeBias: Double,
-        val rankIndex: Int
+        val rankIndex: Int,
+        val relevance: Double,
+        val generality: Double
     )
 
     private fun buildVoices(state: EngineOutputState): List<Voice> {
         val macroById = state.sound.macros.associateBy { it.id }
         val live = state.working.nodes
             .filter { it.modality == "audio" && macroById.containsKey(it.id) }
-            .sortedByDescending { it.activation * 2.0 + it.expectation + abs(it.exchangeBias) * 0.35 }
+            .sortedByDescending {
+                it.activation * 2.0 + it.expectation + abs(it.exchangeBias) * 0.35 +
+                    it.structuralRelevance * 0.70
+            }
             .take(8)
             .map { n ->
                 Voice(
@@ -115,7 +120,9 @@ class OrchestraSonifier {
                     activation = n.activation,
                     expectation = n.expectation,
                     exchangeBias = n.exchangeBias,
-                    rankIndex = n.structuralRankIndex
+                    rankIndex = n.structuralRankIndex,
+                    relevance = n.structuralRelevance,
+                    generality = n.generality
                 )
             }
 
@@ -131,7 +138,9 @@ class OrchestraSonifier {
                 activation = 0.25,
                 expectation = 0.15,
                 exchangeBias = 0.0,
-                rankIndex = m.structuralRankIndex
+                rankIndex = m.structuralRankIndex,
+                relevance = m.structuralRelevance,
+                generality = m.generality
             )
         }
     }
@@ -161,8 +170,12 @@ class OrchestraSonifier {
                     else -> 0.0
                 }.coerceIn(0.0, 1.0)
 
-                val rankPresence = min(0.22, v.rankIndex * 0.018)
-                val importance = (0.18 + 0.50 * v.activation + 0.24 * v.expectation + rankPresence).coerceIn(0.10, 1.0)
+                val rankPresence = min(0.18, v.rankIndex * 0.015)
+                val relevancePresence = 0.28 * v.relevance.coerceIn(0.0, 1.0)
+                val importance = (
+                    0.14 + 0.46 * v.activation + 0.20 * v.expectation +
+                        rankPresence + relevancePresence
+                    ).coerceIn(0.08, 1.0)
                 val levelOctave = when (v.level) {
                     1 -> 1.0
                     2 -> 0.75
@@ -176,7 +189,11 @@ class OrchestraSonifier {
 
                 // Additive oscillator family. Higher levels become smoother/deeper;
                 // exchange bias changes harmonic balance rather than selecting samples.
-                val harmonic = min(0.52, 0.12 + 0.05 * v.level + abs(v.exchangeBias) * 0.05 + min(0.12, v.rankIndex * 0.01))
+                val harmonic = min(
+                    0.58,
+                    0.10 + 0.05 * v.level + abs(v.exchangeBias) * 0.05 +
+                        min(0.10, v.rankIndex * 0.008) + 0.10 * v.generality
+                )
                 val fundamental = sin(phase)
                 val second = sin(phase * 2.0 + v.exchangeBias * 0.35) * harmonic
                 val third = sin(phase * 3.0 + (v.id and 15) * 0.07) * harmonic * 0.42

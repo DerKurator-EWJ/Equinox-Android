@@ -1,89 +1,122 @@
-# Equinox v0.6 — Step 08: Substitution Classes
+# Equinox v0.6 — Step 09: Multidimensional Relevance
 
-Basis: v0.6 Step 07 Template / Slot Abstraction.
+Basis: v0.6 Step 08 Substitution Classes.
 
-## New in Step 08
+## New in Step 09
 
-Step 08 turns repeated slot substitution into a higher structural layer.
+Step 09 separates structural importance into independent read-only dimensions instead of treating one raw weight as "importance".
 
-Step 07 could infer a template such as:
+For every macro Equinox now derives:
 
-- `[A, B, C, D]`
-- `[A, B, C, E]`
-- -> `[A, B, C, □]`
+- **Frequency** — normalized recurrence / occurrence.
+- **Reuse** — how often higher macros reuse this macro as a component.
+- **Relation support** — how much learned macro-relation evidence exists.
+- **Context entropy** — how broadly relation evidence is distributed over contexts.
+- **Specificity** — how selective/context-focused the learned relation support is.
+- **Persistence** — whether the macro remained active across a longer observation span.
+- **Generality** — broad distributed contextual use.
+- **Structural relevance** — a bounded composite 0..1 used by output and diagnostics.
 
-Step 08 now asks a stricter question:
+These are not semantic labels. Equinox still does not know that a token is a noun, object, word, fruit, etc.
 
-> Do the same macro tokens repeatedly replace each other in more than one independent learned role?
+## Frequency is not importance
 
-If macro tokens X and Y can substitute for each other in at least **two distinct learned template contexts**, Equinox records sparse structural-role evidence between them. Connected tokens with sufficient evidence form a derived **substitution class**.
+The relevance composite intentionally gives raw frequency only a small share of the score.
 
-This does **not** mean that Equinox knows a noun, fruit, object, word, meaning, or semantic label. It only means that the learned structures repeatedly treated those macro tokens as structurally interchangeable.
+A very frequent macro with broad/high-entropy context can therefore be less relevant than a less frequent macro that is:
 
-## Important boundary
+- reused by higher structures,
+- strongly supported by relations,
+- selective in context,
+- persistent across time.
 
-Raw quant/frequency IDs do not enter substitution classes.
+A synthetic verification test used:
 
-Only **macro tokens** can become class members. This keeps the fixed quant alphabet as a low-level encoder and prevents broad frequency-bin combinations from flooding the structural class layer.
+- a very frequent, broad-context pattern: relevance ≈ 0.426
+- a less frequent, selective/reused pattern: relevance ≈ 0.868
 
-## Efficiency
+The second pattern therefore outranked the first even though it occurred far less often.
 
-There is still no global all-to-all comparison.
+## Rank vs relevance
 
-When a new stable macro joins an existing one-slot template bucket, Step 08 compares its slot variant only with the variants already present in that same local bucket.
+The RPG rank remains:
 
-Limits:
+`F → E → D → C → B → A → S → SS → SSS → Ω → Ω+1 → ...`
 
-- a pair needs at least 2 independent template-role matches,
-- at most 24 existing variants per template contribute new pair evidence,
-- the sparse pair-evidence index is bounded to 24,000 pairs,
-- classes are derived/cached and are not a second persistent graph,
-- class rebuilding happens only when template-role evidence changes.
+But Step 09 explicitly separates:
 
-This keeps the expensive work tied to actually observed structural roles rather than total memory size.
+- **rank** = accumulated structural maturity / abstraction,
+- **relevance** = bounded multidimensional read-only structural importance estimate.
 
-## Memory mode
+Neither value directly rewrites learning.
 
-Ordinary learned macro relations remain the first path for MEMORY traversal.
+## Temporal persistence
 
-If a memory path reaches a relation dead end, Step 08 may use a member of the same learned substitution class as a **read-only structural alternative** before falling back to an unrelated strong macro.
+Macro memory now stores both:
 
-This does not create new observations, new relations, or new class evidence.
+- `firstActivatedObservation`
+- `lastActivatedObservation`
 
-## Persistence
+This allows persistence to be estimated from the span across which the structure continued to recur.
 
-Substitution classes are derived from stable macro/template memory and are not separately saved.
+Older Step 05–08 memory files remain readable. When `firstActivatedObservation` is missing, Step 09 falls back conservatively to the previous last-activation value.
 
-`equinox_v06_memory.json` therefore remains compatible with Step 05–07. On load, the template and substitution indexes are reconstructed from the existing macros.
+## Output changes
+
+The LIVE/MEMORY canvas now uses relevance as a secondary presence signal:
+
+- relevant structures gain slightly more visual presence,
+- general/context-broad structures can receive a wider diffuse halo,
+- the footer reports mean active relevance.
+
+The library-free orchestra also uses relevance as one input to voice presence. Generality slightly changes harmonic complexity. No sample library is added.
+
+The renderer and orchestra remain read-only consumers of the core.
 
 ## UI / diagnostics
 
-Memory statistics now show:
+Memory statistics now additionally show:
 
-- substitution class count,
-- currently active substitution classes,
-- number of unique class members,
-- strongest observed shared-role support.
+- mean active relevance,
+- highest active relevance,
+- mean active context entropy,
+- highest active generality.
 
-Consolidation also reports newly formed substitution classes.
+This is intended for comparing patterns that are merely common with patterns that are structurally useful.
+
+## Efficiency
+
+Step 09 does not introduce a new persistent graph.
+
+Relevance is calculated lazily from data that already exists:
+
+- macro occurrence count,
+- parent reuse index,
+- sparse relation weights,
+- first/last activation observations.
+
+The cost is local to the macro being projected or inspected. There is no all-to-all relevance calculation.
+
+## Persistence
+
+The same `equinox_v06_memory.json` is used.
+
+The save format now writes `formatVersion = 6009` and the first activation observation for each macro. Existing Step 05–08 files can still be loaded.
 
 ## Verification performed here
 
-The Step 08 `MemoryModel.kt` and `StructuralRank.kt` compile successfully against JVM stubs for Android/JSON dependencies.
+The Step 09 core (`MemoryModel.kt`, `StructuralRank.kt`, `StructuralRelevance.kt`) compiles successfully against JVM Android/JSON stubs.
 
-A synthetic multi-round training test produced higher-level macros, learned templates and then a substitution class only after two independent shared structural roles were available. The test reached:
+The output layer (`EngineOutputState.kt`, `EquinoxOutputView.kt`, `OrchestraSonifier.kt`) also compiles successfully against Android graphics/media stubs.
 
-- 287 macro nodes,
-- 43 learned templates,
-- 1 substitution class,
-- pair support 2.
+A direct relevance test confirmed that a less frequent but selective/reused pattern can score higher than a massively frequent broad-context pattern.
 
-A complete Android APK build is not possible in this environment because the Android SDK/build tools are not installed.
+A complete Android APK build is still not possible in this environment because the Android SDK/build tools are not installed.
 
 ## Build
 
-Open exactly `Equinox_v06_Step08_SubstitutionClasses` as the Android Studio project and use **Build > Build APK(s)**.
+Open exactly `Equinox_v06_Step09_MultidimensionalRelevance` as the Android Studio project and use **Build > Build APK(s)**.
 
 Application ID remains `de.equinox.v05`, so it updates the same installed app when signed with the same key/debug key.
 
-Version: `0.6-step08-substitution-classes` (versionCode 22).
+Version: `0.6-step09-multidimensional-relevance` (versionCode 23).

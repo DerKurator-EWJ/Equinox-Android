@@ -1,4 +1,4 @@
-Equinox v0.6 Step 08 — Substitution Classes
+Equinox v0.6 Step 09 — Multidimensional Relevance
 
-Open this folder directly in Android Studio and build the APK.
-See README_V06.md for the architecture and verification notes.
+Open this directory as the Android Studio project.
+See README_V06.md for architecture, compatibility and verification notes.

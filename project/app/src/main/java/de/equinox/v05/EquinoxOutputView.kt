@@ -15,7 +15,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Step 07 output-only canvas with read-only structural ranks.
+ * Step 09 output-only canvas with read-only structural rank + relevance dimensions.
  *
  * This view never mutates MemoryModel. It renders a read-only EngineOutputState.
  * Positions are projection coordinates derived from IDs and the active working set;
@@ -101,8 +101,9 @@ class EquinoxOutputView(context: Context) : View(context) {
             s.working.exchanges.sumOf { abs(it.value) } / s.working.exchanges.size.toDouble()
         infoPaint.color = Color.argb(175, 215, 225, 245)
         val topRank = active.maxByOrNull { it.structuralScore }?.structuralRank ?: "—"
+        val meanRel = active.map { it.structuralRelevance }.average()
         canvas.drawText(
-            "$modeLabel · ${active.size} aktiv · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)} · max $topRank",
+            "$modeLabel · ${active.size} aktiv · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)} · Rel ${"%.2f".format(meanRel)} · max $topRank",
             18f,
             height - 18f,
             infoPaint
@@ -124,8 +125,13 @@ class EquinoxOutputView(context: Context) : View(context) {
             val rr = radius * (0.45f + 0.55f * ((node.id ushr 3) and 255) / 255f)
             val x = cx + cos(a).toFloat() * rr
             val y = cy + sin(a).toFloat() * rr
-            val r = 3.5f + 2.0f * node.abstractionLevel + min(6f, node.structuralRankIndex * 0.65f)
-            nodePaint.color = withAlpha(levelColor(node.abstractionLevel), 95)
+            val r = 3.5f + 2.0f * node.abstractionLevel +
+                min(6f, node.structuralRankIndex * 0.65f) +
+                (node.structuralRelevance * 4.0).toFloat()
+            nodePaint.color = withAlpha(
+                levelColor(node.abstractionLevel),
+                (72 + node.structuralRelevance * 95.0).toInt().coerceIn(72, 180)
+            )
             canvas.drawCircle(x, y, r, nodePaint)
         }
     }
@@ -194,13 +200,21 @@ class EquinoxOutputView(context: Context) : View(context) {
         val e = node.expectation.coerceIn(0.0, 1.5).toFloat()
         val base = 7f + node.abstractionLevel * 3.5f
         val rankBoost = min(0.55f, node.structuralRankIndex * 0.045f)
-        val radius = base * (1f + 0.70f * a + rankBoost)
+        val relevanceBoost = (node.structuralRelevance.coerceIn(0.0, 1.0) * 0.32).toFloat()
+        val radius = base * (1f + 0.70f * a + rankBoost + relevanceBoost)
         val color = levelColor(node.abstractionLevel)
 
         if (e > 0.01f) {
             haloPaint.color = withAlpha(color, (45 + 110 * min(1f, e)).toInt())
             haloPaint.strokeWidth = 1.5f + 5f * e
             canvas.drawCircle(x, y, radius + 7f + 12f * e, haloPaint)
+        }
+
+        if (node.generality > 0.08) {
+            val g = node.generality.coerceIn(0.0, 1.0).toFloat()
+            haloPaint.color = Color.argb((30 + 85 * g).toInt(), 180, 200, 255)
+            haloPaint.strokeWidth = 1.0f + 2.5f * g
+            canvas.drawCircle(x, y, radius + 18f + 14f * g, haloPaint)
         }
 
         if (node.retrieved) {
