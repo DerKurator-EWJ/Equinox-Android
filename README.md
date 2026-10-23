@@ -59,6 +59,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step10-dualaudioencoder` | `Equinox_v06_Step10_DualAudioEncoder.zip` | 26 | 0 | `46a8111ced1691b98d72cdb9f120cf659f4ac4457fbbb98605f898bb376c0fcc` |
 | `android-v06-step11-encoderconvergencelab` | `Equinox_v06_Step11_EncoderConvergenceLab.zip` | 27 | 0 | `46e892c45c6836d2136c3642f72109456b2a66995e6cc11408e60333a763e3c3` |
 | `android-v06-step12-adaptivequantizer` | `Equinox_v06_Step12_AdaptiveQuantizer.zip` | 28 | 0 | `c34bd4289100a06f3329fab0aa0521b7fb6046ea7cfd093049d2fe209fb591d8` |
+| `android-v06-step13-adaptivehierarchy` | `Equinox_v06_Step13_AdaptiveHierarchy.zip` | 29 | 0 | `d91f0a6f254ab25832678877d7c0c6f9f2b79cb4a034d2df06d9b4b2822eb02e` |
 
 ## Security, licensing, and limitations
 

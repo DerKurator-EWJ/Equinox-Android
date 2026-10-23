@@ -1,17 +1,16 @@
-# Equinox v0.6 Step 12 — Adaptive Quantizer
+# Equinox v0.6 — Step 13: Adaptive Hierarchy
 
-Open this folder directly in Android Studio and build the APK from this project.
+Open this exact folder as a new Android Studio project and build the APK from it.
 
-New in Step 12:
-- third audio encoder: **ADAPTIVE-ID** (no FFT, no fixed 16-bit bins)
-- persistent learned vector-quantizer codebook (`equinox_v06_adaptive_quantizer.json`)
-- stable adaptive IDs in a separate `audio_adaptive` memory stream
-- online prototype centroids with slowly learned local acceptance radii
-- hard cap of 4096 prototypes
-- three-way live benchmark: FFT vs fixed DIRECT vs ADAPTIVE on the exact same PCM frames
-- adaptive codebook diagnostics in LAB
-- existing v0.6 memory remains compatible; adaptive IDs start in a non-colliding negative range
+This step keeps Step 12 and adds:
 
-Important: do not delete only the adaptive codebook while keeping adaptive memory, because stable IDs would be reused for different prototypes. Treat codebook + memory as one learned state.
+- adaptive macro promotion based on estimated compression gain rather than one fixed hit threshold;
+- bounded live auto-promotion with a per-level cooldown;
+- non-overlapping macro emission into the next abstraction level;
+- live hierarchy/compression diagnostics in the app;
+- the same FFT, DIRECT and ADAPTIVE encoders from Step 12.
 
-This source tree was statically Kotlin-checked here, but a full Android APK build still requires Android Studio / Android SDK.
+Application ID: `de.equinox.v05`
+Version: `0.6-step13-adaptive-hierarchy` / versionCode 27
+
+The full Android APK was not built in the generation environment because no Android SDK is installed there. The changed core and MainActivity were compiled against Kotlin/Android stubs and the hierarchy logic was exercised with a synthetic repeated-token test.

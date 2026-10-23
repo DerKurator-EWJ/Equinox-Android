@@ -14,7 +14,8 @@ private const val MAX_ABSTRACTION_LEVEL = 4
 private const val MIN_PATTERN_LENGTH = 2
 private const val MAX_PATTERN_LENGTH = 6
 private const val MAX_PATTERN_CANDIDATES = 6_000
-private const val MAX_PROMOTIONS_PER_LEVEL = 24
+private const val MAX_PROMOTIONS_PER_LEVEL = 8
+private const val AUTO_PROMOTION_COOLDOWN_BASE_TOKENS = 48L
 
 // Step 07/08: one-slot templates feed the sparse substitution-class layer.
 private const val MAX_TEMPLATE_BUCKETS = 12_000
@@ -38,13 +39,16 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 12
+ * v0.6 Step 13
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
  * relevance profile and now supports three isolated audio alphabets: legacy FFT
  * frequency IDs ("audio"), fixed 16-bit direct IDs ("audio_direct") and the learned
  * adaptive vector-quantizer IDs ("audio_adaptive"). They never mix sequence streams.
+ * Step 13 adds adaptive hierarchy promotion and non-overlapping macro emission: recurring
+ * patterns can promote themselves when their estimated dictionary compression gain is
+ * positive enough, and only non-overlapping recognized spans are emitted upward.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
  *
@@ -98,7 +102,14 @@ data class MemoryStats(
     val adaptiveAudioCodes: Int = 0,
     val fftAudioMacros: Int = 0,
     val directAudioMacros: Int = 0,
-    val adaptiveAudioMacros: Int = 0
+    val adaptiveAudioMacros: Int = 0,
+    val hierarchyBaseInputTokens: Long = 0L,
+    val hierarchyBaseMacroEmissions: Long = 0L,
+    val hierarchyBaseSavedTokens: Long = 0L,
+    val hierarchyBaseCompressionGain: Double = 0.0,
+    val hierarchyAllMacroEmissions: Long = 0L,
+    val hierarchyAutoPromotions: Long = 0L,
+    val hierarchyMeanAcceptedSpan: Double = 0.0
 )
 
 data class GraphNode(
@@ -354,6 +365,19 @@ class MemoryModel(context: Context) {
     private val rolling = mutableMapOf<String, ArrayDeque<Int>>()
     private val previousActiveMacro = mutableMapOf<String, Int>()
 
+    // Step 13 adaptive hierarchy state. Positions are per stream so accepted macro spans
+    // can be kept non-overlapping before they are emitted to the next abstraction level.
+    private val hierarchyStreamPositions = mutableMapOf<String, Long>()
+    private val hierarchyCoveredUntil = mutableMapOf<String, Long>()
+    private val hierarchyLastAutoPromotionAt = mutableMapOf<String, Long>()
+    private var hierarchyBaseInputTokens = 0L
+    private var hierarchyBaseMacroEmissions = 0L
+    private var hierarchyBaseSavedTokens = 0L
+    private var hierarchyAllMacroEmissions = 0L
+    private var hierarchyAcceptedSpanTotal = 0L
+    private var hierarchyAutoPromotions = 0L
+    private var hierarchyAutoPromotionsSinceSave = 0
+
     private var nextMacroId = MACRO_ID_BASE
     private var macroFrozen = false
     private var observations = 0L
@@ -454,12 +478,23 @@ class MemoryModel(context: Context) {
         if (streamLevel >= MAX_ABSTRACTION_LEVEL) return
 
         val streamKey = streamKey(streamLevel, modality)
+        val streamPosition = (hierarchyStreamPositions[streamKey] ?: 0L) + 1L
+        hierarchyStreamPositions[streamKey] = streamPosition
+        if (streamLevel == 0) hierarchyBaseInputTokens++
+
         val buffer = rolling.getOrPut(streamKey) { ArrayDeque() }
         buffer.addLast(tokenId)
         while (buffer.size > MAX_PATTERN_LENGTH) buffer.removeFirst()
 
         val current = buffer.toList()
+        val coveredUntilBeforeEvent = hierarchyCoveredUntil[streamKey] ?: 0L
         var bestActivated: MacroCode? = null
+        var bestAutoSignature: String? = null
+        var bestAutoCandidate: PatternCandidate? = null
+        var bestAutoPriority = 0.0
+        val promotionCooldown = (AUTO_PROMOTION_COOLDOWN_BASE_TOKENS shr streamLevel.coerceIn(0, 2)).coerceAtLeast(8L)
+        val lastAutoPromotionAt = hierarchyLastAutoPromotionAt[streamKey] ?: Long.MIN_VALUE / 4L
+        val autoPromotionAllowed = streamPosition - lastAutoPromotionAt >= promotionCooldown
 
         for (length in MIN_PATTERN_LENGTH..minOf(MAX_PATTERN_LENGTH, current.size)) {
             val tail = current.takeLast(length)
@@ -468,29 +503,116 @@ class MemoryModel(context: Context) {
             // Direct lookup: no global macro comparison.
             val existingMacro = macroBySignature[signature]?.let { macros[it] }
             if (existingMacro != null) {
-                if (bestActivated == null || existingMacro.tokens.size > bestActivated.tokens.size) {
+                val spanStart = streamPosition - existingMacro.tokens.size.toLong() + 1L
+                if (spanStart > coveredUntilBeforeEvent &&
+                    (bestActivated == null || existingMacro.tokens.size > bestActivated.tokens.size)
+                ) {
                     bestActivated = existingMacro
                 }
                 continue
             }
 
-            // Unknown tails only accumulate temporary evidence. Candidate growth is bounded.
+            // Unknown tails accumulate temporary evidence. Step 13 evaluates that evidence
+            // against a compression objective instead of waiting for one fixed hit count.
             val candidate = candidates[signature]
-            if (candidate != null) {
+            val effectiveCandidate = if (candidate != null) {
                 candidate.hits++
+                candidate
             } else if (candidates.size < MAX_PATTERN_CANDIDATES) {
-                candidates[signature] = PatternCandidate(
+                PatternCandidate(
                     streamLevel = streamLevel,
                     modality = modality,
                     tokens = tail,
                     hits = 1L
+                ).also { candidates[signature] = it }
+            } else {
+                null
+            }
+
+            if (!macroFrozen && autoPromotionAllowed && effectiveCandidate != null) {
+                val score = AdaptiveHierarchyPolicy.evaluate(
+                    patternLength = effectiveCandidate.tokens.size,
+                    hits = effectiveCandidate.hits,
+                    sourceLevel = effectiveCandidate.streamLevel
                 )
+                if (score.eligible && score.priority > bestAutoPriority) {
+                    bestAutoPriority = score.priority
+                    bestAutoSignature = signature
+                    bestAutoCandidate = effectiveCandidate
+                }
             }
         }
 
-        // Compression rule: at most the best (longest) known macro at this level activates.
-        // This bounds recursive work and prevents every overlapping pattern from exploding upward.
-        bestActivated?.let { activateMacro(it) }
+        // At most one self-promotion per input token. This keeps live learning bounded even
+        // when several overlapping tails become compressible at the same instant.
+        if (!macroFrozen && bestAutoSignature != null && bestAutoCandidate != null) {
+            val promoted = promoteCandidate(bestAutoSignature!!, bestAutoCandidate!!, autoPromotion = true)
+            if (promoted != null) {
+                hierarchyLastAutoPromotionAt[streamKey] = streamPosition
+                val spanStart = streamPosition - promoted.tokens.size.toLong() + 1L
+                if (spanStart > coveredUntilBeforeEvent &&
+                    (bestActivated == null || promoted.tokens.size > bestActivated.tokens.size)
+                ) {
+                    bestActivated = promoted
+                }
+            }
+        }
+
+        // Step 13 emits only non-overlapping recognized spans upward. This makes each
+        // abstraction stream genuinely shorter instead of recursively activating every
+        // overlapping match. Lower-level raw input remains available in the level-0 alphabet.
+        bestActivated?.let { macro ->
+            val span = macro.tokens.size.coerceAtLeast(1)
+            val spanStart = streamPosition - span.toLong() + 1L
+            val coveredUntil = hierarchyCoveredUntil[streamKey] ?: 0L
+            if (spanStart > coveredUntil) {
+                hierarchyCoveredUntil[streamKey] = streamPosition
+                hierarchyAllMacroEmissions++
+                hierarchyAcceptedSpanTotal += span.toLong()
+                if (streamLevel == 0) {
+                    hierarchyBaseMacroEmissions++
+                    hierarchyBaseSavedTokens += (span - 1).toLong()
+                }
+                activateMacro(macro)
+            }
+        }
+    }
+
+    private fun promoteCandidate(
+        signature: String,
+        candidate: PatternCandidate,
+        autoPromotion: Boolean
+    ): MacroCode? {
+        if (macroFrozen || macroBySignature.containsKey(signature)) return null
+        if (candidate.streamLevel !in 0 until MAX_ABSTRACTION_LEVEL) return null
+
+        val macro = MacroCode(
+            id = nextMacroId++,
+            level = candidate.streamLevel + 1,
+            modality = candidate.modality,
+            tokens = candidate.tokens.toList(),
+            weight = candidate.hits,
+            representativeHz = representativeHzForTokens(candidate.tokens),
+            firstActivatedObservation = observations,
+            lastActivatedObservation = observations
+        )
+        macros[macro.id] = macro
+        macroBySignature[signature] = macro.id
+        indexMacroComposition(macro)
+        indexMacroForTemplates(macro)
+        candidates.remove(signature)
+
+        if (autoPromotion) {
+            hierarchyAutoPromotions++
+            hierarchyAutoPromotionsSinceSave++
+            // Persist in small batches: learned identities survive normal use without
+            // forcing a JSON rewrite on every newly promoted macro.
+            if (hierarchyAutoPromotionsSinceSave >= 8) {
+                hierarchyAutoPromotionsSinceSave = 0
+                save()
+            }
+        }
+        return macro
     }
 
     private fun activateMacro(macro: MacroCode) {
@@ -691,31 +813,23 @@ class MemoryModel(context: Context) {
         for (sourceLevel in 0 until MAX_ABSTRACTION_LEVEL) {
             val eligible = candidates.entries
                 .asSequence()
-                .filter { (_, c) -> c.streamLevel == sourceLevel && c.hits >= threshold }
-                .sortedWith(
-                    compareByDescending<Map.Entry<String, PatternCandidate>> { it.value.hits }
-                        .thenByDescending { it.value.tokens.size }
-                )
+                .filter { (_, c) -> c.streamLevel == sourceLevel }
+                .mapNotNull { entry ->
+                    val c = entry.value
+                    val score = AdaptiveHierarchyPolicy.evaluate(
+                        patternLength = c.tokens.size,
+                        hits = c.hits,
+                        sourceLevel = c.streamLevel,
+                        minimumHits = threshold
+                    )
+                    if (score.eligible) Triple(entry.key, c, score) else null
+                }
+                .sortedByDescending { it.third.priority }
                 .take(MAX_PROMOTIONS_PER_LEVEL)
                 .toList()
 
-            for ((signature, c) in eligible) {
-                if (macroBySignature.containsKey(signature)) continue
-
-                val macro = MacroCode(
-                    id = nextMacroId++,
-                    level = sourceLevel + 1,
-                    modality = c.modality,
-                    tokens = c.tokens.toList(),
-                    weight = c.hits,
-                    representativeHz = representativeHzForTokens(c.tokens),
-                    firstActivatedObservation = observations,
-                    lastActivatedObservation = observations
-                )
-                macros[macro.id] = macro
-                macroBySignature[signature] = macro.id
-                indexMacroComposition(macro)
-                indexMacroForTemplates(macro)
+            for ((signature, c, _) in eligible) {
+                val macro = promoteCandidate(signature, c, autoPromotion = false) ?: continue
                 created++
                 highest = max(highest, macro.level)
             }
@@ -1200,7 +1314,16 @@ class MemoryModel(context: Context) {
             adaptiveAudioCodes = quants.values.count { it.modality == "audio_adaptive" },
             fftAudioMacros = macros.values.count { it.modality == "audio" },
             directAudioMacros = macros.values.count { it.modality == "audio_direct" },
-            adaptiveAudioMacros = macros.values.count { it.modality == "audio_adaptive" }
+            adaptiveAudioMacros = macros.values.count { it.modality == "audio_adaptive" },
+            hierarchyBaseInputTokens = hierarchyBaseInputTokens,
+            hierarchyBaseMacroEmissions = hierarchyBaseMacroEmissions,
+            hierarchyBaseSavedTokens = hierarchyBaseSavedTokens,
+            hierarchyBaseCompressionGain = if (hierarchyBaseInputTokens <= 0L) 0.0 else
+                (hierarchyBaseSavedTokens.toDouble() / hierarchyBaseInputTokens.toDouble()).coerceIn(0.0, 1.0),
+            hierarchyAllMacroEmissions = hierarchyAllMacroEmissions,
+            hierarchyAutoPromotions = hierarchyAutoPromotions,
+            hierarchyMeanAcceptedSpan = if (hierarchyAllMacroEmissions <= 0L) 0.0 else
+                hierarchyAcceptedSpanTotal.toDouble() / hierarchyAllMacroEmissions.toDouble()
         )
     }
 
@@ -1226,6 +1349,16 @@ class MemoryModel(context: Context) {
         memoryPlaybackSteps = 0L
         rolling.clear()
         previousActiveMacro.clear()
+        hierarchyStreamPositions.clear()
+        hierarchyCoveredUntil.clear()
+        hierarchyLastAutoPromotionAt.clear()
+        hierarchyBaseInputTokens = 0L
+        hierarchyBaseMacroEmissions = 0L
+        hierarchyBaseSavedTokens = 0L
+        hierarchyAllMacroEmissions = 0L
+        hierarchyAcceptedSpanTotal = 0L
+        hierarchyAutoPromotions = 0L
+        hierarchyAutoPromotionsSinceSave = 0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -1260,6 +1393,16 @@ class MemoryModel(context: Context) {
         memoryPlaybackSteps = 0L
         rolling.clear()
         previousActiveMacro.clear()
+        hierarchyStreamPositions.clear()
+        hierarchyCoveredUntil.clear()
+        hierarchyLastAutoPromotionAt.clear()
+        hierarchyBaseInputTokens = 0L
+        hierarchyBaseMacroEmissions = 0L
+        hierarchyBaseSavedTokens = 0L
+        hierarchyAllMacroEmissions = 0L
+        hierarchyAcceptedSpanTotal = 0L
+        hierarchyAutoPromotions = 0L
+        hierarchyAutoPromotionsSinceSave = 0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -1272,7 +1415,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_10)
+                .put("formatVersion", 60_13)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)

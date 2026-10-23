@@ -161,7 +161,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 12 — ADAPTIVE QUANTIZER", 17f, 8).apply {
+        root.addView(label("STEP 13 — ADAPTIVE HIERARCHY", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -748,7 +748,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 10 lässt den bisherigen FFT/Frequenz-Encoder und einen FFT-freien Direct-ID-Encoder als getrennte Alphabete nebeneinander laufen. So kann dieselbe Memory-Architektur empirisch mit zwei Sensorcodierungen getestet werden, ohne Makro-, Relations-, Template- oder Relevanzlogik umzuschreiben.",
+            "Step 13 lässt wiederkehrende Muster nicht mehr nur über einen festen Hit-Schwellwert wachsen. Ein Muster darf sich selbst zum Makro verdichten, wenn seine Wiederholung einen positiven geschätzten Kompressionsgewinn rechtfertigt. Nur nicht überlappende erkannte Makro-Spannen werden in die nächste Abstraktionsstufe emittiert; dadurch wird der rekursive Live-Strom mit Lernen tatsächlich kürzer.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1163,6 +1163,7 @@ class MainActivity : ComponentActivity() {
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
             "Relevanz aktiv: Ø ${"%.3f".format(s.meanActiveRelevance)} | max ${"%.3f".format(s.highestActiveRelevance)} | Kontextentropie Ø ${"%.3f".format(s.meanActiveContextEntropy)} | Generalität max ${"%.3f".format(s.highestActiveGenerality)}\n" +
+            "Adaptive Hierarchie: L0 ${s.hierarchyBaseInputTokens} Token | Makro-Emissionen ${s.hierarchyBaseMacroEmissions} | gespart ${s.hierarchyBaseSavedTokens} (${"%.1f".format(s.hierarchyBaseCompressionGain * 100.0)}%) | ØSpan ${"%.2f".format(s.hierarchyMeanAcceptedSpan)} | Auto-Makros ${s.hierarchyAutoPromotions}\n" +
             "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}"
     }
 
