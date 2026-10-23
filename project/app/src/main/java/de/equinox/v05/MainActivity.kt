@@ -13,6 +13,7 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
@@ -28,6 +29,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -70,6 +72,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var surfaceCanvas: EquinoxOutputView
     private lateinit var surfaceVideo: MemoryVideoView
     private lateinit var settingsOverlay: ScrollView
+    private val livePipeline = LowLatencyLivePipeline()
+    private val liveRenderPosted = AtomicBoolean(false)
+    private lateinit var liveDelaySpinner: Spinner
+    private lateinit var liveLatencyStatus: TextView
 
     private lateinit var status: TextView
     private lateinit var frequency: TextView
@@ -227,7 +233,13 @@ class MainActivity : ComponentActivity() {
         encoderBenchmark = EncoderBenchmarkManager(this)
         adaptiveQuantizer = AdaptiveAudioQuantizer(this)
         adaptiveVisualQuantizer = AdaptiveVisualQuantizer(this)
+        val latencyPrefs = getSharedPreferences("equinox_live_latency", MODE_PRIVATE)
+        livePipeline.setPreset(
+            LowLatencyLivePipeline.DelayPreset.fromName(latencyPrefs.getString("preset", null))
+        )
 
+        // Step 27: Step 26's two-surface UI remains; the LIVE surface now receives
+        // synchronized frame/state packets through a bounded low-latency pipeline.
         // Step 26: the normal app has only two render surfaces. All controls/debug
         // live behind the settings overlay and therefore do not participate in the
         // hot render path while the overlay is closed.
@@ -292,7 +304,7 @@ class MainActivity : ComponentActivity() {
         ))
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 26 — MINIMAL UI / RENDER ISOLATION", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 27 — LOW-LATENCY LIVE / FRAME SYNC", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -450,6 +462,35 @@ class MainActivity : ComponentActivity() {
         }
         livePage.addView(cameraButton, buttonParams(8))
         livePage.addView(cameraStopButton, buttonParams(6))
+
+        livePage.addView(label("LIVE-VERZÖGERUNG / FRAME-SYNC", 14f, 12).apply {
+            setTextColor(Color.rgb(120, 220, 205))
+        })
+        liveDelaySpinner = Spinner(this).apply {
+            val presets = LowLatencyLivePipeline.DelayPreset.entries
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                presets.map { it.label }
+            )
+            setSelection(presets.indexOf(livePipeline.getPreset()).coerceAtLeast(0), false)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val selected = presets.getOrElse(position) { LowLatencyLivePipeline.DelayPreset.AUTO }
+                    livePipeline.setPreset(selected)
+                    getSharedPreferences("equinox_live_latency", MODE_PRIVATE)
+                        .edit().putString("preset", selected.name).apply()
+                    updateLiveLatencyStatus()
+                    scheduleLowLatencyRender()
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        livePage.addView(liveDelaySpinner, buttonParams(4))
+        liveLatencyStatus = label("Live-Sync: —", 12f, 6).apply {
+            setTextColor(Color.rgb(185, 205, 215))
+        }
+        livePage.addView(liveLatencyStatus)
 
         memoryStats = label(memoryText(), 13f, 16).apply { setTextColor(Color.rgb(180, 220, 215)) }
         livePage.addView(memoryStats)
@@ -1220,10 +1261,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshHybridPage(ok: Boolean) {
-        val state = outputBridge.snapshot()
-        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS) surfaceCanvas.setState(state)
-        if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE) surfaceVideo.setEngineState(state)
-        val w = state.working
+        val w = memory.workingSetSnapshot()
+        livePipeline.offerState(w)
+        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS) {
+            surfaceCanvas.setState(outputBridge.snapshot())
+        }
+        if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE) scheduleLowLatencyRender()
         if (settingsOpen && ::hybridModeStatus.isInitialized) {
             hybridModeStatus.text = if (!ok && w.nodes.none { it.activation > 0.12 }) {
                 "HYBRID: wartet auf Live-Makro"
@@ -1320,26 +1363,63 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshGraph() {
+        val liveVisible = ::surfaceVideo.isInitialized &&
+            currentSurface == SurfaceMode.LIVE &&
+            surfaceVideo.visibility == View.VISIBLE
+
+        // Step 27 hot path: LIVE needs only the compact working set. Do not build the much
+        // heavier graph + sonification snapshots merely to deform the camera image.
+        if (liveVisible) {
+            livePipeline.offerState(memory.workingSetSnapshot())
+            scheduleLowLatencyRender()
+        }
+
+        val canvasVisible = ::surfaceCanvas.isInitialized &&
+            currentSurface == SurfaceMode.CANVAS &&
+            surfaceCanvas.visibility == View.VISIBLE
+        val labDue = settingsOpen && currentPage == AppPage.LAB &&
+            ::graphView.isInitialized && labPage.visibility == View.VISIBLE &&
+            System.currentTimeMillis() - lastLabRenderMs >= 250L
+
+        if (!canvasVisible && !labDue) return
+
+        // Full projection is materialized only when a consumer actually needs it.
         val state = outputBridge.snapshot()
+        if (canvasVisible) surfaceCanvas.setState(state)
 
-        // Hot path: update exactly one visible surface. Hidden previews never receive
-        // state and therefore cannot consume Canvas work while the user is switching UI.
-        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS && surfaceCanvas.visibility == View.VISIBLE) {
-            surfaceCanvas.setState(state)
+        if (labDue) {
+            lastLabRenderMs = System.currentTimeMillis()
+            graphView.setSnapshot(state.graph)
         }
-        if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE && surfaceVideo.visibility == View.VISIBLE) {
-            surfaceVideo.setEngineState(state)
-        }
+    }
 
-        // LAB is intentionally low-frequency. A huge debug graph should never run at
-        // camera/audio frame rate just because the engine itself is active.
-        if (settingsOpen && currentPage == AppPage.LAB && ::graphView.isInitialized && labPage.visibility == View.VISIBLE) {
-            val now = System.currentTimeMillis()
-            if (now - lastLabRenderMs >= 250L) {
-                lastLabRenderMs = now
-                graphView.setSnapshot(state.graph)
+    private fun scheduleLowLatencyRender() {
+        if (!::surfaceVideo.isInitialized) return
+        if (!liveRenderPosted.compareAndSet(false, true)) return
+
+        uiHandler.post {
+            liveRenderPosted.set(false)
+            if (!::surfaceVideo.isInitialized || currentSurface != SurfaceMode.LIVE || surfaceVideo.visibility != View.VISIBLE) return@post
+
+            // Feed the controller the cost of the previous draw before selecting the next frame.
+            livePipeline.reportRenderCost(surfaceVideo.lastRenderCostMs())
+            val packet = livePipeline.poll() ?: return@post
+            val preset = packet.configuredPreset.label
+            val info = if (packet.configuredPreset == LowLatencyLivePipeline.DelayPreset.AUTO) {
+                "Sync AUTO ${packet.effectiveDelayMs}ms · Frame ${packet.actualFrameAgeMs}ms · drop ${packet.droppedFramesTotal}"
+            } else {
+                "Sync $preset · Frame ${packet.actualFrameAgeMs}ms · drop ${packet.droppedFramesTotal}"
             }
+            surfaceVideo.setSynchronizedFrame(packet.frame, packet.working, info)
+            if (settingsOpen) updateLiveLatencyStatus()
         }
+    }
+
+    private fun updateLiveLatencyStatus() {
+        if (!::liveLatencyStatus.isInitialized) return
+        val st = livePipeline.stats()
+        liveLatencyStatus.text =
+            "Live-Sync: ${st.preset.label} · effektiv ${st.effectiveDelayMs} ms · Analyse Ø ${"%.1f".format(st.analysisCostEwmaMs)} ms · Render Ø ${"%.1f".format(st.renderCostEwmaMs)} ms · Frames ${st.renderedFrames}/${st.offeredFrames} · verworfen ${st.droppedFrames} · Buffer ${st.bufferedFrames}"
     }
 
     private fun toggleContinuousOrchestra() {
@@ -1676,11 +1756,13 @@ class MainActivity : ComponentActivity() {
                             }
                             visualFrameCount++
                             visualObservationCount += result.observations.size
+                            livePipeline.reportAnalysisCost(result.analysisCostMs.toDouble() + result.videoSampleCostMs.toDouble())
 
                             runOnUiThread {
                                 if (settingsOpen) {
                                     cameraFrames.text =
-                                        "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · Regionen ${result.sampledRegions} · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
+                                        "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · Regionen ${result.sampledRegions} · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)} · Analyse ${result.analysisCostMs}ms · Video ${result.videoSampleCostMs}ms/${result.videoIntervalMs}ms"
+                                    updateLiveLatencyStatus()
                                     adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
                                     if (visualFrameCount % 2L == 0L) updateMemoryStats()
                                 }
@@ -1689,11 +1771,8 @@ class MainActivity : ComponentActivity() {
                         },
                         onVideoFrame = { video ->
                             if (!cameraRunning) return@VisualGridAnalyzer
-                            runOnUiThread {
-                                if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE && surfaceVideo.visibility == View.VISIBLE) {
-                                    surfaceVideo.setFrame(video)
-                                }
-                            }
+                            livePipeline.offerFrame(video)
+                            scheduleLowLatencyRender()
                         }
                     )
                 )
@@ -1720,6 +1799,7 @@ class MainActivity : ComponentActivity() {
         cameraRunning = false
         try { cameraProvider?.unbindAll() } catch (_: Exception) { }
         cameraProvider = null
+        livePipeline.clearFrames()
         adaptiveVisualQuantizer.saveNow()
         cameraStatus.text = "Kamera: AUS"
         if (::adaptiveVisualQuantizerStatus.isInitialized) adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()

@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 41
-        versionName = "0.6-step26-minimal-ui"
+        versionCode = 42
+        versionName = "0.6-step27-low-latency-live"
     }
 
     compileOptions {

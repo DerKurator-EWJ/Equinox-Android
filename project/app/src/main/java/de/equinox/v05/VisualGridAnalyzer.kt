@@ -28,7 +28,10 @@ data class VisualFrameResult(
     val meanMatchDistance: Double,
     val meanFamiliarity: Double = 0.0,
     val maxResolutionDepth: Int = 0,
-    val sampledRegions: Int = 0
+    val sampledRegions: Int = 0,
+    val analysisCostMs: Long = 0L,
+    val videoSampleCostMs: Long = 0L,
+    val videoIntervalMs: Long = 90L
 )
 
 /**
@@ -53,7 +56,6 @@ class VisualGridAnalyzer(
         const val BASE_GRID_W = 8
         const val BASE_GRID_H = 6
         private const val MIN_LEARNING_FRAME_INTERVAL_MS = 650L
-        private const val MIN_VIDEO_FRAME_INTERVAL_MS = 90L
         private const val TARGET_LEARNING_WORK_MS = 70L
     }
 
@@ -76,6 +78,8 @@ class VisualGridAnalyzer(
 
     private var lastLearningFrameMs = 0L
     private var lastVideoFrameMs = 0L
+    private var videoFrameIntervalMs = 66L
+    private var lastVideoSampleCostMs = 0L
     private var adaptivePatchBudget = BASE_GRID_W * BASE_GRID_H * 2
     private var lastMeanFamiliarity = 0.0
     private var lastMaxDepth = 0
@@ -84,7 +88,7 @@ class VisualGridAnalyzer(
         try {
             if (image.planes.size < 3) return
             val now = System.currentTimeMillis()
-            val videoDue = onVideoFrame != null && now - lastVideoFrameMs >= MIN_VIDEO_FRAME_INTERVAL_MS
+            val videoDue = onVideoFrame != null && now - lastVideoFrameMs >= videoFrameIntervalMs
             val learningDue = now - lastLearningFrameMs >= MIN_LEARNING_FRAME_INTERVAL_MS
             if (!videoDue && !learningDue) return
 
@@ -96,6 +100,7 @@ class VisualGridAnalyzer(
 
             if (videoDue) {
                 lastVideoFrameMs = now
+                val videoStartNs = System.nanoTime()
                 val detailFactor = 1.0 + 1.7 * lastMeanFamiliarity + 0.22 * lastMaxDepth.toDouble()
                 val desiredCells = (48.0 * 27.0 * detailFactor).toInt().coerceAtLeast(48 * 27)
                 val aspect = width.toDouble() / height.coerceAtLeast(1).toDouble()
@@ -110,6 +115,16 @@ class VisualGridAnalyzer(
                     }
                 }
                 val rotated = rotateGrid(raw, videoW, videoH, image.imageInfo.rotationDegrees)
+                lastVideoSampleCostMs = ((System.nanoTime() - videoStartNs) / 1_000_000L).coerceAtLeast(0L)
+                // Prefer fresh frames over a backlog. Faster devices automatically approach 30 fps;
+                // slower ones back off before conversion itself starts starving learning.
+                videoFrameIntervalMs = when {
+                    lastVideoSampleCostMs <= 10L -> 33L
+                    lastVideoSampleCostMs <= 20L -> 50L
+                    lastVideoSampleCostMs <= 34L -> 66L
+                    lastVideoSampleCostMs <= 55L -> 90L
+                    else -> 120L
+                }
                 onVideoFrame?.invoke(VideoFrameSnapshot(rotated.first, rotated.second, rotated.third, now))
             }
 
@@ -224,7 +239,10 @@ class VisualGridAnalyzer(
                     meanMatchDistance = if (distanceCount == 0) 0.0 else distanceSum / distanceCount.toDouble(),
                     meanFamiliarity = lastMeanFamiliarity,
                     maxResolutionDepth = maxDepth,
-                    sampledRegions = observations.size
+                    sampledRegions = observations.size,
+                    analysisCostMs = elapsedMs,
+                    videoSampleCostMs = lastVideoSampleCostMs,
+                    videoIntervalMs = videoFrameIntervalMs
                 )
             )
         } finally {
