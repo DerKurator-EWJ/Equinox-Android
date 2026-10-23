@@ -121,7 +121,7 @@ class Sonifier {
             appendTone(
                 out = out,
                 frequencies = freqs,
-                durationMs = 240 + macro.abstractionLevel * 70 + min(320L, macro.weight * 2L).toInt(),
+                durationMs = 260 + min(300L, macro.weight * 2L).toInt(),
                 amplitude = 0.24
             )
             appendSilence(out, 70)

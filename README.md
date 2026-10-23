@@ -45,6 +45,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v05-step12` | `Equinox_v05_Step12.zip` | 17 | 0 | `b81c3bf3dc560904c617a36a807e4b6abfca167d0fe318506fa5984dc0713611` |
 | `android-v05-step13` | `Equinox_v05_Step13.zip` | 17 | 0 | `72f99d0807af251fd6f53654324f420b70e4ba747946daac523d035504e8c0ad` |
 | `android-v05-step14` | `Equinox_v05_Step14.zip` | 18 | 0 | `c1ed092509cb3d77bd42d7804bdd4adabf7de697b756bff989e58e789bb0ca5a` |
+| `android-v05-step065` | `Equinox_v05_Step065.zip` | 12 | 0 | `750497cc50246f653b319adf5fc8b6e33d545fa8d838fa6336f8a935221ee0df` |
 
 ## Security, licensing, and limitations
 
