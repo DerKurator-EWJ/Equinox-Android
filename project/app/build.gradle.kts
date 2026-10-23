@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.6-step11-encoder-convergence-lab"
+        versionCode = 26
+        versionName = "0.6-step12-adaptive-quantizer"
     }
 
     compileOptions {

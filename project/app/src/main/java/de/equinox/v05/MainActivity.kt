@@ -98,6 +98,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var encoderBenchmark: EncoderBenchmarkManager
     private lateinit var encoderBenchmarkStatus: TextView
     private lateinit var encoderBenchmarkToggle: CheckBox
+    private lateinit var adaptiveQuantizer: AdaptiveAudioQuantizer
+    private lateinit var adaptiveQuantizerStatus: TextView
     @Volatile private var parallelEncoderBenchmarkEnabled = false
 
     private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
@@ -141,6 +143,7 @@ class MainActivity : ComponentActivity() {
         audioEncoderModeStore = AudioEncoderModeStore(this)
         audioEncoderMode = audioEncoderModeStore.load()
         encoderBenchmark = EncoderBenchmarkManager(this)
+        adaptiveQuantizer = AdaptiveAudioQuantizer(this)
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
@@ -158,7 +161,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 11 — ENCODER CONVERGENCE LAB", 17f, 8).apply {
+        root.addView(label("STEP 12 — ADAPTIVE QUANTIZER", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -219,11 +222,19 @@ class MainActivity : ComponentActivity() {
 
         status = label("Audio: AUS", 19f, 10)
         frequency = label(
-            if (audioEncoderMode == AudioEncoderMode.FFT_FREQUENCY) "Dominante Frequenz: — Hz" else "Direktmuster: —",
+            when (audioEncoderMode) {
+                AudioEncoderMode.FFT_FREQUENCY -> "Dominante Frequenz: — Hz"
+                AudioEncoderMode.DIRECT_PATTERN -> "Direktmuster: —"
+                AudioEncoderMode.ADAPTIVE_PATTERN -> "Adaptive-ID: —"
+            },
             15f,
             6
         )
-        frequencyId = label(if (audioEncoderMode == AudioEncoderMode.FFT_FREQUENCY) "Frequenz-ID: —" else "Pattern-ID: —", 15f, 4)
+        frequencyId = label(when (audioEncoderMode) {
+            AudioEncoderMode.FFT_FREQUENCY -> "Frequenz-ID: —"
+            AudioEncoderMode.DIRECT_PATTERN -> "Pattern-ID: —"
+            AudioEncoderMode.ADAPTIVE_PATTERN -> "Adaptive Pattern-ID: —"
+        }, 15f, 4)
         strength = label("Signalstärke: —", 15f, 4)
         frames = label("Frames verarbeitet: 0", 15f, 4)
         livePage.addView(status)
@@ -375,7 +386,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(145, 210, 255))
         })
         labPage.addView(label(
-            "FFT und Direct-ID sind getrennte Alphabete. Direct-ID nutzt keine FFT, sondern ein festes 16-bit Zeitbereichsmuster aus ZCR, Rauheit, Autokorrelation und Hüllkurve.",
+            "Drei getrennte Alphabete: FFT-Frequenz, festes DIRECT-16-bit und ADAPTIVE. ADAPTIVE nutzt keine FFT und keine festen Bins: ein persistentes Codebook lernt stabile Prototypen aus Zeitbereichsmerkmalen.",
             12f,
             4
         ).apply { setTextColor(Color.LTGRAY) })
@@ -388,10 +399,12 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
         }
         val fftEncoderButton = Button(this).apply { text = "FFT" }
-        val directEncoderButton = Button(this).apply { text = "DIRECT-ID" }
+        val directEncoderButton = Button(this).apply { text = "DIRECT" }
+        val adaptiveEncoderButton = Button(this).apply { text = "ADAPTIVE" }
         fun refreshEncoderButtons() {
             fftEncoderButton.isEnabled = audioEncoderMode != AudioEncoderMode.FFT_FREQUENCY
             directEncoderButton.isEnabled = audioEncoderMode != AudioEncoderMode.DIRECT_PATTERN
+            adaptiveEncoderButton.isEnabled = audioEncoderMode != AudioEncoderMode.ADAPTIVE_PATTERN
             labAudioEncoderStatus.text = "Aktiv: ${audioEncoderMode.label}"
             if (::audioEncoderStatus.isInitialized) audioEncoderStatus.text = "Audio-Encoder: ${audioEncoderMode.label}"
         }
@@ -403,22 +416,32 @@ class MainActivity : ComponentActivity() {
             setAudioEncoderMode(AudioEncoderMode.DIRECT_PATTERN)
             refreshEncoderButtons()
         }
+        adaptiveEncoderButton.setOnClickListener {
+            setAudioEncoderMode(AudioEncoderMode.ADAPTIVE_PATTERN)
+            refreshEncoderButtons()
+        }
         encoderRow.addView(fftEncoderButton, weightedButtonParams())
         encoderRow.addView(directEncoderButton, weightedButtonParams())
+        encoderRow.addView(adaptiveEncoderButton, weightedButtonParams())
         labPage.addView(encoderRow, buttonParams(5))
         refreshEncoderButtons()
+
+        adaptiveQuantizerStatus = label(adaptiveQuantizerText(), 12f, 5).apply {
+            setTextColor(Color.rgb(220, 190, 255))
+        }
+        labPage.addView(adaptiveQuantizerStatus)
 
         labPage.addView(label("PARALLELER KONVERGENZTEST", 16f, 16).apply {
             setTextColor(Color.rgb(120, 235, 190))
         })
         labPage.addView(label(
-            "Im Test sehen FFT und DIRECT exakt dieselben PCM-Frames und lernen gleichzeitig in getrennten Modalitäten. Gemessen werden ID-Neuheit, Wiederholung, Übergangsstabilität, Entropie und Makroaufbau. Das verdoppelt die Audioanalyse und ist nur ein Diagnosemodus.",
+            "Im Test sehen FFT, DIRECT und ADAPTIVE exakt dieselben PCM-Frames und lernen gleichzeitig in getrennten Modalitäten. Gemessen werden ID-Neuheit, Wiederholung, Übergangsstabilität, Entropie und Makroaufbau. ADAPTIVE lernt dabei zusätzlich sein eigenes Codebook.",
             12f,
             4
         ).apply { setTextColor(Color.LTGRAY) })
 
         encoderBenchmarkToggle = CheckBox(this).apply {
-            text = "Beide Encoder parallel lernen + messen"
+            text = "Alle 3 Encoder parallel lernen + messen"
             setTextColor(Color.WHITE)
             isChecked = false
             setOnCheckedChangeListener { _, checked ->
@@ -877,7 +900,11 @@ class MainActivity : ComponentActivity() {
 
         recorder.startRecording()
         val selectedEncoder = audioEncoderMode
-        worker = thread(name = if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) "EquinoxAudioFFT" else "EquinoxAudioDirectID") {
+        worker = thread(name = when (selectedEncoder) {
+            AudioEncoderMode.FFT_FREQUENCY -> "EquinoxAudioFFT"
+            AudioEncoderMode.DIRECT_PATTERN -> "EquinoxAudioDirectID"
+            AudioEncoderMode.ADAPTIVE_PATTERN -> "EquinoxAudioAdaptiveID"
+        }) {
             val frame = ShortArray(FFT_SIZE)
             var frameCount = 0L
 
@@ -896,70 +923,87 @@ class MainActivity : ComponentActivity() {
 
                 val parallelTest = parallelEncoderBenchmarkEnabled && encoderBenchmark.isActive()
                 if (parallelTest) {
-                    // Fair hard test: both encoders receive the exact same PCM frame. Their
-                    // identities and macro streams remain separated by modality in MemoryModel.
+                    // Fair hard test: all three encoders see the exact same PCM frame.
                     val mags = Fft.magnitudes(frame)
                     val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
                     val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
                     var bestBin = minBin
                     var bestMag = 0.0
                     for (bin in minBin..maxBin) {
-                        if (mags[bin] > bestMag) {
-                            bestMag = mags[bin]
-                            bestBin = bin
-                        }
+                        if (mags[bin] > bestMag) { bestMag = mags[bin]; bestBin = bin }
                     }
                     val fftHz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
                     val fftId = AudioQuantizer.idForHz(fftHz)
                     val direct = DirectAudioQuantizer.quantize(frame)
+                    val adaptive = adaptiveQuantizer.quantize(frame)
 
-                    // Feed the non-selected shadow stream first and the selected stream last,
-                    // so the momentary LIVE working set remains centered on what the user chose
-                    // to view/hear while both long-term streams still see the same frame.
-                    if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) {
-                        if (!direct.silent) memory.observeDirectAudio(direct.id)
-                        memory.observe(fftId, fftHz)
-                    } else {
-                        memory.observe(fftId, fftHz)
-                        if (!direct.silent) memory.observeDirectAudio(direct.id)
-                    }
-                    encoderBenchmark.recordPair(fftId, if (direct.silent) null else direct.id)
-
-                    if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) {
-                        primaryText = "Dominante Frequenz: %.1f Hz · Paralleltest".format(fftHz)
-                        idText = "Frequenz-ID: $fftId"
-                        strengthText = "FFT-Stärke: %.5f".format(bestMag)
-                    } else {
-                        primaryText = if (direct.silent) "Direktmuster: Stille — nicht gelernt · Paralleltest" else "Direktmuster: ${direct.debugText} · Paralleltest"
-                        idText = if (direct.silent) "Pattern-ID: —" else "Pattern-ID: ${direct.id}"
-                        strengthText = "PCM-Aktivität RMS: %.5f".format(direct.activity)
-                    }
-                } else if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) {
-                    val mags = Fft.magnitudes(frame)
-                    val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
-                    val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
-
-                    var bestBin = minBin
-                    var bestMag = 0.0
-                    for (bin in minBin..maxBin) {
-                        if (mags[bin] > bestMag) {
-                            bestMag = mags[bin]
-                            bestBin = bin
+                    fun feed(mode: AudioEncoderMode) {
+                        when (mode) {
+                            AudioEncoderMode.FFT_FREQUENCY -> memory.observe(fftId, fftHz)
+                            AudioEncoderMode.DIRECT_PATTERN -> if (!direct.silent) memory.observeDirectAudio(direct.id)
+                            AudioEncoderMode.ADAPTIVE_PATTERN -> if (!adaptive.silent) memory.observeAdaptiveAudio(adaptive.id)
                         }
                     }
+                    // Feed the selected stream last so the momentary LIVE working set remains
+                    // centered on what the user chose while all long-term streams learn.
+                    AudioEncoderMode.values().filter { it != selectedEncoder }.forEach(::feed)
+                    feed(selectedEncoder)
+                    encoderBenchmark.recordTriple(
+                        fftId,
+                        if (direct.silent) null else direct.id,
+                        if (adaptive.silent) null else adaptive.id
+                    )
 
-                    val hz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
-                    val id = AudioQuantizer.idForHz(hz)
-                    memory.observe(id, hz)
-                    primaryText = "Dominante Frequenz: %.1f Hz".format(hz)
-                    idText = "Frequenz-ID: $id"
-                    strengthText = "FFT-Stärke: %.5f".format(bestMag)
+                    when (selectedEncoder) {
+                        AudioEncoderMode.FFT_FREQUENCY -> {
+                            primaryText = "Dominante Frequenz: %.1f Hz · Paralleltest".format(fftHz)
+                            idText = "Frequenz-ID: $fftId"
+                            strengthText = "FFT-Stärke: %.5f".format(bestMag)
+                        }
+                        AudioEncoderMode.DIRECT_PATTERN -> {
+                            primaryText = if (direct.silent) "Direktmuster: Stille — nicht gelernt · Paralleltest" else "Direktmuster: ${direct.debugText} · Paralleltest"
+                            idText = if (direct.silent) "Pattern-ID: —" else "Pattern-ID: ${direct.id}"
+                            strengthText = "PCM-Aktivität RMS: %.5f".format(direct.activity)
+                        }
+                        AudioEncoderMode.ADAPTIVE_PATTERN -> {
+                            primaryText = if (adaptive.silent) "Adaptive-ID: Stille — nicht gelernt · Paralleltest" else "Adaptive-ID: ${adaptive.debugText} · Paralleltest"
+                            idText = if (adaptive.silent) "Adaptive Pattern-ID: —" else "Adaptive Pattern-ID: ${adaptive.id}"
+                            strengthText = "PCM-Aktivität RMS: %.5f · Codebook ${adaptive.codebookSize}".format(adaptive.activity)
+                        }
+                    }
                 } else {
-                    val direct = DirectAudioQuantizer.quantize(frame)
-                    if (!direct.silent) memory.observeDirectAudio(direct.id)
-                    primaryText = if (direct.silent) "Direktmuster: Stille — nicht gelernt" else "Direktmuster: ${direct.debugText}"
-                    idText = if (direct.silent) "Pattern-ID: —" else "Pattern-ID: ${direct.id}"
-                    strengthText = "PCM-Aktivität RMS: %.5f".format(direct.activity)
+                    when (selectedEncoder) {
+                        AudioEncoderMode.FFT_FREQUENCY -> {
+                            val mags = Fft.magnitudes(frame)
+                            val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
+                            val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
+                            var bestBin = minBin
+                            var bestMag = 0.0
+                            for (bin in minBin..maxBin) {
+                                if (mags[bin] > bestMag) { bestMag = mags[bin]; bestBin = bin }
+                            }
+                            val hz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
+                            val id = AudioQuantizer.idForHz(hz)
+                            memory.observe(id, hz)
+                            primaryText = "Dominante Frequenz: %.1f Hz".format(hz)
+                            idText = "Frequenz-ID: $id"
+                            strengthText = "FFT-Stärke: %.5f".format(bestMag)
+                        }
+                        AudioEncoderMode.DIRECT_PATTERN -> {
+                            val direct = DirectAudioQuantizer.quantize(frame)
+                            if (!direct.silent) memory.observeDirectAudio(direct.id)
+                            primaryText = if (direct.silent) "Direktmuster: Stille — nicht gelernt" else "Direktmuster: ${direct.debugText}"
+                            idText = if (direct.silent) "Pattern-ID: —" else "Pattern-ID: ${direct.id}"
+                            strengthText = "PCM-Aktivität RMS: %.5f".format(direct.activity)
+                        }
+                        AudioEncoderMode.ADAPTIVE_PATTERN -> {
+                            val adaptive = adaptiveQuantizer.quantize(frame)
+                            if (!adaptive.silent) memory.observeAdaptiveAudio(adaptive.id)
+                            primaryText = if (adaptive.silent) "Adaptive-ID: Stille — nicht gelernt" else "Adaptive-ID: ${adaptive.debugText}"
+                            idText = if (adaptive.silent) "Adaptive Pattern-ID: —" else "Adaptive Pattern-ID: ${adaptive.id}"
+                            strengthText = "PCM-Aktivität RMS: %.5f · Codebook ${adaptive.codebookSize}".format(adaptive.activity)
+                        }
+                    }
                 }
 
                 var didConsolidate = false
@@ -981,6 +1025,7 @@ class MainActivity : ComponentActivity() {
                         if (frameCount % 5L == 0L) {
                             updateMemoryStats()
                             updateConsolidationStatus()
+                            if (::adaptiveQuantizerStatus.isInitialized) adaptiveQuantizerStatus.text = adaptiveQuantizerText()
                         }
                         if (parallelTest && frameCount % 24L == 0L) refreshEncoderBenchmarkStatus()
                         if (didConsolidate || frameCount % 12L == 0L) refreshGraph()
@@ -1092,7 +1137,13 @@ class MainActivity : ComponentActivity() {
             "Konvergenztest: ${if (b.active) "AKTIV" else "GESTOPPT"} · gemeinsame PCM-Frames ${b.pairedFrames}\n" +
                 line("FFT", b.fft) + "\n" +
                 line("DIRECT", b.direct) + "\n" +
+                line("ADAPTIVE", b.adaptive) + "\n" +
                 b.interpretation
+    }
+
+    private fun adaptiveQuantizerText(): String {
+        val s = adaptiveQuantizer.stats()
+        return "Adaptive-Codebook: ${s.prototypes}/4096 Prototypen · Frames ${s.acceptedFrames} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}${if (s.saturated) " · SATURIERT" else ""}"
     }
 
     private fun updateMemoryStats() {
@@ -1105,7 +1156,7 @@ class MainActivity : ComponentActivity() {
         val s = memory.stats()
         val levelText = if (s.levelCounts.isEmpty()) "noch keine" else s.levelCounts.entries.joinToString(" · ") { "L${it.key}:${it.value}" }
         return "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
-            "Audio-Alphabete: FFT ${s.fftAudioCodes} Q / ${s.fftAudioMacros} M · Direct ${s.directAudioCodes} Q / ${s.directAudioMacros} M\n" +
+            "Audio-Alphabete: FFT ${s.fftAudioCodes} Q/${s.fftAudioMacros} M · Direct ${s.directAudioCodes} Q/${s.directAudioMacros} M · Adaptive ${s.adaptiveAudioCodes} Q/${s.adaptiveAudioMacros} M\n" +
             "Makros: ${s.macroCodes} | $levelText | Relationen: ${s.macroRelations}\n" +
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
             "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
@@ -1130,10 +1181,18 @@ class MainActivity : ComponentActivity() {
         if (::audioEncoderStatus.isInitialized) audioEncoderStatus.text = "Audio-Encoder: ${mode.label}"
         if (::labAudioEncoderStatus.isInitialized) labAudioEncoderStatus.text = "Aktiv: ${mode.label}"
         if (::frequency.isInitialized) {
-            frequency.text = if (mode == AudioEncoderMode.FFT_FREQUENCY) "Dominante Frequenz: — Hz" else "Direktmuster: —"
+            frequency.text = when (mode) {
+                AudioEncoderMode.FFT_FREQUENCY -> "Dominante Frequenz: — Hz"
+                AudioEncoderMode.DIRECT_PATTERN -> "Direktmuster: —"
+                AudioEncoderMode.ADAPTIVE_PATTERN -> "Adaptive-ID: —"
+            }
         }
         if (::frequencyId.isInitialized) {
-            frequencyId.text = if (mode == AudioEncoderMode.FFT_FREQUENCY) "Frequenz-ID: —" else "Pattern-ID: —"
+            frequencyId.text = when (mode) {
+                AudioEncoderMode.FFT_FREQUENCY -> "Frequenz-ID: —"
+                AudioEncoderMode.DIRECT_PATTERN -> "Pattern-ID: —"
+                AudioEncoderMode.ADAPTIVE_PATTERN -> "Adaptive Pattern-ID: —"
+            }
         }
         if (::strength.isInitialized) strength.text = "Signalstärke: —"
     }
@@ -1146,6 +1205,7 @@ class MainActivity : ComponentActivity() {
         try { audioRecord?.release() } catch (_: Exception) { }
         audioRecord = null
         worker = null
+        adaptiveQuantizer.saveNow()
         status.text = "Audio: AUS"
         startButton.isEnabled = true
         stopButton.isEnabled = false
@@ -1185,6 +1245,7 @@ class MainActivity : ComponentActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     override fun onDestroy() {
+        if (::adaptiveQuantizer.isInitialized) adaptiveQuantizer.saveNow()
         stopMemoryPlayback(clear = false)
         stopCameraLearning()
         try { cameraExecutor.shutdownNow() } catch (_: Exception) { }

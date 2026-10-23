@@ -38,13 +38,13 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 10
+ * v0.6 Step 12
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
- * relevance profile and adds a second, FFT-free time-domain audio identity stream.
- * Legacy frequency IDs use modality "audio"; direct waveform pattern IDs use
- * modality "audio_direct" so both alphabets can coexist without mixing sequences.
+ * relevance profile and now supports three isolated audio alphabets: legacy FFT
+ * frequency IDs ("audio"), fixed 16-bit direct IDs ("audio_direct") and the learned
+ * adaptive vector-quantizer IDs ("audio_adaptive"). They never mix sequence streams.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
  *
@@ -95,8 +95,10 @@ data class MemoryStats(
     val highestActiveGenerality: Double = 0.0,
     val fftAudioCodes: Int = 0,
     val directAudioCodes: Int = 0,
+    val adaptiveAudioCodes: Int = 0,
     val fftAudioMacros: Int = 0,
-    val directAudioMacros: Int = 0
+    val directAudioMacros: Int = 0,
+    val adaptiveAudioMacros: Int = 0
 )
 
 data class GraphNode(
@@ -401,6 +403,24 @@ class MemoryModel(context: Context) {
         }
 
         feedToken(streamLevel = 0, modality = "audio_direct", tokenId = id)
+    }
+
+    /** Adaptive FFT-free audio identity from the learned Step-12 codebook. */
+    @Synchronized
+    fun observeAdaptiveAudio(id: Int) {
+        observations++
+        val code = quants[id]
+        if (code == null) {
+            quants[id] = QuantCode(
+                weight = 1L,
+                representativeHz = 0.0,
+                modality = "audio_adaptive"
+            )
+        } else {
+            code.weight++
+        }
+
+        feedToken(streamLevel = 0, modality = "audio_adaptive", tokenId = id)
     }
 
     @Synchronized
@@ -737,7 +757,14 @@ class MemoryModel(context: Context) {
 
     private fun leafHzOf(id: Int, depth: Int = 0): List<Double> {
         if (depth > MAX_ABSTRACTION_LEVEL + 2) return emptyList()
-        quants[id]?.let { return if (it.representativeHz > 0.0) listOf(it.representativeHz) else emptyList() }
+        quants[id]?.let { q ->
+            return when {
+                q.representativeHz > 0.0 -> listOf(q.representativeHz)
+                q.modality == "audio_adaptive" -> listOf(AdaptiveAudioQuantizer.projectionHzForId(id))
+                q.modality == "audio_direct" -> listOf(DirectAudioQuantizer.projectionHzForId(id))
+                else -> emptyList()
+            }
+        }
         val macro = macros[id] ?: return emptyList()
         return macro.tokens.flatMap { leafHzOf(it, depth + 1) }
     }
@@ -1000,7 +1027,11 @@ class MemoryModel(context: Context) {
             .sortedByDescending { it.value.weight }
             .take(maxMicro)
             .map { (id, q) ->
-                val outputHz = if (q.representativeHz > 0.0) q.representativeHz else DirectAudioQuantizer.projectionHzForId(id)
+                val outputHz = when {
+                    q.representativeHz > 0.0 -> q.representativeHz
+                    q.modality == "audio_adaptive" -> AdaptiveAudioQuantizer.projectionHzForId(id)
+                    else -> DirectAudioQuantizer.projectionHzForId(id)
+                }
                 SonificationNode(id, outputHz, q.weight)
             }
 
@@ -1166,8 +1197,10 @@ class MemoryModel(context: Context) {
             highestActiveGenerality = highestActiveGenerality,
             fftAudioCodes = quants.values.count { it.modality == "audio" },
             directAudioCodes = quants.values.count { it.modality == "audio_direct" },
+            adaptiveAudioCodes = quants.values.count { it.modality == "audio_adaptive" },
             fftAudioMacros = macros.values.count { it.modality == "audio" },
-            directAudioMacros = macros.values.count { it.modality == "audio_direct" }
+            directAudioMacros = macros.values.count { it.modality == "audio_direct" },
+            adaptiveAudioMacros = macros.values.count { it.modality == "audio_adaptive" }
         )
     }
 
@@ -1702,23 +1735,28 @@ class MemoryModel(context: Context) {
     }
 
     private fun isAudioModality(modality: String): Boolean =
-        modality == "audio" || modality == "audio_direct"
+        modality == "audio" || modality == "audio_direct" || modality == "audio_adaptive"
 
     /**
      * Direct-ID audio deliberately stores no pseudo-frequency in memory. For the
      * orchestra only, a stable pitch is projected from the macro composition.
      */
     private fun projectionHzForMacro(macro: MacroCode): Double {
-        val leaves = directLeafIdsOf(macro.id).take(12)
+        if (macro.modality == "audio_adaptive") {
+            val leaves = leafIdsOfModality(macro.id, "audio_adaptive").take(12)
+            if (leaves.isNotEmpty()) return leaves.map { AdaptiveAudioQuantizer.projectionHzForId(it) }.average()
+            return AdaptiveAudioQuantizer.projectionHzForId(-1_000_001 - (macro.id % 65_536))
+        }
+        val leaves = leafIdsOfModality(macro.id, "audio_direct").take(12)
         if (leaves.isNotEmpty()) return leaves.map { DirectAudioQuantizer.projectionHzForId(it) }.average()
         return DirectAudioQuantizer.projectionHzForId(-((macro.id % 65_536) + 1))
     }
 
-    private fun directLeafIdsOf(id: Int, depth: Int = 0): List<Int> {
+    private fun leafIdsOfModality(id: Int, modality: String, depth: Int = 0): List<Int> {
         if (depth > MAX_ABSTRACTION_LEVEL + 2) return emptyList()
-        quants[id]?.let { q -> return if (q.modality == "audio_direct") listOf(id) else emptyList() }
+        quants[id]?.let { q -> return if (q.modality == modality) listOf(id) else emptyList() }
         val macro = macros[id] ?: return emptyList()
-        return macro.tokens.flatMap { directLeafIdsOf(it, depth + 1) }
+        return macro.tokens.flatMap { leafIdsOfModality(it, modality, depth + 1) }
     }
 
     private fun streamKey(level: Int, modality: String): String = "$modality|$level"

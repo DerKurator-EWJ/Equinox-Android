@@ -242,7 +242,7 @@ class RelationGraphView(context: Context) : View(context) {
             }
 
         val microCount = snapshot.nodes.count { it.abstractionLevel == 0 }
-        val audioCount = snapshot.nodes.count { it.abstractionLevel == 0 && (it.modality == "audio" || it.modality == "audio_direct") }
+        val audioCount = snapshot.nodes.count { it.abstractionLevel == 0 && (it.modality == "audio" || it.modality == "audio_direct" || it.modality == "audio_adaptive") }
         val visionCount = snapshot.nodes.count { it.abstractionLevel == 0 && it.modality == "vision" }
         val levels = snapshot.nodes
             .filter { it.abstractionLevel > 0 }

@@ -106,7 +106,7 @@ class OrchestraSonifier {
     private fun buildVoices(state: EngineOutputState): List<Voice> {
         val macroById = state.sound.macros.associateBy { it.id }
         val live = state.working.nodes
-            .filter { (it.modality == "audio" || it.modality == "audio_direct") && macroById.containsKey(it.id) }
+            .filter { (it.modality == "audio" || it.modality == "audio_direct" || it.modality == "audio_adaptive") && macroById.containsKey(it.id) }
             .sortedByDescending {
                 it.activation * 2.0 + it.expectation + abs(it.exchangeBias) * 0.35 +
                     it.structuralRelevance * 0.70

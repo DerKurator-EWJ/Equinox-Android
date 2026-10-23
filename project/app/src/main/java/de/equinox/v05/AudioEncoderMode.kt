@@ -4,7 +4,8 @@ import android.content.Context
 
 enum class AudioEncoderMode(val label: String) {
     FFT_FREQUENCY("FFT → Frequenz-ID"),
-    DIRECT_PATTERN("DIRECT → 16-bit Pattern-ID")
+    DIRECT_PATTERN("DIRECT → 16-bit Pattern-ID"),
+    ADAPTIVE_PATTERN("ADAPTIVE → gelernte Pattern-ID")
 }
 
 class AudioEncoderModeStore(context: Context) {
