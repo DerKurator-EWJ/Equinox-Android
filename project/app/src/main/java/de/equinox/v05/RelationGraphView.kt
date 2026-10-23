@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.view.View
 import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.exp
 import kotlin.math.ln
@@ -15,12 +16,23 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+enum class GraphDisplayMode {
+    TWO_D,
+    THREE_D
+}
+
 class RelationGraphView(context: Context) : View(context) {
-    private data class P(var x: Float, var y: Float)
+    private data class P(var x: Float, var y: Float, var z: Float)
+    private data class Projected(val x: Float, val y: Float, val scale: Float, val depth: Float)
 
     private var snapshot = GraphSnapshot(emptyList(), emptyList())
     private var visibleEdges: List<GraphEdge> = emptyList()
     private val positions = mutableMapOf<Int, P>()
+    private val geometry = GeometryGroundMemory.standard()
+
+    private var displayMode = GraphDisplayMode.TWO_D
+    private var yaw = -0.62f
+    private var pitch = 0.42f
 
     private val edgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -34,6 +46,11 @@ class RelationGraphView(context: Context) : View(context) {
         strokeWidth = 3f
         color = Color.WHITE
     }
+    private val faintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 1.5f
+        color = Color.argb(95, 230, 235, 245)
+    }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
         textAlign = Paint.Align.CENTER
@@ -41,8 +58,15 @@ class RelationGraphView(context: Context) : View(context) {
     }
     private val infoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.LTGRAY
-        textSize = 21f
+        textSize = 20f
     }
+
+    fun setDisplayMode(mode: GraphDisplayMode) {
+        displayMode = mode
+        invalidate()
+    }
+
+    fun getDisplayMode(): GraphDisplayMode = displayMode
 
     fun setSnapshot(newSnapshot: GraphSnapshot) {
         snapshot = newSnapshot
@@ -78,9 +102,17 @@ class RelationGraphView(context: Context) : View(context) {
                 else -> 0.09f
             }
             val jitter = ((node.id * 37 and 7) * 0.008f)
+
+            // z is renderer-only and deterministically derived from graph metadata.
+            // It is never persisted in MemoryModel.
+            val hashDepth = ((((node.id * 1103515245L + 12345L) ushr 16) and 0xffff).toFloat() / 65535f) - 0.5f
+            val levelDepth = (node.abstractionLevel.coerceAtMost(4) - 1.5f) * 0.10f
+            val z = (hashDepth * 0.42f + levelDepth).coerceIn(-0.48f, 0.48f)
+
             positions[node.id] = P(
-                0.5f + cos(angle).toFloat() * (ring + jitter),
-                0.5f + sin(angle).toFloat() * (ring + jitter)
+                x = 0.5f + cos(angle).toFloat() * (ring + jitter),
+                y = 0.5f + sin(angle).toFloat() * (ring + jitter),
+                z = z
             )
         }
 
@@ -161,137 +193,46 @@ class RelationGraphView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawColor(Color.rgb(9, 11, 15))
+        canvas.drawColor(Color.rgb(8, 10, 14))
 
-        val pad = 28f
+        val pad = 30f
         val w = max(1f, width.toFloat() - pad * 2)
         val h = max(1f, height.toFloat() - pad * 2)
 
         if (snapshot.nodes.isEmpty()) {
-            textPaint.textSize = 32f
+            textPaint.textSize = 31f
             textPaint.color = Color.LTGRAY
-            canvas.drawText(
-                "Noch keine persistenten Codes",
-                width / 2f,
-                height / 2f,
-                textPaint
-            )
+            canvas.drawText("Noch keine persistenten Codes", width / 2f, height / 2f, textPaint)
             return
         }
 
+        if (displayMode == GraphDisplayMode.THREE_D) {
+            drawDepthGuide(canvas, pad, w, h)
+        }
+
+        val projected = positions.mapValues { (_, p) -> project(p, pad, w, h) }
         val strongestEdge = max(1L, visibleEdges.maxOfOrNull { it.weight } ?: 1L)
 
-        for (edge in visibleEdges.asReversed()) {
-            val a = positions[edge.fromId] ?: continue
-            val b = positions[edge.toId] ?: continue
-
-            val x1 = pad + a.x * w
-            val y1 = pad + a.y * h
-            val x2 = pad + b.x * w
-            val y2 = pad + b.y * h
-
-            val dx = x2 - x1
-            val dy = y2 - y1
-            val dist = max(1f, sqrt(dx * dx + dy * dy))
-
-            val kappa = (1.0 - exp(-0.08 * edge.weight.toDouble())).toFloat()
-            val sign = if (((edge.fromId * 31 + edge.toId) and 1) == 0) 1f else -1f
-            val nx = -dy / dist
-            val ny = dx / dist
-
-            val bendScale = when {
-                edge.isMembership -> 0.12f
-                edge.abstractionLevel >= 3 -> 0.16f
-                edge.abstractionLevel == 2 -> 0.20f
-                edge.abstractionLevel == 1 -> 0.24f
-                else -> 0.36f
+        // Far edges first.
+        visibleEdges
+            .sortedBy { e ->
+                ((projected[e.fromId]?.depth ?: 0f) + (projected[e.toId]?.depth ?: 0f)) * 0.5f
             }
-
-            val bend = min(
-                dist * 0.46f,
-                14f + dist * bendScale * kappa
-            ) * sign
-
-            val cx = (x1 + x2) * 0.5f + nx * bend
-            val cy = (y1 + y2) * 0.5f + ny * bend
-
-            val norm = edge.weight.toFloat() / strongestEdge.toFloat()
-            edgePaint.strokeWidth = when {
-                edge.isMembership -> 1.8f + 4.5f * sqrt(norm)
-                edge.abstractionLevel >= 2 -> 3.0f + 8.0f * sqrt(norm)
-                edge.abstractionLevel == 1 -> 2.3f + 7.0f * sqrt(norm)
-                else -> 1.1f + 5.5f * sqrt(norm)
+            .forEach { edge ->
+                val a = projected[edge.fromId] ?: return@forEach
+                val b = projected[edge.toId] ?: return@forEach
+                drawEdge(canvas, edge, a, b, strongestEdge)
             }
-
-            edgePaint.color = edgeColor(edge, norm)
-
-            val path = Path().apply {
-                moveTo(x1, y1)
-                quadTo(cx, cy, x2, y2)
-            }
-            canvas.drawPath(path, edgePaint)
-        }
 
         val strongestNode = max(1L, snapshot.nodes.maxOfOrNull { it.weight } ?: 1L)
 
-        for (node in snapshot.nodes) {
-            val p = positions[node.id] ?: continue
-            val x = pad + p.x * w
-            val y = pad + p.y * h
-            val normalized = node.weight.toFloat() / strongestNode.toFloat()
-            val baseRadius = 10f + 17f * sqrt(normalized)
-
-            if (node.abstractionLevel == 0) {
-                nodePaint.color = if (node.modality == "vision" && node.displayColor != 0) {
-                    Color.rgb(
-                        (node.displayColor shr 16) and 0xff,
-                        (node.displayColor shr 8) and 0xff,
-                        node.displayColor and 0xff
-                    )
-                } else {
-                    frequencyColor(node.representativeHz)
-                }
-
-                if (node.modality == "vision") {
-                    val r = baseRadius * 0.92f
-                    canvas.drawRect(x - r, y - r, x + r, y + r, nodePaint)
-                    val halo = Paint(nodePaint).apply {
-                        style = Paint.Style.STROKE
-                        strokeWidth = 2f
-                        alpha = 95
-                    }
-                    canvas.drawRect(x - r - 4f, y - r - 4f, x + r + 4f, y + r + 4f, halo)
-                } else {
-                    canvas.drawCircle(x, y, baseRadius, nodePaint)
-                    val halo = Paint(nodePaint).apply {
-                        style = Paint.Style.STROKE
-                        strokeWidth = 2f
-                        alpha = 80
-                    }
-                    canvas.drawCircle(x, y, baseRadius + 4f, halo)
-                }
-            } else {
-                val radius = baseRadius + 8f + node.abstractionLevel * 4f
-                nodePaint.color = levelColor(node.abstractionLevel, node.representativeHz)
-                if (node.kind == "sequence") {
-                    drawSequenceGlyph(
-                        canvas = canvas,
-                        x = x,
-                        y = y,
-                        radius = radius,
-                        level = node.abstractionLevel
-                    )
-                } else {
-                    drawMacroGlyph(
-                        canvas = canvas,
-                        x = x,
-                        y = y,
-                        radius = radius,
-                        level = node.abstractionLevel
-                    )
-                }
+        // Far nodes first.
+        snapshot.nodes
+            .sortedBy { projected[it.id]?.depth ?: 0f }
+            .forEach { node ->
+                val p = projected[node.id] ?: return@forEach
+                drawNode(canvas, node, p, strongestNode)
             }
-        }
 
         val microCount = snapshot.nodes.count { it.abstractionLevel == 0 }
         val audioCount = snapshot.nodes.count { it.abstractionLevel == 0 && it.modality == "audio" }
@@ -304,24 +245,369 @@ class RelationGraphView(context: Context) : View(context) {
             .entries
             .joinToString(" · ") { "L${it.key}:${it.value}" }
 
-        infoPaint.color = Color.LTGRAY
-        infoPaint.textSize = 20f
         val suffix = if (levels.isBlank()) "keine Makroebene" else levels
+        val mode = if (displayMode == GraphDisplayMode.TWO_D) "2D" else "3D"
+
+        infoPaint.color = Color.LTGRAY
+        infoPaint.textSize = 19f
         canvas.drawText(
-            "$microCount Mikro (A:$audioCount · V:$visionCount) · $suffix · ${visibleEdges.size}/${snapshot.edges.size} Relationen",
-            18f,
-            height - 18f,
+            "$mode · $microCount Mikro (A:$audioCount · V:$visionCount) · $suffix · ${visibleEdges.size}/${snapshot.edges.size} Rel.",
+            16f,
+            height - 16f,
             infoPaint
         )
     }
 
-    private fun drawSequenceGlyph(
+    private fun project(p: P, pad: Float, w: Float, h: Float): Projected {
+        if (displayMode == GraphDisplayMode.TWO_D) {
+            return Projected(
+                x = pad + p.x * w,
+                y = pad + p.y * h,
+                scale = 1f,
+                depth = p.z
+            )
+        }
+
+        val x0 = p.x - 0.5f
+        val y0 = p.y - 0.5f
+        val z0 = p.z
+
+        val cy = cos(yaw)
+        val sy = sin(yaw)
+        val x1 = x0 * cy - z0 * sy
+        val z1 = x0 * sy + z0 * cy
+
+        val cp = cos(pitch)
+        val sp = sin(pitch)
+        val y1 = y0 * cp - z1 * sp
+        val z2 = y0 * sp + z1 * cp
+
+        val perspective = (1.0f / (1.18f - z2 * 0.55f)).coerceIn(0.70f, 1.45f)
+        val screenX = pad + (0.5f + x1 * perspective) * w
+        val screenY = pad + (0.5f + y1 * perspective) * h
+
+        return Projected(
+            x = screenX,
+            y = screenY,
+            scale = perspective,
+            depth = z2
+        )
+    }
+
+    private fun drawDepthGuide(canvas: Canvas, pad: Float, w: Float, h: Float) {
+        val cx = pad + w * 0.5f
+        val cy = pad + h * 0.50f
+        val rx = w * 0.38f
+        val ry = h * 0.26f
+
+        faintPaint.alpha = 65
+        canvas.drawOval(cx - rx, cy - ry, cx + rx, cy + ry, faintPaint)
+        canvas.drawOval(cx - rx * 0.64f, cy - ry * 0.64f, cx + rx * 0.64f, cy + ry * 0.64f, faintPaint)
+        canvas.drawLine(cx - rx, cy, cx + rx, cy, faintPaint)
+        canvas.drawLine(cx, cy - ry, cx, cy + ry, faintPaint)
+    }
+
+    private fun drawEdge(
+        canvas: Canvas,
+        edge: GraphEdge,
+        a: Projected,
+        b: Projected,
+        strongestEdge: Long
+    ) {
+        val dx = b.x - a.x
+        val dy = b.y - a.y
+        val dist = max(1f, sqrt(dx * dx + dy * dy))
+
+        val kappa = (1.0 - exp(-0.08 * edge.weight.toDouble())).toFloat()
+        val sign = if (((edge.fromId * 31 + edge.toId) and 1) == 0) 1f else -1f
+        val nx = -dy / dist
+        val ny = dx / dist
+
+        val bendScale = when {
+            edge.isMembership -> 0.10f
+            edge.abstractionLevel >= 3 -> 0.14f
+            edge.abstractionLevel == 2 -> 0.18f
+            edge.abstractionLevel == 1 -> 0.22f
+            else -> 0.34f
+        }
+
+        val depthWarp = if (displayMode == GraphDisplayMode.THREE_D) {
+            abs(a.depth - b.depth) * 0.17f
+        } else 0f
+
+        val bend = min(
+            dist * 0.45f,
+            12f + dist * (bendScale + depthWarp) * kappa
+        ) * sign
+
+        val cx = (a.x + b.x) * 0.5f + nx * bend
+        val cy = (a.y + b.y) * 0.5f + ny * bend
+
+        val norm = edge.weight.toFloat() / strongestEdge.toFloat()
+        val depthScale = ((a.scale + b.scale) * 0.5f).coerceIn(0.72f, 1.35f)
+
+        edgePaint.strokeWidth = when {
+            edge.isMembership -> (1.7f + 4.2f * sqrt(norm)) * depthScale
+            edge.abstractionLevel >= 2 -> (2.8f + 7.5f * sqrt(norm)) * depthScale
+            edge.abstractionLevel == 1 -> (2.2f + 6.5f * sqrt(norm)) * depthScale
+            else -> (1.0f + 5.0f * sqrt(norm)) * depthScale
+        }
+
+        val depthAlpha = if (displayMode == GraphDisplayMode.THREE_D) {
+            (0.72f + 0.28f * ((a.depth + b.depth) * 0.5f + 0.5f)).coerceIn(0.48f, 1f)
+        } else 1f
+
+        edgePaint.color = edgeColor(edge, norm, depthAlpha)
+
+        val path = Path().apply {
+            moveTo(a.x, a.y)
+            quadTo(cx, cy, b.x, b.y)
+        }
+        canvas.drawPath(path, edgePaint)
+    }
+
+    private fun drawNode(
+        canvas: Canvas,
+        node: GraphNode,
+        p: Projected,
+        strongestNode: Long
+    ) {
+        val normalized = node.weight.toFloat() / strongestNode.toFloat()
+        val baseRadius = (10f + 17f * sqrt(normalized)) * p.scale
+
+        if (node.abstractionLevel == 0) {
+            nodePaint.color = if (node.modality == "vision" && node.displayColor != 0) {
+                Color.rgb(
+                    (node.displayColor shr 16) and 0xff,
+                    (node.displayColor shr 8) and 0xff,
+                    node.displayColor and 0xff
+                )
+            } else {
+                frequencyColor(node.representativeHz)
+            }
+
+            if (node.modality == "vision") {
+                val r = baseRadius * 0.92f
+                canvas.drawRect(p.x - r, p.y - r, p.x + r, p.y + r, nodePaint)
+                val halo = Paint(nodePaint).apply {
+                    style = Paint.Style.STROKE
+                    strokeWidth = 2f * p.scale
+                    alpha = 95
+                }
+                canvas.drawRect(p.x - r - 4f, p.y - r - 4f, p.x + r + 4f, p.y + r + 4f, halo)
+            } else {
+                canvas.drawCircle(p.x, p.y, baseRadius, nodePaint)
+                val halo = Paint(nodePaint).apply {
+                    style = Paint.Style.STROKE
+                    strokeWidth = 2f * p.scale
+                    alpha = 80
+                }
+                canvas.drawCircle(p.x, p.y, baseRadius + 4f * p.scale, halo)
+            }
+            return
+        }
+
+        val radius = baseRadius + (8f + node.abstractionLevel * 4f) * p.scale
+        nodePaint.color = levelColor(node.abstractionLevel)
+
+        if (displayMode == GraphDisplayMode.THREE_D) {
+            val template = geometry.suggest3D(node.memberCount, node.kind == "sequence")
+            draw3DTemplate(canvas, p.x, p.y, radius, template, p.scale)
+        } else {
+            val template = geometry.suggest2D(node.memberCount, node.kind == "sequence")
+            draw2DTemplate(canvas, p.x, p.y, radius, template, node.kind == "sequence")
+        }
+    }
+
+    private fun draw2DTemplate(
         canvas: Canvas,
         x: Float,
         y: Float,
         radius: Float,
-        level: Int
+        template: GeometryTemplate,
+        sequence: Boolean
     ) {
+        when (template) {
+            GeometryTemplate.LINE -> {
+                val path = Path().apply {
+                    moveTo(x - radius, y)
+                    quadTo(x, y - radius * 0.70f, x + radius, y)
+                    quadTo(x, y + radius * 0.70f, x - radius, y)
+                    close()
+                }
+                canvas.drawPath(path, nodePaint)
+                canvas.drawPath(path, outlinePaint)
+            }
+            GeometryTemplate.ARC -> drawSequenceGlyph(canvas, x, y, radius, 1)
+            GeometryTemplate.TRIANGLE -> drawPolygon(canvas, x, y, radius, 3)
+            GeometryTemplate.QUAD -> drawPolygon(canvas, x, y, radius, 4)
+            GeometryTemplate.PENTAGON -> drawPolygon(canvas, x, y, radius, 5)
+            GeometryTemplate.HEXAGON -> drawPolygon(canvas, x, y, radius, 6)
+            GeometryTemplate.ELLIPSE -> {
+                canvas.drawOval(x - radius * 1.25f, y - radius * 0.72f, x + radius * 1.25f, y + radius * 0.72f, nodePaint)
+                canvas.drawOval(x - radius * 1.25f, y - radius * 0.72f, x + radius * 1.25f, y + radius * 0.72f, outlinePaint)
+            }
+            else -> {
+                canvas.drawCircle(x, y, radius, nodePaint)
+                canvas.drawCircle(x, y, radius, outlinePaint)
+            }
+        }
+
+        if (sequence && template != GeometryTemplate.ARC) {
+            val chainPaint = Paint(outlinePaint).apply {
+                alpha = 175
+                strokeWidth = 2f
+            }
+            canvas.drawLine(x - radius * 0.52f, y, x + radius * 0.52f, y, chainPaint)
+        }
+    }
+
+    private fun drawPolygon(canvas: Canvas, x: Float, y: Float, radius: Float, sides: Int) {
+        val path = Path()
+        for (i in 0 until sides) {
+            val a = -PI / 2.0 + 2.0 * PI * i / sides
+            val px = x + cos(a).toFloat() * radius
+            val py = y + sin(a).toFloat() * radius
+            if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
+        }
+        path.close()
+        canvas.drawPath(path, nodePaint)
+        canvas.drawPath(path, outlinePaint)
+    }
+
+    private fun draw3DTemplate(
+        canvas: Canvas,
+        x: Float,
+        y: Float,
+        radius: Float,
+        template: GeometryTemplate,
+        scale: Float
+    ) {
+        when (template) {
+            GeometryTemplate.CUBE -> drawWireCube(canvas, x, y, radius)
+            GeometryTemplate.TETRAHEDRON -> drawWireTetra(canvas, x, y, radius)
+            GeometryTemplate.OCTAHEDRON -> drawWireOcta(canvas, x, y, radius)
+            GeometryTemplate.PRISM -> drawWirePrism(canvas, x, y, radius)
+            GeometryTemplate.PYRAMID -> drawWirePyramid(canvas, x, y, radius)
+            GeometryTemplate.CYLINDER -> drawWireCylinder(canvas, x, y, radius)
+            GeometryTemplate.CONE -> drawWireCone(canvas, x, y, radius)
+            GeometryTemplate.TORUS -> drawWireTorus(canvas, x, y, radius)
+            else -> drawWireSphere(canvas, x, y, radius)
+        }
+
+        // Small filled nucleus preserves abstraction-level color.
+        canvas.drawCircle(x, y, max(3f, radius * 0.22f), nodePaint)
+        outlinePaint.strokeWidth = 2.4f * scale
+    }
+
+    private fun drawWireCube(canvas: Canvas, x: Float, y: Float, r: Float) {
+        val o = r * 0.42f
+        val aL = x - r * 0.72f
+        val aT = y - r * 0.72f
+        val aR = x + r * 0.72f
+        val aB = y + r * 0.72f
+
+        canvas.drawRect(aL, aT, aR, aB, outlinePaint)
+        canvas.drawRect(aL + o, aT - o, aR + o, aB - o, faintPaint)
+        canvas.drawLine(aL, aT, aL + o, aT - o, faintPaint)
+        canvas.drawLine(aR, aT, aR + o, aT - o, faintPaint)
+        canvas.drawLine(aL, aB, aL + o, aB - o, faintPaint)
+        canvas.drawLine(aR, aB, aR + o, aB - o, faintPaint)
+    }
+
+    private fun drawWireTetra(canvas: Canvas, x: Float, y: Float, r: Float) {
+        val topX = x
+        val topY = y - r
+        val leftX = x - r * 0.90f
+        val leftY = y + r * 0.66f
+        val rightX = x + r * 0.90f
+        val rightY = y + r * 0.66f
+        val backX = x
+        val backY = y + r * 0.12f
+
+        canvas.drawLine(topX, topY, leftX, leftY, outlinePaint)
+        canvas.drawLine(topX, topY, rightX, rightY, outlinePaint)
+        canvas.drawLine(leftX, leftY, rightX, rightY, outlinePaint)
+        canvas.drawLine(topX, topY, backX, backY, faintPaint)
+        canvas.drawLine(leftX, leftY, backX, backY, faintPaint)
+        canvas.drawLine(rightX, rightY, backX, backY, faintPaint)
+    }
+
+    private fun drawWireOcta(canvas: Canvas, x: Float, y: Float, r: Float) {
+        val top = y - r
+        val bottom = y + r
+        val left = x - r
+        val right = x + r
+
+        canvas.drawLine(x, top, left, y, outlinePaint)
+        canvas.drawLine(x, top, right, y, outlinePaint)
+        canvas.drawLine(left, y, x, bottom, outlinePaint)
+        canvas.drawLine(right, y, x, bottom, outlinePaint)
+        canvas.drawLine(left, y, right, y, faintPaint)
+        canvas.drawLine(x, top, x, bottom, faintPaint)
+    }
+
+    private fun drawWirePrism(canvas: Canvas, x: Float, y: Float, r: Float) {
+        val path1 = trianglePath(x - r * 0.24f, y + r * 0.15f, r * 0.72f)
+        val path2 = trianglePath(x + r * 0.28f, y - r * 0.22f, r * 0.72f)
+        canvas.drawPath(path1, outlinePaint)
+        canvas.drawPath(path2, faintPaint)
+        canvas.drawLine(x - r * 0.24f, y - r * 0.57f, x + r * 0.28f, y - r * 0.94f, faintPaint)
+        canvas.drawLine(x - r * 0.86f, y + r * 0.51f, x - r * 0.34f, y + r * 0.14f, faintPaint)
+        canvas.drawLine(x + r * 0.38f, y + r * 0.51f, x + r * 0.90f, y + r * 0.14f, faintPaint)
+    }
+
+    private fun trianglePath(x: Float, y: Float, r: Float): Path {
+        return Path().apply {
+            moveTo(x, y - r)
+            lineTo(x - r * 0.86f, y + r * 0.50f)
+            lineTo(x + r * 0.86f, y + r * 0.50f)
+            close()
+        }
+    }
+
+    private fun drawWirePyramid(canvas: Canvas, x: Float, y: Float, r: Float) {
+        val topY = y - r
+        val left = x - r * 0.82f
+        val right = x + r * 0.82f
+        val bottom = y + r * 0.70f
+        val backY = y + r * 0.20f
+
+        canvas.drawLine(x, topY, left, bottom, outlinePaint)
+        canvas.drawLine(x, topY, right, bottom, outlinePaint)
+        canvas.drawLine(left, bottom, right, bottom, outlinePaint)
+        canvas.drawLine(x, topY, x, backY, faintPaint)
+        canvas.drawLine(left, bottom, x, backY, faintPaint)
+        canvas.drawLine(right, bottom, x, backY, faintPaint)
+    }
+
+    private fun drawWireSphere(canvas: Canvas, x: Float, y: Float, r: Float) {
+        canvas.drawCircle(x, y, r, outlinePaint)
+        canvas.drawOval(x - r * 0.36f, y - r, x + r * 0.36f, y + r, faintPaint)
+        canvas.drawOval(x - r, y - r * 0.34f, x + r, y + r * 0.34f, faintPaint)
+    }
+
+    private fun drawWireCylinder(canvas: Canvas, x: Float, y: Float, r: Float) {
+        val h = r * 0.86f
+        canvas.drawOval(x - r * 0.72f, y - h, x + r * 0.72f, y - h * 0.54f, faintPaint)
+        canvas.drawOval(x - r * 0.72f, y + h * 0.54f, x + r * 0.72f, y + h, outlinePaint)
+        canvas.drawLine(x - r * 0.72f, y - h * 0.77f, x - r * 0.72f, y + h * 0.77f, outlinePaint)
+        canvas.drawLine(x + r * 0.72f, y - h * 0.77f, x + r * 0.72f, y + h * 0.77f, outlinePaint)
+    }
+
+    private fun drawWireCone(canvas: Canvas, x: Float, y: Float, r: Float) {
+        canvas.drawOval(x - r * 0.78f, y + r * 0.46f, x + r * 0.78f, y + r * 0.92f, outlinePaint)
+        canvas.drawLine(x, y - r, x - r * 0.78f, y + r * 0.69f, outlinePaint)
+        canvas.drawLine(x, y - r, x + r * 0.78f, y + r * 0.69f, outlinePaint)
+    }
+
+    private fun drawWireTorus(canvas: Canvas, x: Float, y: Float, r: Float) {
+        canvas.drawOval(x - r, y - r * 0.55f, x + r, y + r * 0.55f, outlinePaint)
+        canvas.drawOval(x - r * 0.53f, y - r * 0.23f, x + r * 0.53f, y + r * 0.23f, faintPaint)
+        canvas.drawArc(x - r, y - r * 0.55f, x + r, y + r * 0.55f, 180f, 180f, false, faintPaint)
+    }
+
+    private fun drawSequenceGlyph(canvas: Canvas, x: Float, y: Float, radius: Float, level: Int) {
         val path = Path()
         val halfW = radius * 1.35f
         val halfH = radius * 0.72f
@@ -340,72 +626,21 @@ class RelationGraphView(context: Context) : View(context) {
         path.close()
 
         canvas.drawPath(path, nodePaint)
-
         outlinePaint.alpha = (220 - level * 18).coerceAtLeast(110)
-        outlinePaint.strokeWidth = 2.8f + level * 0.5f
         canvas.drawPath(path, outlinePaint)
 
-        val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
+        val inner = Paint(outlinePaint).apply {
+            alpha = 175
             strokeWidth = 2f
-            color = Color.argb(175, 255, 255, 255)
         }
-
-        canvas.drawLine(x - radius * 0.55f, y, x + radius * 0.55f, y, innerPaint)
-        canvas.drawCircle(x - radius * 0.42f, y, radius * 0.11f, innerPaint)
-        canvas.drawCircle(x, y, radius * 0.11f, innerPaint)
-        canvas.drawCircle(x + radius * 0.42f, y, radius * 0.11f, innerPaint)
+        canvas.drawLine(x - radius * 0.55f, y, x + radius * 0.55f, y, inner)
+        canvas.drawCircle(x - radius * 0.42f, y, radius * 0.11f, inner)
+        canvas.drawCircle(x, y, radius * 0.11f, inner)
+        canvas.drawCircle(x + radius * 0.42f, y, radius * 0.11f, inner)
     }
 
-    private fun drawMacroGlyph(
-        canvas: Canvas,
-        x: Float,
-        y: Float,
-        radius: Float,
-        level: Int
-    ) {
-        val points = when (level) {
-            1 -> 8
-            2 -> 10
-            3 -> 12
-            else -> 14
-        }
-
-        val path = Path()
-        for (i in 0 until points) {
-            val a = 2.0 * PI * i / points - PI / 2.0
-            val pulse = when {
-                level == 1 -> if (i % 2 == 0) 1.22f else 0.82f
-                level == 2 -> if (i % 2 == 0) 1.28f else 0.72f
-                level == 3 -> 0.88f + 0.25f * (1f + sin(i * 1.7).toFloat())
-                else -> if (i % 3 == 0) 1.35f else 0.80f
-            }
-            val rr = radius * pulse
-            val px = x + cos(a).toFloat() * rr
-            val py = y + sin(a).toFloat() * rr
-            if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
-        }
-        path.close()
-
-        canvas.drawPath(path, nodePaint)
-
-        outlinePaint.alpha = (210 - level * 20).coerceAtLeast(100)
-        outlinePaint.strokeWidth = 2.5f + level * 0.5f
-        canvas.drawPath(path, outlinePaint)
-
-        if (level >= 2) {
-            val inner = radius * (0.28f + level * 0.05f)
-            val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                style = Paint.Style.STROKE
-                strokeWidth = 2f
-                color = Color.argb(170, 255, 255, 255)
-            }
-            canvas.drawCircle(x, y, inner, innerPaint)
-        }
-    }
-
-    private fun edgeColor(edge: GraphEdge, norm: Float): Int {
-        val alpha = (55 + 190 * norm).toInt().coerceIn(0, 255)
+    private fun edgeColor(edge: GraphEdge, norm: Float, depthAlpha: Float): Int {
+        val alpha = ((55 + 190 * norm) * depthAlpha).toInt().coerceIn(0, 255)
         return when {
             edge.isMembership -> Color.argb(alpha, 235, 155, 55)
             edge.abstractionLevel >= 4 -> Color.argb(alpha, 235, 90, 255)
@@ -416,7 +651,7 @@ class RelationGraphView(context: Context) : View(context) {
         }
     }
 
-    private fun levelColor(level: Int, hz: Double): Int {
+    private fun levelColor(level: Int): Int {
         return when (level) {
             1 -> Color.rgb(245, 155, 45)
             2 -> Color.rgb(235, 75, 155)

@@ -1,34 +1,60 @@
-# Equinox v0.5 — Step 09
+# Equinox v0.5 — Step 10
 
-Step 09 adds the first real visual input and multimodal binding.
+Step 10 adds a switchable 2D/3D renderer and a small formula-only geometric ground memory.
 
 ## New
-- Camera permission and CameraX image analysis.
-- Rear camera is analysed directly; no video file is recorded.
-- Coarse 8×6 visual raster.
-- Each sampled cell is quantized to one of 64 coarse RGB color classes.
-- A visual symbol is encoded from `(cell, color class)`.
-- Visual symbols are stored in the same persistent memory graph as audio symbols.
-- Visual microcodes render as colored squares; audio microcodes remain circles.
-- Audio↔vision relations are strengthened when a visual observation occurs while an audio code is active.
-- Visual continuity relations are also stored.
-- Existing sequence compression and recursive abstraction remain active.
-- Existing Step 08 memory is migrated automatically.
-- UI counters show visual frames, visual observations, persistent visual codes and cross-modal relations.
-- Camera analysis is throttled to roughly one frame every 700 ms to keep the phone responsive and to avoid flooding memory.
+- 2D / 3D switch directly below the graph.
+- The relational MemoryModel remains unchanged with respect to space:
+  - no persistent x
+  - no persistent y
+  - no persistent z
+- 3D depth is generated only by RelationGraphView from graph metadata and a deterministic renderer seed.
+- Same graph, same codes, same relations in both modes.
+- Perspective projection, depth ordering and depth-scaled node/edge rendering in 3D.
+- GeometryGroundMemory with reusable template definitions.
 
-## Privacy / storage behavior
-Step 09 does NOT save photographs or raw camera frames.
-Only quantized visual symbols and their learned relation weights enter the Equinox memory file.
+### 2D templates
+- line
+- arc
+- triangle
+- quadrilateral
+- pentagon
+- hexagon
+- circle
+- ellipse
 
-## Architecture
-Camera -> 8x6 samples -> 64-class color quantization -> visual token IDs
-Audio -> FFT -> frequency IDs
+### 3D templates
+- tetrahedron
+- cube
+- octahedron
+- prism
+- pyramid
+- sphere
+- cylinder
+- cone
+- torus
 
-Both streams -> shared relational memory -> recursive macro abstraction
+Higher abstraction nodes receive deterministic display suggestions from the geometry grammar based on member count and whether the node came from a sequence.
 
-## Important
-Cell position is part of the visual encoder's symbol identity; it is not treated as fundamental physical x/y inside the relational core.
+## Architectural rule
+The geometry library is NOT a hidden reintroduction of fundamental Euclidean space.
+It is a renderer / pattern-language layer.
+
+Core:
+audio + vision -> symbols -> relations -> sequences -> recursive abstraction
+
+Display:
+relational snapshot -> layout -> optional 2D/3D projection -> geometric glyph
+
+## Preserved
+- Step 09 camera learning
+- audio/vision cross-modal relations
+- Step 08 sequence compression
+- Step 07 recursive abstraction
+- sonification
+- consolidation
+- existing persistent memory migration
 
 ## Install
-Open the folder as a fresh Android Studio project, generate the APK and install it over the existing `de.equinox.v05` app.
+Open as a fresh Android Studio project, build the APK and install it over the same
+`de.equinox.v05` application.

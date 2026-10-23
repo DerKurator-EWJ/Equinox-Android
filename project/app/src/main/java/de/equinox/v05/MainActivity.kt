@@ -93,7 +93,7 @@ class MainActivity : ComponentActivity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 09 — KAMERA + MULTIMODALES LERNEN", 18f, 16).apply {
+        root.addView(label("STEP 10 — 2D/3D + GEOMETRIE-GRUNDGEDÄCHTNIS", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -139,8 +139,66 @@ class MainActivity : ComponentActivity() {
         ).apply { topMargin = dp(18) })
         refreshGraph()
 
+        val geometryMemory = GeometryGroundMemory.standard()
+        val displayModeLabel = label(
+            "Darstellung: 2D · Geometrie-Grundgedächtnis: ${geometryMemory.totalTemplates} Formregeln",
+            14f,
+            12
+        ).apply { setTextColor(Color.rgb(170, 205, 255)) }
+        root.addView(displayModeLabel)
+
+        val displayRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val button2D = Button(this).apply {
+            text = "2D"
+            isEnabled = false
+        }
+        val button3D = Button(this).apply {
+            text = "3D"
+        }
+
+        fun refreshDisplayButtons() {
+            val is2D = graphView.getDisplayMode() == GraphDisplayMode.TWO_D
+            button2D.isEnabled = !is2D
+            button3D.isEnabled = is2D
+            displayModeLabel.text =
+                "Darstellung: ${if (is2D) "2D" else "3D"} · Geometrie-Grundgedächtnis: ${geometryMemory.totalTemplates} Formregeln"
+        }
+
+        button2D.setOnClickListener {
+            graphView.setDisplayMode(GraphDisplayMode.TWO_D)
+            refreshDisplayButtons()
+        }
+        button3D.setOnClickListener {
+            graphView.setDisplayMode(GraphDisplayMode.THREE_D)
+            refreshDisplayButtons()
+        }
+
+        displayRow.addView(
+            button2D,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(4)
+            }
+        )
+        displayRow.addView(
+            button3D,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(4)
+            }
+        )
+        root.addView(
+            displayRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        )
+
         root.addView(label(
-            "Audio-Mikro = Kreis · visuelle Mikrocodes = farbige Quadrate · beide Modalitäten landen im selben Relationsgedächtnis · gleichzeitig auftretende Audio-/Bildcodes werden direkt miteinander verknüpft",
+            "2D und 3D zeigen exakt dasselbe relationale Gedächtnis. Die räumliche Tiefe existiert nur im Renderer. Höhere Knoten bekommen Formvorschläge aus einem kleinen mathematischen Geometrie-Grundgedächtnis; diese Formen sind Vorlagen, keine fundamentalen Raumobjekte.",
             12f,
             12
         ).apply { setTextColor(Color.LTGRAY) })
@@ -236,7 +294,7 @@ class MainActivity : ComponentActivity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Step 09 analysiert die Rückkamera grob als 8×6 Raster mit 64 Farbklassen. Bildcodes werden wie Audio-Codes gespeichert; Audio↔Bild-Kopplungen entstehen nur aus gemeinsamer Erfahrung. Die Kamera zeichnet kein Video auf und speichert keine Rohbilder.",
+            "Step 10 trennt Kern und Darstellung noch schärfer: MemoryModel speichert weiterhin keine x/y/z-Koordinaten. 2D und 3D sind zwei Projektionen desselben Relationsgraphen. Ein Formel-/Template-Satz für klassische 2D- und 3D-Geometrien steht dem Renderer als Grundgedächtnis zur Verfügung.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
