@@ -15,7 +15,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Step 09 output-only canvas with read-only structural rank + relevance dimensions.
+ * Step 15 output-only canvas with structural rank, relevance and predictive recall.
  *
  * This view never mutates MemoryModel. It renders a read-only EngineOutputState.
  * Positions are projection coordinates derived from IDs and the active working set;
@@ -82,7 +82,15 @@ class EquinoxOutputView(context: Context) : View(context) {
             node.id to positionFor(node, pad, w, h)
         }
 
-        // Draw overexchange first. Positive/negative exchange gets opposite hue bias.
+        // Predicted next states are shown as thin directional expectation arcs. They are
+        // read-only projections of learned transition counts, not newly learned relations.
+        s.working.predictions.forEach { prediction ->
+            val a = positions[prediction.sourceId] ?: return@forEach
+            val b = positions[prediction.targetId] ?: return@forEach
+            drawPrediction(canvas, a.first, a.second, b.first, b.second, prediction)
+        }
+
+        // Draw overexchange next. Positive/negative exchange gets opposite hue bias.
         s.working.exchanges
             .sortedBy { abs(it.value) }
             .forEach { ex ->
@@ -103,7 +111,7 @@ class EquinoxOutputView(context: Context) : View(context) {
         val topRank = active.maxByOrNull { it.structuralScore }?.structuralRank ?: "—"
         val meanRel = active.map { it.structuralRelevance }.average()
         canvas.drawText(
-            "$modeLabel · ${active.size} aktiv · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)} · Rel ${"%.2f".format(meanRel)} · max $topRank",
+            "$modeLabel · ${active.size} aktiv · ${s.working.predictions.size} Prognosen · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)} · Rel ${"%.2f".format(meanRel)} · max $topRank",
             18f,
             height - 18f,
             infoPaint
@@ -156,6 +164,37 @@ class EquinoxOutputView(context: Context) : View(context) {
             pad + (xNorm + dx).coerceIn(0.03f, 0.97f) * w,
             pad + (yNorm + dy).coerceIn(0.03f, 0.97f) * h
         )
+    }
+
+    private fun drawPrediction(
+        canvas: Canvas,
+        ax: Float,
+        ay: Float,
+        bx: Float,
+        by: Float,
+        prediction: ActivePrediction
+    ) {
+        val dx = bx - ax
+        val dy = by - ay
+        val d = max(1f, sqrt(dx * dx + dy * dy))
+        val nx = -dy / d
+        val ny = dx / d
+        val c = prediction.confidence.coerceIn(0.0, 1.0).toFloat()
+        val bendSign = if (((prediction.sourceId xor prediction.targetId) and 1) == 0) 1f else -1f
+        val bend = min(d * 0.20f, 8f + 22f * c) * bendSign
+        val cx = (ax + bx) * 0.5f + nx * bend
+        val cy = (ay + by) * 0.5f + ny * bend
+
+        linePaint.strokeWidth = 1.0f + 2.8f * c
+        linePaint.color = Color.argb((45 + 150 * c).toInt().coerceIn(45, 195), 255, 220, 105)
+        val path = Path().apply {
+            moveTo(ax, ay)
+            quadTo(cx, cy, bx, by)
+        }
+        canvas.drawPath(path, linePaint)
+
+        nodePaint.color = Color.argb((70 + 150 * c).toInt().coerceIn(70, 220), 255, 230, 135)
+        canvas.drawCircle(bx, by, 2.5f + 3.5f * c, nodePaint)
     }
 
     private fun drawExchange(

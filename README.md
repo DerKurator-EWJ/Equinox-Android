@@ -61,6 +61,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step12-adaptivequantizer` | `Equinox_v06_Step12_AdaptiveQuantizer.zip` | 28 | 0 | `c34bd4289100a06f3329fab0aa0521b7fb6046ea7cfd093049d2fe209fb591d8` |
 | `android-v06-step13-adaptivehierarchy` | `Equinox_v06_Step13_AdaptiveHierarchy.zip` | 29 | 0 | `d91f0a6f254ab25832678877d7c0c6f9f2b79cb4a034d2df06d9b4b2822eb02e` |
 | `android-v06-step14-memorycompetition` | `Equinox_v06_Step14_MemoryCompetition.zip` | 30 | 0 | `e01c7c7c235f47d9f59a8e618753fabf645127cdbb9475957134427cb7a5328c` |
+| `android-v06-step15-predictiverecall` | `Equinox_v06_Step15_PredictiveRecall.zip` | 30 | 0 | `3a17fb806ac42dfe7fd87bc8567a5df908a9a1b5e6cc277dc77ad5a0407b5bbe` |
 
 ## Security, licensing, and limitations
 

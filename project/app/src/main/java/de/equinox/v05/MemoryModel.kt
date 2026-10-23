@@ -38,8 +38,14 @@ private const val ACTUAL_DECAY = 0.82
 private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
+// Step 15: sparse directional recall/prediction. Predictions are derived only from
+// already learned macro-to-macro transitions and materialized into the bounded working set.
+private const val MAX_PREDICTIONS_PER_EVENT = 4
+private const val MIN_PREDICTION_SUPPORT = 2L
+private const val MIN_PREDICTION_CONFIDENCE = 0.06
+
 /**
- * v0.6 Step 14
+ * v0.6 Step 15
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -47,10 +53,10 @@ private const val EXCHANGE_EMA_ALPHA = 0.15
  * frequency IDs ("audio"), fixed 16-bit direct IDs ("audio_direct") and the learned
  * adaptive vector-quantizer IDs ("audio_adaptive"). They never mix sequence streams.
  * Step 13 added adaptive hierarchy promotion and non-overlapping macro emission.
- * Step 14 adds dependency-safe memory competition: only stale leaf macros can compete for
- * bounded stream capacity; higher-order dependencies, active structures and mature S+
- * structures are protected. Pruned identities can be relearned later if the world supplies
- * enough evidence again.
+ * Step 14 added dependency-safe memory competition. Step 15 adds sparse directional
+ * predictive recall: the currently active macro queries only its learned outgoing transition
+ * index, materializes a few likely next macros as B-state expectations, and lets those
+ * expectations participate in the same overexchange/output path. No full-graph scan is used.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
  *
@@ -118,7 +124,12 @@ data class MemoryStats(
     val competitionCandidatesPruned: Long = 0L,
     val competitionLastPruned: Int = 0,
     val competitionLastProtected: Int = 0,
-    val competitionLastPressuredGroups: Int = 0
+    val competitionLastPressuredGroups: Int = 0,
+    val predictionCandidates: Int = 0,
+    val predictionTopConfidence: Double = 0.0,
+    val predictionChecks: Long = 0L,
+    val predictionHits: Long = 0L,
+    val predictionHitRate: Double = 0.0
 )
 
 data class GraphNode(
@@ -212,9 +223,18 @@ data class ActiveExchange(
     val value: Double
 )
 
+/** Directional, read-only next-state expectation derived from learned transitions. */
+data class ActivePrediction(
+    val sourceId: Int,
+    val targetId: Int,
+    val confidence: Double,
+    val support: Long
+)
+
 data class WorkingSetSnapshot(
     val nodes: List<ActiveMacroNode>,
-    val exchanges: List<ActiveExchange>
+    val exchanges: List<ActiveExchange>,
+    val predictions: List<ActivePrediction> = emptyList()
 )
 
 /**
@@ -366,6 +386,15 @@ class MemoryModel(context: Context) {
 
     // Event-local exchange values used by the output. These are never persisted.
     private val currentExchanges = mutableMapOf<Long, Double>()
+
+    // Step 15 predictions are runtime projections of persistent directional transition counts.
+    // They are never written back as relations merely because they were predicted.
+    private val currentPredictions = mutableListOf<ActivePrediction>()
+    private val pendingPredictionsByStream = mutableMapOf<String, Set<Int>>()
+    private var predictionChecks = 0L
+    private var predictionHits = 0L
+    private var lastPredictionCandidates = 0
+    private var lastTopPredictionConfidence = 0.0
 
     // Memory-mode traversal cursor. It is runtime-only and never learned back.
     private var memoryPlaybackCursor: Int? = null
@@ -648,6 +677,9 @@ class MemoryModel(context: Context) {
         val relationStreamKey = streamKey(macro.level, macro.modality)
         val previous = previousActiveMacro[relationStreamKey]
 
+        // Evaluate the previous event's top-k forecast before creating the next one.
+        evaluatePendingPrediction(relationStreamKey, macro.id)
+
         // A-state: this macro actually occurred in the current live stream.
         val liveState = activeWorking.getOrPut(macro.id) {
             WorkingMacro(
@@ -674,6 +706,15 @@ class MemoryModel(context: Context) {
         // materialized into the working set. Their B-state is contextual expectation.
         val retrieved = retrieveNeighborsIntoWorkingSet(macro.id, macro.modality)
 
+        // Step 15: directional prediction is stricter than generic neighbor recall. Only
+        // learned outgoing transitions from this exact macro/level/modality can forecast.
+        currentPredictions.clear()
+        val predictions = predictNextIntoWorkingSet(macro)
+        currentPredictions.addAll(predictions)
+        pendingPredictionsByStream[relationStreamKey] = predictions.map { it.targetId }.toSet()
+        lastPredictionCandidates = predictions.size
+        lastTopPredictionConfidence = predictions.maxOfOrNull { it.confidence } ?: 0.0
+
         val localIds = LinkedHashSet<Int>()
         localIds += macro.id
         previous?.takeIf { it != macro.id }?.let {
@@ -681,6 +722,7 @@ class MemoryModel(context: Context) {
             localIds += it
         }
         localIds.addAll(retrieved)
+        localIds.addAll(predictions.map { it.targetId })
 
         // Overexchange exists only in this small event-local frontier.
         val exchangeValues = ArrayList<Double>()
@@ -702,6 +744,56 @@ class MemoryModel(context: Context) {
             modality = macro.modality,
             tokenId = macro.id
         )
+    }
+
+    private fun evaluatePendingPrediction(streamKey: String, actualMacroId: Int) {
+        val pending = pendingPredictionsByStream.remove(streamKey).orEmpty()
+        if (pending.isEmpty()) return
+        predictionChecks++
+        if (actualMacroId in pending) predictionHits++
+    }
+
+    /**
+     * Directional next-state recall. The relation index is used only as an address index;
+     * reverse/incoming edges are ignored. Confidence is a normalized transition share
+     * multiplied by a small support term so one-off transitions do not dominate.
+     */
+    private fun predictNextIntoWorkingSet(source: MacroCode): List<ActivePrediction> {
+        val outgoing = relationIndex[source.id].orEmpty().asSequence()
+            .mapNotNull { key ->
+                if (keyFrom(key) != source.id) return@mapNotNull null
+                val targetId = keyTo(key)
+                if (targetId == source.id) return@mapNotNull null
+                val target = macros[targetId] ?: return@mapNotNull null
+                if (target.modality != source.modality || target.level != source.level) return@mapNotNull null
+                val support = macroRelations[key] ?: return@mapNotNull null
+                if (support < MIN_PREDICTION_SUPPORT) return@mapNotNull null
+                targetId to support
+            }
+            .toList()
+
+        if (outgoing.isEmpty()) return emptyList()
+        val total = outgoing.sumOf { it.second }.coerceAtLeast(1L).toDouble()
+
+        return outgoing.asSequence()
+            .map { (targetId, support) ->
+                val share = support.toDouble() / total
+                val supportConfidence = support.toDouble() / (support.toDouble() + 4.0)
+                ActivePrediction(
+                    sourceId = source.id,
+                    targetId = targetId,
+                    confidence = (share * supportConfidence).coerceIn(0.0, 1.0),
+                    support = support
+                )
+            }
+            .filter { it.confidence >= MIN_PREDICTION_CONFIDENCE }
+            .sortedWith(compareByDescending<ActivePrediction> { it.confidence }.thenByDescending { it.support })
+            .take(MAX_PREDICTIONS_PER_EVENT)
+            .onEach { prediction ->
+                // B-state expectation only. Prediction itself is not a learned event.
+                touchAsContext(prediction.targetId, prediction.confidence)
+            }
+            .toList()
     }
 
     /** Pull only indexed neighbors of one active macro into momentary context. */
@@ -919,6 +1011,7 @@ class MemoryModel(context: Context) {
 
         decayAndPruneWorkingSet()
         currentExchanges.clear()
+        currentPredictions.clear()
 
         val seed = chooseMemoryPlaybackSeed() ?: return false
         val seedState = activeWorking.getOrPut(seed.id) {
@@ -937,9 +1030,15 @@ class MemoryModel(context: Context) {
         seedState.retrieved = true
 
         val retrieved = retrieveNeighborsIntoWorkingSet(seed.id, seed.modality)
+        val predictions = predictNextIntoWorkingSet(seed)
+        currentPredictions.addAll(predictions)
+        lastPredictionCandidates = predictions.size
+        lastTopPredictionConfidence = predictions.maxOfOrNull { it.confidence } ?: 0.0
+
         val localIds = LinkedHashSet<Int>()
         localIds += seed.id
         localIds.addAll(retrieved)
+        localIds.addAll(predictions.map { it.targetId })
 
         val values = ArrayList<Double>()
         for (otherId in localIds) {
@@ -954,7 +1053,8 @@ class MemoryModel(context: Context) {
         enforceWorkingSetLimit()
 
         memoryPlaybackSteps++
-        memoryPlaybackCursor = chooseNextMemoryCursor(seed.id, seed.modality)
+        memoryPlaybackCursor = predictions.maxByOrNull { it.confidence }?.targetId
+            ?: chooseNextMemoryCursor(seed.id, seed.modality)
         return true
     }
 
@@ -963,6 +1063,8 @@ class MemoryModel(context: Context) {
     fun clearMomentaryState() {
         activeWorking.clear()
         currentExchanges.clear()
+        currentPredictions.clear()
+        pendingPredictionsByStream.clear()
         previousActiveMacro.clear()
         lastRetrievedCount = 0
         lastExchangePairs = 0
@@ -1251,7 +1353,14 @@ class MemoryModel(context: Context) {
             .take(maxNodes * 2)
             .toList()
 
-        return WorkingSetSnapshot(nodes, exchanges)
+        val predictions = currentPredictions
+            .asSequence()
+            .filter { it.sourceId in selectedIds && it.targetId in selectedIds }
+            .sortedByDescending { it.confidence }
+            .take(MAX_PREDICTIONS_PER_EVENT)
+            .toList()
+
+        return WorkingSetSnapshot(nodes, exchanges, predictions)
     }
 
     @Synchronized
@@ -1353,7 +1462,12 @@ class MemoryModel(context: Context) {
             competitionCandidatesPruned = competitionCandidatesPruned,
             competitionLastPruned = competitionLastPruned,
             competitionLastProtected = competitionLastProtected,
-            competitionLastPressuredGroups = competitionLastPressuredGroups
+            competitionLastPressuredGroups = competitionLastPressuredGroups,
+            predictionCandidates = lastPredictionCandidates,
+            predictionTopConfidence = lastTopPredictionConfidence,
+            predictionChecks = predictionChecks,
+            predictionHits = predictionHits,
+            predictionHitRate = if (predictionChecks <= 0L) 0.0 else predictionHits.toDouble() / predictionChecks.toDouble()
         )
     }
 
@@ -1375,6 +1489,8 @@ class MemoryModel(context: Context) {
         activeWorking.clear()
         exchangeMemory.clear()
         currentExchanges.clear()
+        currentPredictions.clear()
+        pendingPredictionsByStream.clear()
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
         rolling.clear()
@@ -1396,6 +1512,10 @@ class MemoryModel(context: Context) {
         competitionLastPruned = 0
         competitionLastProtected = 0
         competitionLastPressuredGroups = 0
+        predictionChecks = 0L
+        predictionHits = 0L
+        lastPredictionCandidates = 0
+        lastTopPredictionConfidence = 0.0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -1426,6 +1546,8 @@ class MemoryModel(context: Context) {
         activeWorking.clear()
         exchangeMemory.clear()
         currentExchanges.clear()
+        currentPredictions.clear()
+        pendingPredictionsByStream.clear()
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
         rolling.clear()
@@ -1447,6 +1569,10 @@ class MemoryModel(context: Context) {
         competitionLastPruned = 0
         competitionLastProtected = 0
         competitionLastPressuredGroups = 0
+        predictionChecks = 0L
+        predictionHits = 0L
+        lastPredictionCandidates = 0
+        lastTopPredictionConfidence = 0.0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -1459,7 +1585,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_14)
+                .put("formatVersion", 60_15)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)

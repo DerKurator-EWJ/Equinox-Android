@@ -161,7 +161,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 13 — ADAPTIVE HIERARCHY", 17f, 8).apply {
+        root.addView(label("STEP 15 — PREDICTIVE RECALL", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -759,7 +759,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 14 ergänzt die adaptive Hierarchie um Memory Competition. Makros wachsen nicht mehr nur an: Bei Konsolidierung konkurrieren veraltete Blatt-Makros innerhalb ihrer Modalität und Abstraktionsstufe um begrenzte Kapazität. Komponenten höherer Makros, aktive Kontexte und reife S+-Strukturen sind geschützt. Entfernte Muster können später neu gelernt werden, wenn wieder genug Evidenz auftaucht.",
+            "Step 15 ergänzt das Gedächtnis um gerichteten Predictive Recall. Ein aktuell aktives Makro fragt nur seine bereits gelernten ausgehenden Übergänge ab und materialisiert höchstens vier wahrscheinliche Folgemakros als Erwartung im Working Set. Diese Prognosen werden nicht als neue Erfahrung zurückgeschrieben, beeinflussen aber B-Zustand, Überaustausch, Leinwand und Orchester. Die Trefferquote misst nur, ob der tatsächliche nächste Makroknoten unter den Top-k-Prognosen lag.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1170,6 +1170,7 @@ class MainActivity : ComponentActivity() {
             "Audio-Alphabete: FFT ${s.fftAudioCodes} Q/${s.fftAudioMacros} M · Direct ${s.directAudioCodes} Q/${s.directAudioMacros} M · Adaptive ${s.adaptiveAudioCodes} Q/${s.adaptiveAudioMacros} M\n" +
             "Makros: ${s.macroCodes} | $levelText | Relationen: ${s.macroRelations}\n" +
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
+            "Predictive Recall: ${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Treffer ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%)\n" +
             "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
