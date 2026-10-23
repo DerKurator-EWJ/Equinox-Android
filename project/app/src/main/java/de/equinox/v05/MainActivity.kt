@@ -95,6 +95,10 @@ class MainActivity : ComponentActivity() {
     private var audioEncoderMode: AudioEncoderMode = AudioEncoderMode.FFT_FREQUENCY
     private lateinit var audioEncoderStatus: TextView
     private lateinit var labAudioEncoderStatus: TextView
+    private lateinit var encoderBenchmark: EncoderBenchmarkManager
+    private lateinit var encoderBenchmarkStatus: TextView
+    private lateinit var encoderBenchmarkToggle: CheckBox
+    @Volatile private var parallelEncoderBenchmarkEnabled = false
 
     private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
     @Volatile private var lastConsolidationMs = 0L
@@ -136,6 +140,7 @@ class MainActivity : ComponentActivity() {
         diagnostics = DiagnosticsManager(this)
         audioEncoderModeStore = AudioEncoderModeStore(this)
         audioEncoderMode = audioEncoderModeStore.load()
+        encoderBenchmark = EncoderBenchmarkManager(this)
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
@@ -153,7 +158,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 10 — DUAL AUDIO ENCODER", 17f, 8).apply {
+        root.addView(label("STEP 11 — ENCODER CONVERGENCE LAB", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -402,6 +407,67 @@ class MainActivity : ComponentActivity() {
         encoderRow.addView(directEncoderButton, weightedButtonParams())
         labPage.addView(encoderRow, buttonParams(5))
         refreshEncoderButtons()
+
+        labPage.addView(label("PARALLELER KONVERGENZTEST", 16f, 16).apply {
+            setTextColor(Color.rgb(120, 235, 190))
+        })
+        labPage.addView(label(
+            "Im Test sehen FFT und DIRECT exakt dieselben PCM-Frames und lernen gleichzeitig in getrennten Modalitäten. Gemessen werden ID-Neuheit, Wiederholung, Übergangsstabilität, Entropie und Makroaufbau. Das verdoppelt die Audioanalyse und ist nur ein Diagnosemodus.",
+            12f,
+            4
+        ).apply { setTextColor(Color.LTGRAY) })
+
+        encoderBenchmarkToggle = CheckBox(this).apply {
+            text = "Beide Encoder parallel lernen + messen"
+            setTextColor(Color.WHITE)
+            isChecked = false
+            setOnCheckedChangeListener { _, checked ->
+                parallelEncoderBenchmarkEnabled = checked
+                if (checked) {
+                    encoderBenchmark.resetAndStart(memory.stats())
+                } else {
+                    encoderBenchmark.stop()
+                }
+                refreshEncoderBenchmarkStatus()
+            }
+        }
+        labPage.addView(encoderBenchmarkToggle)
+
+        encoderBenchmarkStatus = label("Konvergenztest: AUS", 12f, 6).apply {
+            setTextColor(Color.rgb(180, 235, 205))
+        }
+        labPage.addView(encoderBenchmarkStatus)
+
+        val benchmarkRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        benchmarkRow.addView(Button(this).apply {
+            text = "TEST NEU"
+            setOnClickListener {
+                encoderBenchmark.resetAndStart(memory.stats())
+                parallelEncoderBenchmarkEnabled = true
+                encoderBenchmarkToggle.isChecked = true
+                refreshEncoderBenchmarkStatus()
+            }
+        }, weightedButtonParams())
+        benchmarkRow.addView(Button(this).apply {
+            text = "CSV"
+            setOnClickListener {
+                encoderBenchmark.updateMemory(memory.stats())
+                val f = encoderBenchmark.writeCsvExport()
+                refreshEncoderBenchmarkStatus()
+                encoderBenchmarkStatus.text = encoderBenchmarkStatus.text.toString() + "\nCSV intern: ${f.name} (${f.length()} Bytes)"
+            }
+        }, weightedButtonParams())
+        benchmarkRow.addView(Button(this).apply {
+            text = "STOP"
+            setOnClickListener {
+                parallelEncoderBenchmarkEnabled = false
+                encoderBenchmark.stop()
+                encoderBenchmarkToggle.isChecked = false
+                refreshEncoderBenchmarkStatus()
+            }
+        }, weightedButtonParams())
+        labPage.addView(benchmarkRow, buttonParams(5))
+        refreshEncoderBenchmarkStatus()
 
         labMemoryStats = label(memoryText(), 13f, 8).apply { setTextColor(Color.rgb(180, 220, 215)) }
         labPage.addView(labMemoryStats)
@@ -828,7 +894,47 @@ class MainActivity : ComponentActivity() {
                 var idText: String
                 var strengthText: String
 
-                if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) {
+                val parallelTest = parallelEncoderBenchmarkEnabled && encoderBenchmark.isActive()
+                if (parallelTest) {
+                    // Fair hard test: both encoders receive the exact same PCM frame. Their
+                    // identities and macro streams remain separated by modality in MemoryModel.
+                    val mags = Fft.magnitudes(frame)
+                    val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
+                    val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
+                    var bestBin = minBin
+                    var bestMag = 0.0
+                    for (bin in minBin..maxBin) {
+                        if (mags[bin] > bestMag) {
+                            bestMag = mags[bin]
+                            bestBin = bin
+                        }
+                    }
+                    val fftHz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
+                    val fftId = AudioQuantizer.idForHz(fftHz)
+                    val direct = DirectAudioQuantizer.quantize(frame)
+
+                    // Feed the non-selected shadow stream first and the selected stream last,
+                    // so the momentary LIVE working set remains centered on what the user chose
+                    // to view/hear while both long-term streams still see the same frame.
+                    if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) {
+                        if (!direct.silent) memory.observeDirectAudio(direct.id)
+                        memory.observe(fftId, fftHz)
+                    } else {
+                        memory.observe(fftId, fftHz)
+                        if (!direct.silent) memory.observeDirectAudio(direct.id)
+                    }
+                    encoderBenchmark.recordPair(fftId, if (direct.silent) null else direct.id)
+
+                    if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) {
+                        primaryText = "Dominante Frequenz: %.1f Hz · Paralleltest".format(fftHz)
+                        idText = "Frequenz-ID: $fftId"
+                        strengthText = "FFT-Stärke: %.5f".format(bestMag)
+                    } else {
+                        primaryText = if (direct.silent) "Direktmuster: Stille — nicht gelernt · Paralleltest" else "Direktmuster: ${direct.debugText} · Paralleltest"
+                        idText = if (direct.silent) "Pattern-ID: —" else "Pattern-ID: ${direct.id}"
+                        strengthText = "PCM-Aktivität RMS: %.5f".format(direct.activity)
+                    }
+                } else if (selectedEncoder == AudioEncoderMode.FFT_FREQUENCY) {
                     val mags = Fft.magnitudes(frame)
                     val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
                     val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
@@ -876,6 +982,7 @@ class MainActivity : ComponentActivity() {
                             updateMemoryStats()
                             updateConsolidationStatus()
                         }
+                        if (parallelTest && frameCount % 24L == 0L) refreshEncoderBenchmarkStatus()
                         if (didConsolidate || frameCount % 12L == 0L) refreshGraph()
                     }
                 }
@@ -971,6 +1078,23 @@ class MainActivity : ComponentActivity() {
         consolidationStatus.text = "Konsolidierung: $label · nächste in ${seconds}s\n$lastConsolidationSummary"
     }
 
+    private fun refreshEncoderBenchmarkStatus() {
+        if (!::encoderBenchmarkStatus.isInitialized) return
+        encoderBenchmark.updateMemory(memory.stats())
+        val b = encoderBenchmark.summary()
+        if (b.pairedFrames <= 0L) {
+            encoderBenchmarkStatus.text = if (b.active) "Konvergenztest: bereit · noch keine PCM-Frames" else "Konvergenztest: AUS"
+            return
+        }
+        fun line(name: String, t: EncoderTrackSummary): String =
+            "$name: akzeptiert ${t.acceptedFrames}/${t.inputFrames} · IDs ${t.uniqueIds} · neu/1000 ${"%.1f".format(t.newIdsPer1000Accepted)} · neu letzte256 ${"%.1f".format(t.recentNoveltyRate * 100.0)}% · Übergang-neu ${"%.1f".format(t.recentTransitionNoveltyRate * 100.0)}% · H ${"%.2f".format(t.entropyBits)} bit · +Makro ${t.macroDelta}"
+        encoderBenchmarkStatus.text =
+            "Konvergenztest: ${if (b.active) "AKTIV" else "GESTOPPT"} · gemeinsame PCM-Frames ${b.pairedFrames}\n" +
+                line("FFT", b.fft) + "\n" +
+                line("DIRECT", b.direct) + "\n" +
+                b.interpretation
+    }
+
     private fun updateMemoryStats() {
         val text = memoryText()
         if (::memoryStats.isInitialized) memoryStats.text = text
@@ -1029,6 +1153,7 @@ class MainActivity : ComponentActivity() {
         lastConsolidationSummary = consolidationSummary(result)
         updateConsolidationStatus()
         updateMemoryStats()
+        if (::encoderBenchmark.isInitialized && encoderBenchmark.isActive()) refreshEncoderBenchmarkStatus()
         refreshGraph()
     }
 

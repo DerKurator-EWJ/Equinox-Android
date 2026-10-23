@@ -1,116 +1,117 @@
-# Equinox v0.6 — Step 10: Dual Audio Encoder
+# Equinox v0.6 — Step 11: Encoder Convergence Lab
 
-Basis: v0.6 Step 09 Multidimensional Relevance.
+Basis: v0.6 Step 10 Dual Audio Encoder.
 
 ## Purpose
 
-Step 10 performs the audio-encoder hard test discussed during the v0.6 redesign.
-The Equinox memory core should not depend on FFT as a fundamental representation.
-Therefore the app now has two selectable sensor encoders that feed the same macro,
-lazy-retrieval, overexchange, template, substitution and relevance architecture.
+Step 11 turns the two audio encoders into a fair, live A/B hard test.
+The goal is not to decide by intuition whether FFT or DIRECT-ID is "better", but to
+measure how each discrete representation behaves when both receive the exact same
+2048-sample PCM frames.
 
-The two encoders are deliberately kept as separate alphabets so their memories do
-not contaminate each other.
+The benchmark is deliberately separate from the Equinox learning rules. It only
+observes the two identity streams and reports diagnostics. It does not change IDs,
+macro promotion, relations, overexchange, templates, substitution classes, ranks or
+relevance.
 
-## Encoder A — FFT / frequency identity
+## Parallel hard test
 
-The existing path remains available and is the default for backward compatibility:
+Open **LAB -> PARALLELER KONVERGENZTEST** and enable:
 
-`PCM -> FFT -> dominant frequency -> logarithmic frequency ID -> Equinox core`
+`Beide Encoder parallel lernen + messen`
 
-It continues to use the existing positive frequency IDs and modality `audio`.
-Existing v0.6 memories remain readable.
+While enabled, every microphone frame is processed by both encoders:
 
-## Encoder B — DIRECT / fixed 16-bit acoustic identity
+`same PCM frame -> FFT-ID`
 
-The new path does **not** call `Fft.magnitudes()`.
-A 2048-sample PCM frame is quantized directly in the time domain using only five
-coarse behaviour groups:
+`same PCM frame -> DIRECT 16-bit ID`
 
-- zero-crossing rate: 4 bits
-- normalized waveform roughness: 4 bits
-- strongest tested autocorrelation lag: 3 bits
-- autocorrelation strength: 3 bits
-- coarse envelope trend: 2 bits
+Both identities are then learned by the existing Equinox core in their already
+separate modalities:
 
-These fields form one 16-bit identity. Therefore the theoretical direct alphabet is
-bounded to exactly **65,536 possible states**. It does not grow just because the app
-runs longer.
+- FFT: `audio`
+- Direct: `audio_direct`
 
-Direct identities use negative IDs `-1 .. -65536` and modality `audio_direct`, so
-there is no collision with legacy frequency IDs or the positive macro-ID space.
-Silence below a small RMS threshold is displayed but is not learned.
+Because the modalities remain separated, their sequence candidates, macro signatures
+and persistent macro relations do not merge. The non-selected stream is fed first
+and the currently selected LIVE encoder is fed last, so the momentary output working
+set remains centered on the encoder the user chose to display.
 
-This is intentionally a simple experimental encoder. It is not a claim that these
-five features are a complete representation of sound.
+This diagnostic mode intentionally does approximately twice the encoder work and can
+also create roughly two audio observations per PCM frame. It is therefore a hard-test
+mode, not the normal low-power operating mode.
 
-## Same memory, different front end
+## Metrics
 
-After quantization both paths use the same pipeline:
+The benchmark reports separately for FFT and DIRECT:
 
-`Quant ID -> temporary sequence evidence -> stable macro -> lazy active set -> sparse macro relations -> overexchange -> templates -> substitution classes -> relevance/rank -> output`
+- accepted frames / common input frames
+- number of unique discrete IDs
+- new IDs per 1000 accepted frames
+- ID novelty in the latest 256 accepted events
+- transition novelty in the latest 256 transitions
+- revisit rate and immediate-repeat behaviour internally
+- Shannon entropy of the session ID distribution
+- quant-code delta since test start
+- macro delta since test start
+- macro formation per 1000 accepted frames internally
 
-No new level-0 relation graph was added.
+DIRECT has a silence gate, so its accepted-frame count may be lower than FFT. This is
+shown explicitly rather than hidden.
 
-The core therefore remains independent of whether the sensor identity came from an
-FFT frequency bin or a direct time-domain pattern.
+## What “convergence” means here
 
-## Switching encoders
+The app gives only a narrow provisional hint based on recent identity novelty and
+recent transition novelty.
 
-Open **LAB -> AUDIO-ENCODER HARD TEST** and choose:
+A lower novelty rate means that an encoder is reusing its existing vocabulary more
+consistently in the current environment. This does **not** prove that it preserves
+more acoustic information, recognizes meaning better, or is universally superior.
+A very coarse encoder can converge quickly simply because it collapses many different
+sounds into the same ID.
 
-- `FFT`
-- `DIRECT-ID`
+For that reason the LAB text explicitly labels the result as an ID-convergence hint,
+not a quality verdict.
 
-Changing the encoder while audio is running first stops/consolidates the current
-audio stream, preventing a rolling sequence from crossing between two alphabets.
-The selected mode is saved in SharedPreferences.
+## Test workflow
 
-The LIVE page shows the currently selected encoder.
+1. Tap **TEST NEU** to reset the benchmark baseline and enable the parallel test.
+2. Start audio on LIVE.
+3. Let the same acoustic environment run for a meaningful period.
+4. Repeat familiar sounds as well as varied sounds.
+5. Return to LAB and compare the live metrics.
+6. Tap **CSV** to write `equinox_v06_encoder_benchmark.csv` into the app's internal files.
+7. Use **STOP** to end the parallel benchmark; normal single-encoder operation remains available.
 
-FFT mode reports dominant Hz, frequency ID and FFT magnitude.
-DIRECT mode reports pattern ID, RMS activity and the quantized time-domain feature
-bins.
+The benchmark session itself is runtime-only in this step. The CSV export persists the
+sampled comparison. Existing Equinox memory continues to use `equinox_v06_memory.json`.
 
-## Memory / diagnostics
+## Existing architecture retained
 
-The memory statistics now separately report:
+After each encoder produces an ID, the same v0.6 core remains in place:
 
-- FFT quant codes / FFT macros
-- Direct-ID quant codes / Direct-ID macros
+`Quant ID -> temporary pattern evidence -> stable macro -> lazy active frontier -> sparse relations -> overexchange -> templates -> substitution classes -> rank/relevance -> output`
 
-This makes it possible to run the same environment through both encoders and compare
-how quickly each representation stabilizes and compresses.
-
-The same persistent file `equinox_v06_memory.json` is used. The save format is now
-`formatVersion = 6010`. Step 05–09 data remains loadable; new direct IDs are simply
-additional entries with modality `audio_direct`.
-
-## Orchestra
-
-Direct-ID codes do not store fake measured frequencies. For output only, the
-orchestra deterministically projects a pitch from the direct ID / macro composition.
-That pitch is a human-audible visualization and is not fed back into memory as a
-physical property of the code.
+No level-0 relation graph has been reintroduced.
 
 ## Verification performed here
 
-- `MemoryModel.kt`, `StructuralRank.kt`, `StructuralRelevance.kt` and
-  `DirectAudioQuantizer.kt` compile successfully against JVM Android/JSON stubs.
-- A direct-quantizer test confirmed that a 440 Hz sine at two substantially different
-  amplitudes maps to the same direct identity, while deterministic broadband noise
-  maps to a different identity.
-- The same test produced a different identity for an 880 Hz sine in the tested frame.
+- `MemoryModel.kt`, rank/relevance support, `DirectAudioQuantizer.kt` and the new
+  `EncoderBenchmarkManager.kt` compile successfully against JVM Android/JSON stubs.
+- A synthetic 512-frame benchmark produced stable reuse after the initial vocabulary
+  had been seen and correctly tracked independent FFT/DIRECT unique-ID and macro deltas.
+- The modified `MainActivity.kt` compiles against a dedicated Android/AndroidX/app API
+  stub set, including the new parallel-test UI and dual-learning audio branch.
 
 A complete Android APK build is still not possible in this environment because the
 Android SDK/build tools are not installed.
 
 ## Build
 
-Open exactly `Equinox_v06_Step10_DualAudioEncoder` as the Android Studio project and
-use **Build > Build APK(s)**.
+Open exactly `Equinox_v06_Step11_EncoderConvergenceLab` as the Android Studio project
+and use **Build > Build APK(s)**.
 
 Application ID remains `de.equinox.v05`, so it updates the same installed app when
 signed with the same key/debug key.
 
-Version: `0.6-step10-dual-audio-encoder` (versionCode 24).
+Version: `0.6-step11-encoder-convergence-lab` (versionCode 25).
