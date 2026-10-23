@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 58
-        versionName = "0.6-step43-hypno-mode"
+        versionCode = 59
+        versionName = "0.6-step44-hypno-av-sync"
     }
 
     compileOptions {

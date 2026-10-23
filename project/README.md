@@ -1,11 +1,11 @@
-# Equinox v0.6 — Step 43
+# Equinox v0.6 — Step 44
 
-Current milestone: **Hypno Mode**.
+Current milestone: **Hypno Audio / Visual Synchronisation**.
 
-The normal app now starts in HYPNO: the existing Unified State is rendered as a continuous organic field rather than a technical node/tissue representation. HYPNO remains strictly read-only and uses the same GPU surface, WorkingSetSnapshot and Reality <-> Memory blend.
+HYPNO and Unified Audio now derive their behaviour from one shared, normalized, read-only `UnifiedPresentationState`. Activity, prediction, signed exchange, novelty, crossmodality, tier depth, retrieval share and relation energy therefore have one canonical output interpretation before being expressed visually or acoustically.
 
-For comparison, open **Settings -> LAB -> PRODUCT RENDERER** and switch temporarily to **STRUCTURE**.
+With live camera presentation, the same delayed `WorkingSetSnapshot` selected by the Step-27 render packet is sent to both GPU and audio, removing independent audiovisual state sampling.
 
-LEARN / PLAY / DREAM semantics from Step 42 are unchanged. Existing memory profiles and codebooks remain compatible.
+LEARN / PLAY / DREAM semantics, the persistent memory format, Step-37 profiles and the Step-41 reconstructed macro voices remain compatible.
 
-See `README_STEP43.md` for implementation and verification notes.
+See `README_STEP44.md` for architecture and verification notes.

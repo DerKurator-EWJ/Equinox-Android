@@ -1152,7 +1152,7 @@ class MainActivity : ComponentActivity() {
         }
         labPage.addView(productRendererStatus)
         labPage.addView(label(
-            "HYPNO ist die Consumer-Darstellung. STRUCTURE hält die technische Tier-/Gewebe-Projektion zum Vergleichen bereit. Beide lesen denselben WorkingSetSnapshot und schreiben niemals in MemoryModel zurück.",
+            "HYPNO ist die Consumer-Darstellung. STRUCTURE hält die technische Tier-/Gewebe-Projektion zum Vergleichen bereit. HYPNO und Unified Audio lesen in Step 44 denselben normalisierten Präsentationszustand; bei Live-Kamera sogar denselben verzögerten WorkingSetSnapshot. Nichts davon schreibt in MemoryModel zurück.",
             12f,
             4
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1749,6 +1749,9 @@ class MainActivity : ComponentActivity() {
             surfaceVideo.setWorkingState(w)
             scheduleLowLatencyRender()
         }
+        if (unifiedAudio.isRunning() && !cameraRunning) {
+            unifiedAudio.updateState(memory.sonificationSnapshot(maxMicro = 0, maxMacros = 12), w)
+        }
         if (settingsOpen && ::hybridModeStatus.isInitialized) {
             hybridModeStatus.text = if (!ok && w.nodes.none { it.activation > 0.12 }) {
                 "HYBRID: wartet auf Live-Makro"
@@ -1839,6 +1842,7 @@ class MainActivity : ComponentActivity() {
     private fun refreshMemoryPage() {
         val state = outputBridge.snapshot()
         if (::surfaceVideo.isInitialized) surfaceVideo.setWorkingState(state.working)
+        if (unifiedAudio.isRunning()) unifiedAudio.updateState(state.sound, state.working)
         val w = state.working
         if (settingsOpen && ::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
             memoryModeStatus.text = "MEMORY: RUN · ${w.nodes.size} aktiv · ${w.exchanges.size} Austausch"
@@ -1889,6 +1893,15 @@ class MainActivity : ComponentActivity() {
                 "Sync $preset · Frame ${packet.actualFrameAgeMs}ms · drop ${packet.droppedFramesTotal}"
             }
             surfaceVideo.setSynchronizedFrame(packet.frame, packet.working, info)
+            // Step 44: when camera presentation is active, audio receives the exact same
+            // delayed WorkingSetSnapshot that HYPNO receives. This prevents semantic AV skew
+            // from independently sampling the live memory frontier.
+            if (unifiedAudio.isRunning() && packet.working != null) {
+                unifiedAudio.updateState(
+                    memory.sonificationSnapshot(maxMicro = 0, maxMacros = 12),
+                    packet.working
+                )
+            }
             if (settingsOpen) updateLiveLatencyStatus()
         }
     }
@@ -2241,7 +2254,8 @@ class MainActivity : ComponentActivity() {
                     strengthText += " · SelfGuard ${selfGuard.removedComponents} Komp. / ${"%.1f".format(selfGuard.removedRmsRatio * 100.0)}% RMS"
                 }
 
-                if (unifiedAudio.isRunning() && frameCount % 2L == 0L) {
+                if (unifiedAudio.isRunning() && !cameraRunning && frameCount % 2L == 0L) {
+                    // Audio-only operation: no video packet exists to provide the synchronized state.
                     pushContinuousOrchestraState()
                 }
 

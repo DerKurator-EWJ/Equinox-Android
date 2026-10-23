@@ -58,9 +58,14 @@ data class OrchestraScene(
     val voices: List<OrchestraVoiceSpec>,
     val tempoBpm: Double,
     val tension: Double,
+    val activityDrive: Double,
     val predictionDrive: Double,
+    val noveltyDrive: Double,
     val crossmodalDrive: Double,
     val relationDrive: Double,
+    val signedExchange: Double,
+    val tierDepth: Double,
+    val retrievalShare: Double,
     val memoryBlend: Double
 ) {
     fun compactSummary(): String {
@@ -69,7 +74,10 @@ data class OrchestraScene(
         val sections = listOf("PULSE", "MOTIF", "HARMONY", "DRONE")
             .mapNotNull { key -> groups[key]?.takeIf { it > 0 }?.let { "$key:$it" } }
             .joinToString(" ")
-        return "${voices.size} Stimmen · $sections · ${tempoBpm.toInt()} BPM · T ${"%.2f".format(tension)} · M ${(memoryBlend * 100).toInt()}%"
+        return "${voices.size} Stimmen · $sections · ${tempoBpm.toInt()} BPM · " +
+            "A ${"%.2f".format(activityDrive)} · P ${"%.2f".format(predictionDrive)} · " +
+            "N ${"%.2f".format(noveltyDrive)} · X ${"%.2f".format(crossmodalDrive)} · " +
+            "T ${"%.2f".format(tension)} · M ${(memoryBlend * 100).toInt()}%"
     }
 }
 
@@ -85,6 +93,8 @@ object GenerativeOrchestraSceneBuilder {
     ): OrchestraScene {
         val blend = memoryBlend.coerceIn(0.0, 1.0)
         val realityWeight = 1.0 - blend
+        // Step 44: exact same normalized state vector as the HYPNO renderer.
+        val unified = UnifiedPresentationState.from(working)
         val macroById = sound.macros.associateBy { it.id }
         val predictionsByTarget = working.predictions
             .groupBy { it.targetId }
@@ -165,32 +175,33 @@ object GenerativeOrchestraSceneBuilder {
             }
         }
 
-        val relationDrive = working.exchanges
-            .map { abs(it.value) }
-            .let { if (it.isEmpty()) 0.0 else (it.sum() / it.size).coerceIn(0.0, 2.5) }
-        val predictionDrive = working.predictions
-            .map { it.confidence }
-            .let { if (it.isEmpty()) 0.0 else ((it.sum() / it.size) * (0.20 + 0.80 * blend)).coerceIn(0.0, 1.0) }
-        val crossDrive = working.crossModalLinks
-            .map { it.confidence }
-            .let { if (it.isEmpty()) 0.0 else ((it.sum() / it.size) * (0.35 + 0.65 * blend)).coerceIn(0.0, 1.0) }
-
-        val density = (voices.size / max(1.0, maxVoices.toDouble())).coerceIn(0.0, 1.0)
-        val meanActivation = voices.map { it.activation }.let { if (it.isEmpty()) 0.0 else it.average() }
+        val relationDrive = unified.relationEnergy
+        val predictionDrive = unified.prediction
+        val crossDrive = unified.crossmodal
+        val density = unified.density
+        val meanActivation = unified.activity
+        // Shared state, different modality mapping: activity/density accelerate, prediction
+        // adds anticipatory motion, novelty adds transient urgency, deep/retrieved memory calms.
         val tempo = (
-            46.0 + density * 34.0 + meanActivation * 24.0 + predictionDrive * 16.0 + min(18.0, relationDrive * 9.0)
-            ).coerceIn(42.0, 138.0)
-        val tension = (relationDrive * 0.52 + voices.map { abs(it.exchangeBias) }.let {
-            if (it.isEmpty()) 0.0 else it.average() * 0.22
-        }).coerceIn(0.0, 1.5)
+            44.0 + density * 28.0 + meanActivation * 25.0 + predictionDrive * 14.0 +
+                unified.novelty * 13.0 + relationDrive * 12.0 - unified.retrievalShare * 8.0 - unified.tierDepth * 5.0
+            ).coerceIn(40.0, 138.0)
+        val tension = (
+            relationDrive * 0.58 + abs(unified.signedExchange) * 0.24 + unified.novelty * 0.18
+            ).coerceIn(0.0, 1.0)
 
         return OrchestraScene(
             voices = voices,
             tempoBpm = tempo,
             tension = tension,
+            activityDrive = unified.activity,
             predictionDrive = predictionDrive,
+            noveltyDrive = unified.novelty,
             crossmodalDrive = crossDrive,
             relationDrive = relationDrive,
+            signedExchange = unified.signedExchange,
+            tierDepth = unified.tierDepth,
+            retrievalShare = unified.retrievalShare,
             memoryBlend = blend
         )
     }
@@ -280,36 +291,42 @@ class GenerativeOrchestraSynth(private val sampleRate: Int = 48_000) {
                 val env = sectionEnvelope(spec, beatPhase, halfBeatPhase, t)
                 val ghost = predictionGhost(spec, beatPhase) * (0.20 + 0.80 * scene.memoryBlend)
                 val brightness = (
-                    0.08 + spec.level * 0.035 + spec.generality * 0.09 +
-                        scene.crossmodalDrive * 0.08 + spec.crossmodalConfidence * 0.11 +
-                        spec.spectralSpread.coerceIn(0.0, 1.5) * 0.045
-                    ).coerceIn(0.06, 0.52)
+                    0.07 + spec.level * 0.030 + spec.generality * 0.08 +
+                        scene.crossmodalDrive * 0.10 + spec.crossmodalConfidence * 0.11 +
+                        scene.noveltyDrive * 0.12 + spec.spectralSpread.coerceIn(0.0, 1.5) * 0.045 -
+                        scene.tierDepth * 0.035
+                    ).coerceIn(0.05, 0.58)
 
                 val fmCarrier = sin(rt.phaseA + sin(rt.phaseB * 0.5) * fmDepth * 2.6)
                 val second = sin(rt.phaseB + exchange * 0.13) * brightness
                 val third = sin(rt.phaseC + (spec.voiceHash and 31) * 0.037) * brightness * 0.34
-                val sub = if (spec.level >= 3) sin(rt.phaseA * 0.5) * (0.10 + spec.relevance * 0.10) else 0.0
+                val sub = if (spec.level >= 3) sin(rt.phaseA * 0.5) *
+                    (0.09 + spec.relevance * 0.09 + scene.tierDepth * 0.08 + scene.retrievalShare * 0.05) else 0.0
                 val chord = chordLayer(spec, rt.phaseA, t) * when {
                     spec.level >= 3 -> 0.24 + spec.relevance * 0.20
                     spec.level == 2 -> 0.10
                     else -> 0.0
                 }
                 val breath = deterministicNoise(rt) * (
-                    0.005 + spec.generality * 0.012 + spec.crossmodalConfidence * 0.010
+                    0.004 + spec.generality * 0.010 + spec.crossmodalConfidence * 0.010 +
+                        scene.noveltyDrive * 0.016
                     )
 
                 val presence = (
-                    0.56 + spec.activation * (0.22 + 0.22 * (1.0 - scene.memoryBlend)) + spec.expectation * (0.08 + 0.20 * scene.memoryBlend) +
-                        spec.relevance * 0.22 + spec.generality * 0.06
-                    ).coerceIn(0.45, 1.34)
+                    0.53 + spec.activation * (0.22 + 0.22 * (1.0 - scene.memoryBlend)) + spec.expectation * (0.08 + 0.20 * scene.memoryBlend) +
+                        spec.relevance * 0.22 + spec.generality * 0.05 + scene.activityDrive * 0.08 +
+                        scene.retrievalShare * 0.05
+                    ).coerceIn(0.43, 1.36)
 
                 sum += (fmCarrier + second + third + sub + chord + breath) *
                     rt.currentAmp * presence * (env + ghost).coerceIn(0.0, 1.30)
             }
 
             // A tiny global motion makes relations audible without becoming another voice.
-            val relationPulse = sin(2.0 * PI * (0.5 / secondsPerBeat) * t) * scene.relationDrive * 0.015
-            val sample = tanh((sum + relationPulse) * master * (1.0 + scene.predictionDrive * 0.08))
+            val relationPulse = sin(2.0 * PI * (0.5 / secondsPerBeat) * t + scene.signedExchange * 0.55) *
+                scene.relationDrive * (0.010 + 0.010 * abs(scene.signedExchange))
+            val noveltyAccent = sin(2.0 * PI * (1.0 / secondsPerBeat) * t) * scene.noveltyDrive * 0.006
+            val sample = tanh((sum + relationPulse + noveltyAccent) * master * (1.0 + scene.predictionDrive * 0.08))
             out[i] = (sample.coerceIn(-0.96, 0.96) * Short.MAX_VALUE).toInt().toShort()
         }
         sampleCursor += sampleCount

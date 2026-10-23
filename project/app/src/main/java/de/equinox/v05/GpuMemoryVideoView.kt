@@ -197,33 +197,8 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             val nodes = working?.nodes.orEmpty()
             val exchanges = working?.exchanges.orEmpty()
             val predictions = working?.predictions.orEmpty()
-
-            val meanActivation = if (nodes.isEmpty()) 0.0 else nodes.sumOf { it.activation.coerceIn(0.0, 1.0) } / nodes.size
-            val meanExpectation = if (nodes.isEmpty()) 0.0 else nodes.sumOf { it.expectation.coerceIn(0.0, 1.0) } / nodes.size
-            val meanRelevance = if (nodes.isEmpty()) 0.0 else nodes.sumOf { it.structuralRelevance.coerceIn(0.0, 1.0) } / nodes.size
-            val exchangeEnergy = if (exchanges.isEmpty()) 0.0 else exchanges.sumOf { abs(it.value).coerceIn(0.0, 2.0) } / exchanges.size
-            val signedExchange = if (exchanges.isEmpty()) 0.0 else exchanges.sumOf { it.value.coerceIn(-2.0, 2.0) } / exchanges.size
-            val predictionEnergy = if (predictions.isEmpty()) 0.0 else predictions.sumOf { it.confidence.coerceIn(0.0, 1.0) } / predictions.size
-            val directNodes = nodes.filter { !it.retrieved }
-            val directActivation = if (directNodes.isEmpty()) 0.0 else directNodes.sumOf { it.activation.coerceIn(0.0, 1.0) } / directNodes.size
-            // Presentation-only novelty proxy: active live evidence that is not yet strongly
-            // explained by expectation/prediction. This is deliberately NOT persisted or fed back
-            // into MemoryModel and must not be confused with a learned novelty variable.
-            val noveltyProxy = (directActivation * (1.0 - (0.68 * meanExpectation + 0.32 * predictionEnergy))).coerceIn(0.0, 1.0)
-            val crossmodalEnergy = if (working?.crossModalLinks.isNullOrEmpty()) 0.0 else
-                working!!.crossModalLinks.sumOf { it.confidence.coerceIn(0.0, 1.0) } / working.crossModalLinks.size
-            val weightedTierDen = nodes.sumOf { max(it.activation, it.expectation).coerceIn(0.0, 1.0) }
-            val tierDepth = if (weightedTierDen <= 1e-9) 0.0 else
-                (nodes.sumOf { it.abstractionTierIndex.coerceAtLeast(0) * max(it.activation, it.expectation).coerceIn(0.0, 1.0) } / weightedTierDen / 10.0).coerceIn(0.0, 1.0)
-            val retrievalShare = if (nodes.isEmpty()) 0.0 else nodes.count { it.retrieved }.toDouble() / nodes.size.toDouble()
-
-            val memoryEnergy = (
-                0.26 * meanActivation +
-                    0.20 * meanExpectation +
-                    0.24 * meanRelevance +
-                    0.20 * min(1.0, exchangeEnergy) +
-                    0.10 * predictionEnergy
-                ).coerceIn(0.0, 1.0)
+            // Step 44: HYPNO and Unified Audio consume the exact same normalized state vector.
+            val unified = UnifiedPresentationState.from(working)
 
             // Renderer selection deliberately reserves visual room for abstraction depth.
             // Deep structures must not disappear merely because many F/E nodes are active.
@@ -313,14 +288,14 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             pending.set(
                 Packet(
                     frame = frame,
-                    memoryEnergy = memoryEnergy.toFloat(),
-                    signedExchange = signedExchange.coerceIn(-1.0, 1.0).toFloat(),
-                    expectation = meanExpectation.coerceIn(0.0, 1.0).toFloat(),
-                    prediction = predictionEnergy.coerceIn(0.0, 1.0).toFloat(),
-                    noveltyProxy = noveltyProxy.toFloat(),
-                    crossmodal = crossmodalEnergy.toFloat(),
-                    tierDepth = tierDepth.toFloat(),
-                    retrievalShare = retrievalShare.toFloat(),
+                    memoryEnergy = unified.memoryEnergy.toFloat(),
+                    signedExchange = unified.signedExchange.toFloat(),
+                    expectation = unified.expectation.toFloat(),
+                    prediction = unified.prediction.toFloat(),
+                    noveltyProxy = unified.novelty.toFloat(),
+                    crossmodal = unified.crossmodal.toFloat(),
+                    tierDepth = unified.tierDepth.toFloat(),
+                    retrievalShare = unified.retrievalShare.toFloat(),
                     fields = fieldData,
                     fieldIds = fieldIds,
                     fieldCount = strongest.size,
