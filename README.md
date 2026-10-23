@@ -82,6 +82,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step45-knowledgelayers` | `Equinox_v06_Step45_KnowledgeLayers.zip` | 72 | 0 | `0eae9a3275899616d45659dd9f54533a9148a9868d252099dba754773c0c5bb2` |
 | `android-v06-step46-1-hypnoonlysurface` | `Equinox_v06_Step46_1_HypnoOnlySurface.zip` | 76 | 0 | `09912572fe864c19c3c2f6afdeee861f91bdccdc4a5dbb2b17a491ba4ab33b7a` |
 | `android-v06-step46-2-archiveui-stability` | `Equinox_v06_Step46_2_ArchiveUI_Stability.zip` | 77 | 0 | `7d1c27f88e4411a2dbc618bf611833e41921c4c5b17f87beebd65495f0b1f8b6` |
+| `android-v06-step46-externalknowledgeimport` | `Equinox_v06_Step46_ExternalKnowledgeImport.zip` | 75 | 0 | `bb5c412e92f58fe34fbadd9042b21bf786574cff57eeb6416ed6bfc0e924078c` |
 
 ## Security, licensing, and limitations
 

@@ -17,12 +17,13 @@ import kotlin.math.min
  * Step 33 — Fluid Hierarchy Transitions on the Unified Canvas.
  *
  * There is only one physical OpenGL surface. Camera pigment and the read-only Equinox
- * working set are two ingredients of the same renderer. Since Step 46.1 the product surface
- * is HYPNO-only and uses the generative state projection at full strength; raw camera pigment is
- * an input source, not a user-visible Reality mode. The legacy blend remains internal for renderer
- * compatibility/LAB work and is not exposed by the product UI.
+ * working set are two ingredients of the same renderer. memoryBlend is continuous:
  *
- * The renderer never writes pixels, positions or presentation state back into MemoryModel.
+ *   0.0 -> Reality dominated
+ *   0.5 -> Hybrid
+ *   1.0 -> Memory tissue only
+ *
+ * The renderer never writes pixels, positions or blend state back into MemoryModel.
  */
 enum class UnifiedPresentationMode { HYPNO, STRUCTURE }
 
@@ -108,7 +109,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
 
         @Volatile var lastRenderCostMs: Double = 0.0
         @Volatile var modeLabel: String = "HYPNO"
-        @Volatile var memoryBlend: Float = 1.0f
+        @Volatile var memoryBlend: Float = 0.35f
         @Volatile var presentationMode: UnifiedPresentationMode = UnifiedPresentationMode.HYPNO
         @Volatile var fieldBudget: Int = MAX_FIELDS
         @Volatile var linkBudget: Int = MAX_LINKS
@@ -155,7 +156,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         private var displayCrossmodal = 0f
         private var displayTierDepth = 0f
         private var displayRetrievalShare = 0f
-        private var displayBlend = 1.0f
+        private var displayBlend = 0.35f
         private var displayHypno = 1f
         private var lastAnimNanos = 0L
         private var animationActive = false
