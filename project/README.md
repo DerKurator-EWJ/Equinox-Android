@@ -34,3 +34,6 @@ Die Arbeit pro Input hängt primär von der kleinen aktiven Tail-Länge (max. 6)
 4. Wegen gleicher Application-ID aktualisiert die APK die vorhandene App, sofern derselbe Signing-Key verwendet wird.
 
 Hinweis: In der Erstellungsumgebung ist kein Android SDK installiert. Der Quellstand wurde statisch geprüft, aber hier nicht als APK kompiliert.
+
+## Step 02 fixed build note
+Fixed the Kotlin named-argument mismatch in `MemoryModel.load()`: `patternSignature()` accepts `level`, not `streamLevel`.

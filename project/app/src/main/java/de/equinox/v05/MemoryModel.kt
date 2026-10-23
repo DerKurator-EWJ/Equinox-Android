@@ -627,7 +627,7 @@ class MemoryModel(context: Context) {
                 )
                 macros[macro.id] = macro
                 val signature = patternSignature(
-                    streamLevel = macro.level - 1,
+                    level = macro.level - 1,
                     modality = macro.modality,
                     tokens = macro.tokens
                 )

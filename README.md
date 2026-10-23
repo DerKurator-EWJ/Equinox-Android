@@ -48,6 +48,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v05-step065` | `Equinox_v05_Step065.zip` | 12 | 0 | `750497cc50246f653b319adf5fc8b6e33d545fa8d838fa6336f8a935221ee0df` |
 | `android-v06-step01-coresplit` | `Equinox_v06_Step01_CoreSplit.zip` | 20 | 0 | `4240e5d6e7c15f3f414899632819da597a9d8159ad9af36ec1dd8ab045357f4c` |
 | `android-v06-step02-quantmacrolazy` | `Equinox_v06_Step02_QuantMacroLazy.zip` | 20 | 0 | `00afb69f69675a3f4fcdbc5ae71c39a09638a2f7b04ee51e1c9bc64f42916a8b` |
+| `android-v06-step02-quantmacrolazy-fixed` | `Equinox_v06_Step02_QuantMacroLazy_fixed.zip` | 20 | 0 | `235295f1b398ad824d1c5f1431fb0ed6e24fde3ca778ffc850e580a6f62255d7` |
 
 ## Security, licensing, and limitations
 
