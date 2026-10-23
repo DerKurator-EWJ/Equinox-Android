@@ -17,6 +17,8 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -61,6 +63,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraFrames: TextView
     private lateinit var cameraButton: Button
     private lateinit var cameraStopButton: Button
+    private lateinit var displayPrefsStore: DisplayPrefsStore
+    private lateinit var saveSlots: SaveSlotManager
     private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
     @Volatile private var lastConsolidationMs = 0L
 
@@ -68,6 +72,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         memory = MemoryModel(this)
         cameraExecutor = Executors.newSingleThreadExecutor()
+        displayPrefsStore = DisplayPrefsStore(this)
+        saveSlots = SaveSlotManager(this)
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
@@ -93,7 +99,7 @@ class MainActivity : ComponentActivity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 10 — 2D/3D + GEOMETRIE-GRUNDGEDÄCHTNIS", 18f, 16).apply {
+        root.addView(label("STEP 11 — SAVE / LAB / SETTINGS", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -133,6 +139,7 @@ class MainActivity : ComponentActivity() {
         root.addView(memoryStats)
 
         graphView = RelationGraphView(this)
+        graphView.setDisplayPrefs(displayPrefsStore.load())
         root.addView(graphView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             dp(420)
@@ -196,6 +203,150 @@ class MainActivity : ComponentActivity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(8) }
         )
+
+        root.addView(label("LAB — DARSTELLUNG", 17f, 18).apply {
+            setTextColor(Color.rgb(130, 220, 210))
+        })
+
+        val currentPrefs = displayPrefsStore.load()
+
+        fun colorField(labelText: String, initial: Int): Pair<TextView, EditText> {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val left = label(labelText, 14f, 0).apply {
+                setTextColor(Color.LTGRAY)
+            }
+            val input = EditText(this).apply {
+                setSingleLine(true)
+                setText(displayPrefsStore.toHex(initial))
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.GRAY)
+            }
+            row.addView(
+                left,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f)
+            )
+            row.addView(
+                input,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            root.addView(row)
+            return left to input
+        }
+
+        val bgInput = colorField("Hintergrund HEX", currentPrefs.backgroundColor).second
+        val edgeInput = colorField("Mikro-Kanten HEX", currentPrefs.audioEdgeColor).second
+        val l1Input = colorField("L1 HEX", currentPrefs.macroLevel1Color).second
+        val l2Input = colorField("L2 HEX", currentPrefs.macroLevel2Color).second
+        val l3Input = colorField("L3 HEX", currentPrefs.macroLevel3Color).second
+        val l4Input = colorField("L4 HEX", currentPrefs.macroLevel4Color).second
+
+        val glowCheck = CheckBox(this).apply {
+            text = "Glow aktiv"
+            isChecked = currentPrefs.glowEnabled
+            setTextColor(Color.WHITE)
+        }
+        root.addView(glowCheck)
+
+        val settingsStatus = label("Darstellung: geladen", 13f, 8).apply {
+            setTextColor(Color.rgb(185, 195, 210))
+        }
+        root.addView(settingsStatus)
+
+        root.addView(Button(this).apply {
+            text = "DARSTELLUNG SPEICHERN"
+            setOnClickListener {
+                val bg = displayPrefsStore.parseHexOrNull(bgInput.text.toString())
+                val edge = displayPrefsStore.parseHexOrNull(edgeInput.text.toString())
+                val l1 = displayPrefsStore.parseHexOrNull(l1Input.text.toString())
+                val l2 = displayPrefsStore.parseHexOrNull(l2Input.text.toString())
+                val l3 = displayPrefsStore.parseHexOrNull(l3Input.text.toString())
+                val l4 = displayPrefsStore.parseHexOrNull(l4Input.text.toString())
+
+                if (listOf(bg, edge, l1, l2, l3, l4).any { it == null }) {
+                    settingsStatus.text = "Fehler: HEX als #RRGGBB eingeben"
+                } else {
+                    val saved = DisplayPrefs(
+                        backgroundColor = bg!!,
+                        audioEdgeColor = edge!!,
+                        macroLevel1Color = l1!!,
+                        macroLevel2Color = l2!!,
+                        macroLevel3Color = l3!!,
+                        macroLevel4Color = l4!!,
+                        glowEnabled = glowCheck.isChecked,
+                        glowStrength = 90
+                    )
+                    displayPrefsStore.save(saved)
+                    graphView.setDisplayPrefs(saved)
+                    settingsStatus.text = "Darstellung gespeichert und angewendet"
+                }
+            }
+        }, buttonParams(8))
+
+        root.addView(label("SAVE SLOTS", 17f, 18).apply {
+            setTextColor(Color.rgb(130, 220, 210))
+        })
+
+        val slotStatus = label("3 lokale Speicherstände verfügbar", 13f, 8).apply {
+            setTextColor(Color.rgb(185, 195, 210))
+        }
+        root.addView(slotStatus)
+
+        for (slot in 1..3) {
+            val slotLabel = label(saveSlots.exportSummary(slot), 13f, 8).apply {
+                setTextColor(Color.LTGRAY)
+            }
+            root.addView(slotLabel)
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+            }
+
+            val saveButton = Button(this).apply {
+                text = "S$slot SAVE"
+                setOnClickListener {
+                    memory.saveNow()
+                    val ok = saveSlots.saveToSlot(slot)
+                    slotLabel.text = saveSlots.exportSummary(slot)
+                    slotStatus.text = if (ok) "Slot $slot gespeichert" else "Slot $slot konnte nicht gespeichert werden"
+                }
+            }
+
+            val loadButton = Button(this).apply {
+                text = "S$slot LOAD"
+                setOnClickListener {
+                    stopAudio()
+                    stopCameraLearning()
+                    val ok = saveSlots.loadFromSlot(slot)
+                    if (ok) {
+                        memory.reloadFromDisk()
+                        memoryStats.text = memoryText()
+                        refreshGraph()
+                        slotStatus.text = "Slot $slot geladen"
+                    } else {
+                        slotStatus.text = "Slot $slot ist leer"
+                    }
+                }
+            }
+
+            val deleteButton = Button(this).apply {
+                text = "S$slot DEL"
+                setOnClickListener {
+                    val ok = saveSlots.deleteSlot(slot)
+                    slotLabel.text = saveSlots.exportSummary(slot)
+                    slotStatus.text = if (ok) "Slot $slot gelöscht" else "Slot $slot konnte nicht gelöscht werden"
+                }
+            }
+
+            row.addView(saveButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(loadButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(deleteButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            root.addView(row)
+        }
 
         root.addView(label(
             "2D und 3D zeigen exakt dasselbe relationale Gedächtnis. Die räumliche Tiefe existiert nur im Renderer. Höhere Knoten bekommen Formvorschläge aus einem kleinen mathematischen Geometrie-Grundgedächtnis; diese Formen sind Vorlagen, keine fundamentalen Raumobjekte.",
@@ -294,7 +445,7 @@ class MainActivity : ComponentActivity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Step 10 trennt Kern und Darstellung noch schärfer: MemoryModel speichert weiterhin keine x/y/z-Koordinaten. 2D und 3D sind zwei Projektionen desselben Relationsgraphen. Ein Formel-/Template-Satz für klassische 2D- und 3D-Geometrien steht dem Renderer als Grundgedächtnis zur Verfügung.",
+            "Step 11 ergänzt drei lokale Speicherstände sowie ein Lab für Darstellungseinstellungen. Die Speicherstände kopieren ausschließlich den internen Equinox-Gedächtniszustand. UI-Farben/Glow liegen separat in SharedPreferences; Kernlogik und Renderer bleiben getrennt.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
@@ -323,7 +474,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
-        permissions: Array<out String>,
+        permissions: Array<String>,
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)

@@ -708,6 +708,32 @@ class MemoryModel(context: Context) {
     }
 
     @Synchronized
+    fun reloadFromDisk() {
+        persistent.clear()
+        candidates.clear()
+        relations.clear()
+        macros.clear()
+        macroRelations.clear()
+        sequences.clear()
+        sequenceIndex.clear()
+        activeSequenceSuffixes.clear()
+        previousId = null
+        latestAudioId = null
+        previousVisualId = null
+        previousByLevel.clear()
+        observations = 0L
+        nextMacroId = MACRO_ID_BASE
+        nextSequenceId = SEQUENCE_ID_BASE
+        macroFrozen = false
+        load()
+    }
+
+    @Synchronized
+    fun saveNow() {
+        save()
+    }
+
+    @Synchronized
     fun reset() {
         persistent.clear()
         candidates.clear()

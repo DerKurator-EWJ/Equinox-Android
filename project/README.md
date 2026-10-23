@@ -1,59 +1,52 @@
-# Equinox v0.5 — Step 10
+# Equinox v0.5 — Step 11
 
-Step 10 adds a switchable 2D/3D renderer and a small formula-only geometric ground memory.
+Step 11 adds save slots, a small Lab panel, and persistent display settings.
 
 ## New
-- 2D / 3D switch directly below the graph.
-- The relational MemoryModel remains unchanged with respect to space:
-  - no persistent x
-  - no persistent y
-  - no persistent z
-- 3D depth is generated only by RelationGraphView from graph metadata and a deterministic renderer seed.
-- Same graph, same codes, same relations in both modes.
-- Perspective projection, depth ordering and depth-scaled node/edge rendering in 3D.
-- GeometryGroundMemory with reusable template definitions.
+- 3 local Equinox memory save slots.
+- SAVE / LOAD / DELETE per slot.
+- Loading a slot stops audio and camera first, then reloads the selected memory state.
+- Save slots contain only the Equinox memory JSON state.
+- Display settings are stored separately in SharedPreferences.
 
-### 2D templates
-- line
-- arc
-- triangle
-- quadrilateral
-- pentagon
-- hexagon
-- circle
-- ellipse
+## Lab / display settings
+Editable HEX colors for:
+- background
+- micro relation edges
+- L1
+- L2
+- L3
+- L4
 
-### 3D templates
-- tetrahedron
-- cube
-- octahedron
-- prism
-- pyramid
-- sphere
-- cylinder
-- cone
-- torus
+Also:
+- glow toggle
 
-Higher abstraction nodes receive deterministic display suggestions from the geometry grammar based on member count and whether the node came from a sequence.
-
-## Architectural rule
-The geometry library is NOT a hidden reintroduction of fundamental Euclidean space.
-It is a renderer / pattern-language layer.
-
-Core:
-audio + vision -> symbols -> relations -> sequences -> recursive abstraction
-
-Display:
-relational snapshot -> layout -> optional 2D/3D projection -> geometric glyph
+The graph updates immediately after saving display settings.
 
 ## Preserved
-- Step 09 camera learning
-- audio/vision cross-modal relations
+- Step 10 2D/3D renderer
+- geometry ground memory
+- Step 09 camera + multimodal relations
 - Step 08 sequence compression
 - Step 07 recursive abstraction
 - sonification
 - consolidation
-- existing persistent memory migration
+- existing live memory migration
+
+## Architecture
+Core memory remains separate from display preferences.
+
+Memory:
+symbols -> relations -> sequences -> recursive abstractions
+
+Lab:
+renderer colors / glow only
+
+Save slots:
+copies of the live Equinox memory file
+
+## Important
+This step still uses internal app storage. External export/import and signed-release packaging remain separate finalization tasks.
 
 ## Install
 Open as a fresh Android Studio project, build the APK and install it over the same

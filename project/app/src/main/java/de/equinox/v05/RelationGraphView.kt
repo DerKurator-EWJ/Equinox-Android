@@ -29,6 +29,7 @@ class RelationGraphView(context: Context) : View(context) {
     private var visibleEdges: List<GraphEdge> = emptyList()
     private val positions = mutableMapOf<Int, P>()
     private val geometry = GeometryGroundMemory.standard()
+    private var displayPrefs = DisplayPrefsStore(context).load()
 
     private var displayMode = GraphDisplayMode.TWO_D
     private var yaw = -0.62f
@@ -67,6 +68,12 @@ class RelationGraphView(context: Context) : View(context) {
     }
 
     fun getDisplayMode(): GraphDisplayMode = displayMode
+
+    fun setDisplayPrefs(prefs: DisplayPrefs) {
+        displayPrefs = prefs
+        invalidate()
+    }
+
 
     fun setSnapshot(newSnapshot: GraphSnapshot) {
         snapshot = newSnapshot
@@ -193,7 +200,7 @@ class RelationGraphView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        canvas.drawColor(Color.rgb(8, 10, 14))
+        canvas.drawColor(displayPrefs.backgroundColor)
 
         val pad = 30f
         val w = max(1f, width.toFloat() - pad * 2)
@@ -392,7 +399,7 @@ class RelationGraphView(context: Context) : View(context) {
                 val halo = Paint(nodePaint).apply {
                     style = Paint.Style.STROKE
                     strokeWidth = 2f * p.scale
-                    alpha = 95
+                    alpha = if (displayPrefs.glowEnabled) displayPrefs.glowStrength.coerceIn(0, 255) else 0
                 }
                 canvas.drawRect(p.x - r - 4f, p.y - r - 4f, p.x + r + 4f, p.y + r + 4f, halo)
             } else {
@@ -400,7 +407,7 @@ class RelationGraphView(context: Context) : View(context) {
                 val halo = Paint(nodePaint).apply {
                     style = Paint.Style.STROKE
                     strokeWidth = 2f * p.scale
-                    alpha = 80
+                    alpha = if (displayPrefs.glowEnabled) displayPrefs.glowStrength.coerceIn(0, 255) else 0
                 }
                 canvas.drawCircle(p.x, p.y, baseRadius + 4f * p.scale, halo)
             }
@@ -647,16 +654,21 @@ class RelationGraphView(context: Context) : View(context) {
             edge.abstractionLevel == 3 -> Color.argb(alpha, 120, 110, 255)
             edge.abstractionLevel == 2 -> Color.argb(alpha, 255, 95, 180)
             edge.abstractionLevel == 1 -> Color.argb(alpha, 255, 180, 70)
-            else -> Color.argb(alpha, 70, 220, 205)
+            else -> Color.argb(
+                alpha,
+                Color.red(displayPrefs.audioEdgeColor),
+                Color.green(displayPrefs.audioEdgeColor),
+                Color.blue(displayPrefs.audioEdgeColor)
+            )
         }
     }
 
     private fun levelColor(level: Int): Int {
         return when (level) {
-            1 -> Color.rgb(245, 155, 45)
-            2 -> Color.rgb(235, 75, 155)
-            3 -> Color.rgb(105, 95, 245)
-            else -> Color.rgb(210, 85, 245)
+            1 -> displayPrefs.macroLevel1Color
+            2 -> displayPrefs.macroLevel2Color
+            3 -> displayPrefs.macroLevel3Color
+            else -> displayPrefs.macroLevel4Color
         }
     }
 
