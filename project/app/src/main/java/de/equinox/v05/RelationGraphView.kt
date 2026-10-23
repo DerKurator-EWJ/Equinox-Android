@@ -253,13 +253,23 @@ class RelationGraphView(context: Context) : View(context) {
             } else {
                 val radius = baseRadius + 8f + node.abstractionLevel * 4f
                 nodePaint.color = levelColor(node.abstractionLevel, node.representativeHz)
-                drawMacroGlyph(
-                    canvas = canvas,
-                    x = x,
-                    y = y,
-                    radius = radius,
-                    level = node.abstractionLevel
-                )
+                if (node.kind == "sequence") {
+                    drawSequenceGlyph(
+                        canvas = canvas,
+                        x = x,
+                        y = y,
+                        radius = radius,
+                        level = node.abstractionLevel
+                    )
+                } else {
+                    drawMacroGlyph(
+                        canvas = canvas,
+                        x = x,
+                        y = y,
+                        radius = radius,
+                        level = node.abstractionLevel
+                    )
+                }
             }
         }
 
@@ -281,6 +291,48 @@ class RelationGraphView(context: Context) : View(context) {
             height - 18f,
             infoPaint
         )
+    }
+
+    private fun drawSequenceGlyph(
+        canvas: Canvas,
+        x: Float,
+        y: Float,
+        radius: Float,
+        level: Int
+    ) {
+        val path = Path()
+        val halfW = radius * 1.35f
+        val halfH = radius * 0.72f
+
+        path.moveTo(x - halfW, y)
+        path.cubicTo(
+            x - radius * 0.70f, y - halfH,
+            x + radius * 0.70f, y - halfH,
+            x + halfW, y
+        )
+        path.cubicTo(
+            x + radius * 0.70f, y + halfH,
+            x - radius * 0.70f, y + halfH,
+            x - halfW, y
+        )
+        path.close()
+
+        canvas.drawPath(path, nodePaint)
+
+        outlinePaint.alpha = (220 - level * 18).coerceAtLeast(110)
+        outlinePaint.strokeWidth = 2.8f + level * 0.5f
+        canvas.drawPath(path, outlinePaint)
+
+        val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeWidth = 2f
+            color = Color.argb(175, 255, 255, 255)
+        }
+
+        canvas.drawLine(x - radius * 0.55f, y, x + radius * 0.55f, y, innerPaint)
+        canvas.drawCircle(x - radius * 0.42f, y, radius * 0.11f, innerPaint)
+        canvas.drawCircle(x, y, radius * 0.11f, innerPaint)
+        canvas.drawCircle(x + radius * 0.42f, y, radius * 0.11f, innerPaint)
     }
 
     private fun drawMacroGlyph(

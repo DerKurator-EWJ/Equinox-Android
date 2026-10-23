@@ -7,7 +7,10 @@ import java.io.File
 import kotlin.math.max
 
 private const val MACRO_ID_BASE = 1_000_000
+private const val SEQUENCE_ID_BASE = 1_500_000_000
 private const val MAX_ABSTRACTION_LEVEL = 4
+private const val MAX_SEQUENCE_DEPTH = 6
+private const val MAX_SEQUENCE_NODES = 12_000
 
 data class MemoryStats(
     val persistentCodes: Int,
@@ -19,7 +22,11 @@ data class MemoryStats(
     val macroRelations: Int,
     val macroFrozen: Boolean,
     val maxAbstractionLevel: Int,
-    val levelCounts: Map<Int, Int>
+    val levelCounts: Map<Int, Int>,
+    val sequenceCodes: Int,
+    val promotedSequences: Int,
+    val strongestSequenceWeight: Long,
+    val longestSequenceLength: Int
 )
 
 data class GraphNode(
@@ -27,7 +34,8 @@ data class GraphNode(
     val weight: Long,
     val representativeHz: Double,
     val abstractionLevel: Int = 0,
-    val memberCount: Int = 1
+    val memberCount: Int = 1,
+    val kind: String = "micro"
 ) {
     val isMacro: Boolean get() = abstractionLevel > 0
 }
@@ -69,21 +77,35 @@ data class SonificationSnapshot(
 data class ConsolidationResult(
     val microPromoted: Int,
     val macroPromoted: Int,
+    val sequencePromoted: Int,
     val highestNewLevel: Int
 )
 
 class MemoryModel(context: Context) {
     private data class Code(var weight: Long, val representativeHz: Double)
     private data class Candidate(var hits: Int, var hzSum: Double)
+
     private data class MacroCode(
         val id: Int,
         val level: Int,
         val members: MutableSet<Int>,
         var weight: Long,
-        var representativeHz: Double
+        var representativeHz: Double,
+        val kind: String = "relation",
+        val sourceSequenceId: Int? = null
     )
 
-    // Same file name on purpose: Step 07 migrates the earlier Step 03-06.5 memory.
+    private data class SequenceNode(
+        val id: Int,
+        val streamLevel: Int,
+        val parentSequenceId: Int,
+        val nextTokenId: Int,
+        val length: Int,
+        var weight: Long,
+        var promotedMacroId: Int? = null
+    )
+
+    // Same file name deliberately: Step 08 migrates the existing Equinox memory.
     private val file = File(context.filesDir, "equinox_step03_memory.json")
 
     private val persistent = mutableMapOf<Int, Code>()
@@ -93,7 +115,12 @@ class MemoryModel(context: Context) {
     private val macros = mutableMapOf<Int, MacroCode>()
     private val macroRelations = mutableMapOf<Long, Long>()
 
+    private val sequences = mutableMapOf<Int, SequenceNode>()
+    private val sequenceIndex = mutableMapOf<String, Int>()
+    private val activeSequenceSuffixes = mutableMapOf<Int, MutableList<Int>>()
+
     private var nextMacroId = MACRO_ID_BASE
+    private var nextSequenceId = SEQUENCE_ID_BASE
     private var macroFrozen = false
     private var previousId: Int? = null
     private val previousByLevel = mutableMapOf<Int, Int>()
@@ -108,6 +135,7 @@ class MemoryModel(context: Context) {
         val known = persistent[id]
         if (known != null) {
             known.weight++
+            feedSequenceToken(streamLevel = 0, tokenId = id)
         } else {
             val c = candidates.getOrPut(id) { Candidate(0, 0.0) }
             c.hits++
@@ -122,32 +150,118 @@ class MemoryModel(context: Context) {
         }
         previousId = id
 
-        // Activate one best matching macro at each abstraction level.
+        // Relation-derived macro activations.
         var activeChildId = id
         for (level in 1..MAX_ABSTRACTION_LEVEL) {
             val active = macros.values
                 .asSequence()
-                .filter { it.level == level && activeChildId in it.members }
+                .filter {
+                    it.level == level &&
+                    it.kind == "relation" &&
+                    activeChildId in it.members
+                }
                 .maxByOrNull { it.weight }
                 ?: break
 
-            active.weight++
-
-            previousByLevel[level]?.let { prev ->
-                if (prev != active.id) {
-                    val key = pairKey(prev, active.id)
-                    macroRelations[key] = (macroRelations[key] ?: 0L) + 1L
-                }
-            }
-            previousByLevel[level] = active.id
+            recordMacroActivation(level, active.id)
             activeChildId = active.id
         }
+    }
+
+    /**
+     * Interns the current token and all active suffixes up to MAX_SEQUENCE_DEPTH.
+     * A repeated sequence is represented by one SequenceNode whose weight increases.
+     */
+    private fun feedSequenceToken(streamLevel: Int, tokenId: Int) {
+        if (streamLevel >= MAX_ABSTRACTION_LEVEL) return
+
+        val previousSuffixes = activeSequenceSuffixes[streamLevel]?.toList().orEmpty()
+        val newSuffixes = mutableListOf<Int>()
+
+        val single = getOrCreateSequence(
+            streamLevel = streamLevel,
+            parentSequenceId = 0,
+            tokenId = tokenId,
+            length = 1
+        )
+        if (single != null) {
+            single.weight++
+            newSuffixes += single.id
+            single.promotedMacroId?.let { recordMacroActivation(streamLevel + 1, it) }
+        }
+
+        for (parentId in previousSuffixes) {
+            val parent = sequences[parentId] ?: continue
+            if (parent.length >= MAX_SEQUENCE_DEPTH) continue
+
+            val seq = getOrCreateSequence(
+                streamLevel = streamLevel,
+                parentSequenceId = parent.id,
+                tokenId = tokenId,
+                length = parent.length + 1
+            ) ?: continue
+
+            seq.weight++
+            newSuffixes += seq.id
+
+            seq.promotedMacroId?.let { promoted ->
+                recordMacroActivation(streamLevel + 1, promoted)
+            }
+        }
+
+        activeSequenceSuffixes[streamLevel] = newSuffixes
+            .distinct()
+            .sortedByDescending { sequences[it]?.length ?: 0 }
+            .take(MAX_SEQUENCE_DEPTH)
+            .toMutableList()
+    }
+
+    private fun getOrCreateSequence(
+        streamLevel: Int,
+        parentSequenceId: Int,
+        tokenId: Int,
+        length: Int
+    ): SequenceNode? {
+        val key = sequenceKey(streamLevel, parentSequenceId, tokenId)
+        sequenceIndex[key]?.let { return sequences[it] }
+
+        if (sequences.size >= MAX_SEQUENCE_NODES) return null
+
+        val node = SequenceNode(
+            id = nextSequenceId++,
+            streamLevel = streamLevel,
+            parentSequenceId = parentSequenceId,
+            nextTokenId = tokenId,
+            length = length,
+            weight = 0L
+        )
+        sequences[node.id] = node
+        sequenceIndex[key] = node.id
+        return node
+    }
+
+    private fun recordMacroActivation(level: Int, macroId: Int) {
+        if (level !in 1..MAX_ABSTRACTION_LEVEL) return
+        val macro = macros[macroId] ?: return
+        macro.weight++
+
+        previousByLevel[level]?.let { prev ->
+            if (prev != macroId) {
+                val key = pairKey(prev, macroId)
+                macroRelations[key] = (macroRelations[key] ?: 0L) + 1L
+            }
+        }
+        previousByLevel[level] = macroId
+
+        // The activated macro becomes a token in the sequence stream of its own level.
+        feedSequenceToken(streamLevel = level, tokenId = macroId)
     }
 
     @Synchronized
     fun consolidate(
         minHits: Int = 3,
-        baseRelationThreshold: Long = 10L
+        baseRelationThreshold: Long = 10L,
+        minSequenceHits: Long = 6L
     ): ConsolidationResult {
         var promotedMicro = 0
 
@@ -170,14 +284,25 @@ class MemoryModel(context: Context) {
         }
 
         var promotedMacro = 0
+        var sequencePromoted = 0
         var highestNewLevel = 0
 
         if (!macroFrozen) {
+            sequencePromoted = promoteStableSequences(minSequenceHits)
+            promotedMacro += sequencePromoted
+
+            if (sequencePromoted > 0) {
+                highestNewLevel = macros.values
+                    .filter { it.kind == "sequence" }
+                    .maxOfOrNull { it.level }
+                    ?: highestNewLevel
+            }
+
             for (targetLevel in 1..MAX_ABSTRACTION_LEVEL) {
-                val created = createMacrosForLevel(targetLevel, baseRelationThreshold)
+                val created = createRelationMacrosForLevel(targetLevel, baseRelationThreshold)
                 if (created > 0) {
                     promotedMacro += created
-                    highestNewLevel = targetLevel
+                    highestNewLevel = max(highestNewLevel, targetLevel)
                 }
             }
         }
@@ -189,11 +314,69 @@ class MemoryModel(context: Context) {
         return ConsolidationResult(
             microPromoted = promotedMicro,
             macroPromoted = promotedMacro,
+            sequencePromoted = sequencePromoted,
             highestNewLevel = highestNewLevel
         )
     }
 
-    private fun createMacrosForLevel(targetLevel: Int, baseThreshold: Long): Int {
+    private fun promoteStableSequences(minSequenceHits: Long): Int {
+        val eligible = sequences.values
+            .asSequence()
+            .filter {
+                it.length >= 2 &&
+                it.weight >= minSequenceHits &&
+                it.promotedMacroId == null &&
+                it.streamLevel < MAX_ABSTRACTION_LEVEL
+            }
+            .sortedWith(
+                compareByDescending<SequenceNode> { it.weight }
+                    .thenByDescending { it.length }
+            )
+            .take(16)
+            .toList()
+
+        var created = 0
+
+        for (seq in eligible) {
+            val orderedTokens = resolveSequenceTokens(seq.id)
+            if (orderedTokens.size < 2) continue
+
+            val hzValues = orderedTokens.mapNotNull { representativeHzOf(it) }
+            if (hzValues.isEmpty()) continue
+
+            val macro = MacroCode(
+                id = nextMacroId++,
+                level = seq.streamLevel + 1,
+                members = orderedTokens.toMutableSet(),
+                weight = seq.weight,
+                representativeHz = hzValues.average(),
+                kind = "sequence",
+                sourceSequenceId = seq.id
+            )
+            macros[macro.id] = macro
+            seq.promotedMacroId = macro.id
+            created++
+        }
+
+        return created
+    }
+
+    private fun resolveSequenceTokens(sequenceId: Int): List<Int> {
+        val reversed = mutableListOf<Int>()
+        var currentId = sequenceId
+        var guard = 0
+
+        while (currentId != 0 && guard < MAX_SEQUENCE_DEPTH + 2) {
+            val node = sequences[currentId] ?: break
+            reversed += node.nextTokenId
+            currentId = node.parentSequenceId
+            guard++
+        }
+
+        return reversed.asReversed()
+    }
+
+    private fun createRelationMacrosForLevel(targetLevel: Int, baseThreshold: Long): Int {
         val sourceLevel = targetLevel - 1
         val threshold = baseThreshold + (sourceLevel * 4L)
 
@@ -220,7 +403,7 @@ class MemoryModel(context: Context) {
         var created = 0
 
         for ((a, b, weight) in candidatesForMacro) {
-            if (macroForPairAtLevel(targetLevel, a, b) != null) continue
+            if (relationMacroForPairAtLevel(targetLevel, a, b) != null) continue
 
             val hzA = representativeHzOf(a) ?: continue
             val hzB = representativeHzOf(b) ?: continue
@@ -234,7 +417,8 @@ class MemoryModel(context: Context) {
                 level = targetLevel,
                 members = mutableSetOf(a, b),
                 weight = weight,
-                representativeHz = hz
+                representativeHz = hz,
+                kind = "relation"
             )
             macros[macro.id] = macro
             created++
@@ -243,9 +427,13 @@ class MemoryModel(context: Context) {
         return created
     }
 
-    private fun macroForPairAtLevel(level: Int, a: Int, b: Int): MacroCode? =
+    private fun relationMacroForPairAtLevel(level: Int, a: Int, b: Int): MacroCode? =
         macros.values.firstOrNull {
-            it.level == level && it.members.size == 2 && a in it.members && b in it.members
+            it.level == level &&
+            it.kind == "relation" &&
+            it.members.size == 2 &&
+            a in it.members &&
+            b in it.members
         }
 
     private fun representativeHzOf(id: Int): Double? =
@@ -255,9 +443,15 @@ class MemoryModel(context: Context) {
         persistent[id]?.weight ?: macros[id]?.weight ?: 0L
 
     private fun leafHzOf(id: Int, depth: Int = 0): List<Double> {
-        if (depth > MAX_ABSTRACTION_LEVEL + 1) return emptyList()
+        if (depth > MAX_ABSTRACTION_LEVEL + 2) return emptyList()
         persistent[id]?.let { return listOf(it.representativeHz) }
         val macro = macros[id] ?: return emptyList()
+
+        if (macro.kind == "sequence" && macro.sourceSequenceId != null) {
+            return resolveSequenceTokens(macro.sourceSequenceId)
+                .flatMap { leafHzOf(it, depth + 1) }
+        }
+
         return macro.members.flatMap { leafHzOf(it, depth + 1) }
     }
 
@@ -305,7 +499,8 @@ class MemoryModel(context: Context) {
                     weight = it.weight,
                     representativeHz = it.representativeHz,
                     abstractionLevel = 0,
-                    memberCount = 1
+                    memberCount = 1,
+                    kind = "micro"
                 )
             }
         }
@@ -316,7 +511,12 @@ class MemoryModel(context: Context) {
                 weight = m.weight,
                 representativeHz = m.representativeHz,
                 abstractionLevel = m.level,
-                memberCount = m.members.size
+                memberCount = if (m.kind == "sequence" && m.sourceSequenceId != null) {
+                    resolveSequenceTokens(m.sourceSequenceId).size
+                } else {
+                    m.members.size
+                },
+                kind = m.kind
             )
         }
 
@@ -333,7 +533,13 @@ class MemoryModel(context: Context) {
             .forEach { edges += it }
 
         selectedMacros.forEach { m ->
-            m.members.filter { it in visible }.forEach { member ->
+            val memberIds = if (m.kind == "sequence" && m.sourceSequenceId != null) {
+                resolveSequenceTokens(m.sourceSequenceId).toSet()
+            } else {
+                m.members
+            }
+
+            memberIds.filter { it in visible }.forEach { member ->
                 edges += GraphEdge(
                     fromId = member,
                     toId = m.id,
@@ -413,7 +619,13 @@ class MemoryModel(context: Context) {
             macroRelations = macroRelations.size,
             macroFrozen = macroFrozen,
             maxAbstractionLevel = macros.values.maxOfOrNull { it.level } ?: 0,
-            levelCounts = levelCounts
+            levelCounts = levelCounts,
+            sequenceCodes = sequences.size,
+            promotedSequences = sequences.values.count { it.promotedMacroId != null },
+            strongestSequenceWeight = sequences.values
+                .filter { it.length >= 2 }
+                .maxOfOrNull { it.weight } ?: 0L,
+            longestSequenceLength = sequences.values.maxOfOrNull { it.length } ?: 0
         )
     }
 
@@ -424,10 +636,14 @@ class MemoryModel(context: Context) {
         relations.clear()
         macros.clear()
         macroRelations.clear()
+        sequences.clear()
+        sequenceIndex.clear()
+        activeSequenceSuffixes.clear()
         previousId = null
         previousByLevel.clear()
         observations = 0L
         nextMacroId = MACRO_ID_BASE
+        nextSequenceId = SEQUENCE_ID_BASE
         macroFrozen = false
         if (file.exists()) file.delete()
     }
@@ -437,6 +653,9 @@ class MemoryModel(context: Context) {
 
     private fun keyFrom(key: Long): Int = (key shr 32).toInt()
     private fun keyTo(key: Long): Int = key.toInt()
+
+    private fun sequenceKey(streamLevel: Int, parentSequenceId: Int, tokenId: Int): String =
+        "$streamLevel|$parentSequenceId|$tokenId"
 
     private fun pruneRelations() {
         if (relations.size <= 4096) return
@@ -455,9 +674,10 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-            root.put("formatVersion", 7)
+            root.put("formatVersion", 8)
             root.put("observations", observations)
             root.put("nextMacroId", nextMacroId)
+            root.put("nextSequenceId", nextSequenceId)
             root.put("macroFrozen", macroFrozen)
 
             val codes = JSONArray()
@@ -488,6 +708,8 @@ class MemoryModel(context: Context) {
                         .put("weight", m.weight)
                         .put("hz", m.representativeHz)
                         .put("members", members)
+                        .put("kind", m.kind)
+                        .put("sourceSequenceId", m.sourceSequenceId ?: JSONObject.NULL)
                 )
             }
             root.put("macros", macroArray)
@@ -497,6 +719,21 @@ class MemoryModel(context: Context) {
                 macroEdgeArray.put(JSONObject().put("key", key).put("weight", weight))
             }
             root.put("macroRelations", macroEdgeArray)
+
+            val sequenceArray = JSONArray()
+            sequences.values.forEach { s ->
+                sequenceArray.put(
+                    JSONObject()
+                        .put("id", s.id)
+                        .put("streamLevel", s.streamLevel)
+                        .put("parentSequenceId", s.parentSequenceId)
+                        .put("nextTokenId", s.nextTokenId)
+                        .put("length", s.length)
+                        .put("weight", s.weight)
+                        .put("promotedMacroId", s.promotedMacroId ?: JSONObject.NULL)
+                )
+            }
+            root.put("sequences", sequenceArray)
 
             file.writeText(root.toString())
         } catch (_: Exception) {
@@ -510,6 +747,7 @@ class MemoryModel(context: Context) {
             val root = JSONObject(file.readText())
             observations = root.optLong("observations", 0L)
             nextMacroId = root.optInt("nextMacroId", MACRO_ID_BASE)
+            nextSequenceId = root.optInt("nextSequenceId", SEQUENCE_ID_BASE)
             macroFrozen = root.optBoolean("macroFrozen", false)
 
             val codes = root.optJSONArray("codes") ?: JSONArray()
@@ -537,14 +775,17 @@ class MemoryModel(context: Context) {
                 }
 
                 val id = o.getInt("id")
-                // Migration: old Step 05/06/06.5 macros did not store "level"; they become level 1.
                 val level = o.optInt("level", 1).coerceIn(1, MAX_ABSTRACTION_LEVEL)
+                val sourceSequenceId = if (o.isNull("sourceSequenceId")) null else o.optInt("sourceSequenceId")
+
                 macros[id] = MacroCode(
                     id = id,
                     level = level,
                     members = members,
                     weight = o.getLong("weight"),
-                    representativeHz = o.getDouble("hz")
+                    representativeHz = o.getDouble("hz"),
+                    kind = o.optString("kind", "relation"),
+                    sourceSequenceId = sourceSequenceId
                 )
                 nextMacroId = max(nextMacroId, id + 1)
             }
@@ -553,6 +794,24 @@ class MemoryModel(context: Context) {
             for (i in 0 until macroEdgeArray.length()) {
                 val o = macroEdgeArray.getJSONObject(i)
                 macroRelations[o.getLong("key")] = o.getLong("weight")
+            }
+
+            val sequenceArray = root.optJSONArray("sequences") ?: JSONArray()
+            for (i in 0 until sequenceArray.length()) {
+                val o = sequenceArray.getJSONObject(i)
+                val promoted = if (o.isNull("promotedMacroId")) null else o.optInt("promotedMacroId")
+                val node = SequenceNode(
+                    id = o.getInt("id"),
+                    streamLevel = o.optInt("streamLevel", 0),
+                    parentSequenceId = o.optInt("parentSequenceId", 0),
+                    nextTokenId = o.getInt("nextTokenId"),
+                    length = o.optInt("length", 1),
+                    weight = o.optLong("weight", 0L),
+                    promotedMacroId = promoted
+                )
+                sequences[node.id] = node
+                sequenceIndex[sequenceKey(node.streamLevel, node.parentSequenceId, node.nextTokenId)] = node.id
+                nextSequenceId = max(nextSequenceId, node.id + 1)
             }
         } catch (_: Exception) {
         }

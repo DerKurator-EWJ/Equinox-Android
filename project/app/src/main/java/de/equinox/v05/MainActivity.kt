@@ -77,7 +77,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 07 — RECURSIVE ABSTRACTION", 18f, 16).apply {
+        root.addView(label("STEP 08 — SEQUENZKOMPRESSION", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -103,7 +103,7 @@ class MainActivity : Activity() {
         refreshGraph()
 
         root.addView(label(
-            "Mikro = Kreis · L1 orange · L2 pink · L3 violett · L4 magenta · höhere Ebenen entstehen aus stabilen Relationen der Ebene darunter",
+            "Mikro = Kreis · Relationsmakros = organische Glyphen · Sequenzmakros = spindelförmige Kettenglyphen · wiederkehrende Reihenfolgen werden als kurze interne Codes gespeichert",
             12f,
             12
         ).apply { setTextColor(Color.LTGRAY) })
@@ -199,7 +199,7 @@ class MainActivity : Activity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Sonifikation liest das persistente Gedächtnis einschließlich höherer Abstraktionsebenen. Mikro = Töne; höhere Knoten = Akkorde aus ihren rekursiv aufgelösten Mikrofrequenzen. Das Mikrofon bleibt während der Ausgabe gestoppt.",
+            "Step 08 merkt sich jetzt nicht nur Gleichzeitigkeit/Übergänge, sondern wiederkehrende Reihenfolgen bis Länge 6. Eine oft wiederholte Kette erhält einen kurzen internen Sequenzcode und kann als Makro der nächsten Ebene weiterverwendet werden.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
@@ -370,6 +370,7 @@ class MainActivity : Activity() {
         return "Mikro: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
             "Abstraktion: $levelText | höchste Ebene: L${s.maxAbstractionLevel} | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
             "Makro gesamt: ${s.macroCodes} | Makrorelationen: ${s.macroRelations}\n" +
+            "Sequenzen: ${s.sequenceCodes} Codes | ${s.promotedSequences} verdichtet | max Länge ${s.longestSequenceLength} | stärkstes Gewicht ${s.strongestSequenceWeight}\n" +
             "Beobachtungen: ${s.observations} | stärkstes Mikrogewicht: ${s.strongestWeight}"
     }
 
@@ -379,7 +380,7 @@ class MainActivity : Activity() {
         } else {
             ""
         }
-        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten$levelPart"
+        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten · davon ${result.sequencePromoted} Sequenzen$levelPart"
     }
 
     private fun stopAudio() {
