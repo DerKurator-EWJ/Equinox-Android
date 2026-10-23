@@ -115,6 +115,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var saveSlots: SaveSlotManager
     private lateinit var diagnostics: DiagnosticsManager
     private lateinit var diagnosticsStatus: TextView
+    private lateinit var hardTest: LongTermHardTestManager
+    private lateinit var hardTestStatus: TextView
     private lateinit var audioEncoderModeStore: AudioEncoderModeStore
     private var audioEncoderMode: AudioEncoderMode = AudioEncoderMode.FFT_FREQUENCY
     private lateinit var audioEncoderStatus: TextView
@@ -194,6 +196,14 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val hardTestLoop = object : Runnable {
+        override fun run() {
+            if (!::hardTest.isInitialized || !hardTest.isRunning()) return
+            captureHardTestSample(saveMemory = true)
+            uiHandler.postDelayed(this, LongTermHardTestManager.DEFAULT_INTERVAL_MS)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -203,6 +213,7 @@ class MainActivity : ComponentActivity() {
         displayPrefsStore = DisplayPrefsStore(this)
         saveSlots = SaveSlotManager(this)
         diagnostics = DiagnosticsManager(this)
+        hardTest = LongTermHardTestManager(this)
         audioEncoderModeStore = AudioEncoderModeStore(this)
         audioEncoderMode = audioEncoderModeStore.load()
         encoderBenchmark = EncoderBenchmarkManager(this)
@@ -885,6 +896,62 @@ class MainActivity : ComponentActivity() {
         labPage.addView(diagRow)
         refreshDiagnosticsStatus()
 
+        labPage.addView(label("LONG-TERM HARD TEST", 16f, 18).apply { setTextColor(Color.rgb(245, 190, 95)) })
+        labPage.addView(label(
+            "Misst nur. Der Test verändert keine Lernregeln. Automatisches Sample alle 5 Minuten; für verwertbare Trends sollte die App über längere Zeit mit ähnlichen Alltagsbedingungen laufen.",
+            12f,
+            4
+        ).apply { setTextColor(Color.LTGRAY) })
+        hardTestStatus = label("Hard Test: noch keine Daten", 12f, 6).apply { setTextColor(Color.rgb(225, 215, 175)) }
+        labPage.addView(hardTestStatus)
+        val hardTestRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        hardTestRow1.addView(Button(this).apply {
+            text = "TEST START 5MIN"
+            setOnClickListener {
+                hardTest.startNewSession()
+                captureHardTestSample(saveMemory = true)
+                uiHandler.removeCallbacks(hardTestLoop)
+                uiHandler.postDelayed(hardTestLoop, LongTermHardTestManager.DEFAULT_INTERVAL_MS)
+                refreshHardTestStatus()
+            }
+        }, weightedButtonParams())
+        hardTestRow1.addView(Button(this).apply {
+            text = "SAMPLE"
+            setOnClickListener { captureHardTestSample(saveMemory = true) }
+        }, weightedButtonParams())
+        hardTestRow1.addView(Button(this).apply {
+            text = "STOP"
+            setOnClickListener {
+                hardTest.stop()
+                uiHandler.removeCallbacks(hardTestLoop)
+                refreshHardTestStatus()
+            }
+        }, weightedButtonParams())
+        labPage.addView(hardTestRow1)
+        val hardTestRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        hardTestRow2.addView(Button(this).apply {
+            text = "CSV"
+            setOnClickListener {
+                val f = hardTest.writeCsvExport()
+                refreshHardTestStatus()
+                hardTestStatus.text = hardTestStatus.text.toString() + "\nCSV intern: ${f.name} (${f.length()} Bytes)"
+            }
+        }, weightedButtonParams())
+        hardTestRow2.addView(Button(this).apply {
+            text = "RESET"
+            setOnClickListener {
+                hardTest.reset()
+                uiHandler.removeCallbacks(hardTestLoop)
+                refreshHardTestStatus()
+            }
+        }, weightedButtonParams())
+        labPage.addView(hardTestRow2)
+        refreshHardTestStatus()
+        if (hardTest.isRunning()) {
+            uiHandler.removeCallbacks(hardTestLoop)
+            uiHandler.postDelayed(hardTestLoop, LongTermHardTestManager.DEFAULT_INTERVAL_MS)
+        }
+
         intervalSpinner = Spinner(this)
         val intervals = arrayOf("5 Sekunden", "15 Sekunden", "30 Sekunden", "1 Minute", "5 Minuten", "15 Minuten", "30 Minuten")
         intervalSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, intervals)
@@ -975,7 +1042,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 23 ersetzt den monolithischen Memory-JSON-Checkpoint durch einen indexierten Binärspeicher. Makro-Header bleiben kompakt verfügbar; ihre Tokenfolgen liegen disk-backed in tokens.bin und werden erst beim tatsächlichen Zugriff gelesen. Alte Step-22-JSON-Daten werden beim ersten Start automatisch migriert. Save-Slots archivieren jetzt den Store plus adaptive Audio-/Visual-Codebooks.",
+            "Step 24 ergänzt den indexierten Langzeitspeicher um einen kontrollierten Hard Test. Er protokolliert über Stunden/Tage Neuheitsraten, Makrowachstum, Kompression, Prediction, Vergessen sowie Storage- und Heap-Wachstum. Die Messung ist read-only gegenüber der Lernlogik und kann als CSV exportiert werden.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1596,6 +1663,36 @@ class MainActivity : ComponentActivity() {
                 b.interpretation
     }
 
+    private fun captureHardTestSample(saveMemory: Boolean) {
+        if (!::hardTest.isInitialized || !::adaptiveQuantizer.isInitialized || !::adaptiveVisualQuantizer.isInitialized) return
+        if (saveMemory) memory.saveNow()
+        hardTest.capture(memory.stats(), adaptiveQuantizer.stats(), adaptiveVisualQuantizer.stats())
+        refreshHardTestStatus()
+    }
+
+    private fun refreshHardTestStatus() {
+        if (!::hardTestStatus.isInitialized || !::hardTest.isInitialized) return
+        val h = hardTest.summary()
+        if (h.samples == 0) {
+            hardTestStatus.text = "Hard Test: ${if (h.running) "LÄUFT" else "AUS"} · noch keine Samples"
+            return
+        }
+        val hours = h.elapsedMs / 3_600_000.0
+        val heapMb = h.latestHeapBytes / (1024.0 * 1024.0)
+        val heapDeltaMb = h.heapDeltaBytes / (1024.0 * 1024.0)
+        val storageMb = h.latestStorageBytes / (1024.0 * 1024.0)
+        val storageDeltaMb = h.storageDeltaBytes / (1024.0 * 1024.0)
+        val early = h.earlyMacroRate?.let { "%.2f".format(it) } ?: "—"
+        val recent = h.recentMacroRate?.let { "%.2f".format(it) } ?: "—"
+        hardTestStatus.text =
+            "Hard Test: ${if (h.running) "LÄUFT" else "GESTOPPT"} · ${h.samples} Samples · ${"%.2f".format(hours)} h · ΔObs ${h.observationsDelta}\n" +
+            "Makros Δ ${h.macroDelta} · Relationen Δ ${h.relationDelta} · Makros/10k Obs ${"%.2f".format(h.macrosPer10kObservations)} · Trend $early→$recent (${h.macroGrowthTrend})\n" +
+            "Neuheit: Audio ${"%.1f".format(h.latestAudioNovelty * 100.0)}% · Vision ${"%.1f".format(h.latestVisualNovelty * 100.0)}% · Kompression ${"%.1f".format(h.latestCompressionGain * 100.0)}%\n" +
+            "Prediction Intervall: ${h.intervalPredictionHits}/${h.intervalPredictionChecks} (${"%.1f".format(h.intervalPredictionHitRate * 100.0)}%) · vergessen Δ ${h.prunedDelta}\n" +
+            "Store ${"%.2f".format(storageMb)} MB (Δ ${"%+.2f".format(storageDeltaMb)} MB) · Heap ${"%.1f".format(heapMb)} MB (Δ ${"%+.1f".format(heapDeltaMb)} MB)\n" +
+            "disk-backed ${h.latestDiskBackedMacros} Makros · Token-Reads ${h.latestTokenReads}"
+    }
+
     private fun adaptiveQuantizerText(): String {
         val s = adaptiveQuantizer.stats()
         return "Adaptive-Codebook: ${s.prototypes}/4096 Prototypen · Frames ${s.acceptedFrames} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}${if (s.saturated) " · SATURIERT" else ""}"
@@ -1716,6 +1813,7 @@ class MainActivity : ComponentActivity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     override fun onDestroy() {
+        uiHandler.removeCallbacks(hardTestLoop)
         if (::adaptiveQuantizer.isInitialized) adaptiveQuantizer.saveNow()
         if (::adaptiveVisualQuantizer.isInitialized) adaptiveVisualQuantizer.saveNow()
         stopMemoryPlayback(clear = false)

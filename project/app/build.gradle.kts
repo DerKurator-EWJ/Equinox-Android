@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 37
-        versionName = "0.6-step23-indexed-long-term-storage"
+        versionCode = 38
+        versionName = "0.6-step24-long-term-hard-test"
     }
 
     compileOptions {
