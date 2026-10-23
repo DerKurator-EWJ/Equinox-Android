@@ -15,7 +15,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Step 04 output-only canvas.
+ * Step 06 output-only canvas with read-only structural ranks.
  *
  * This view never mutates MemoryModel. It renders a read-only EngineOutputState.
  * Positions are projection coordinates derived from IDs and the active working set;
@@ -38,6 +38,11 @@ class EquinoxOutputView(context: Context) : View(context) {
     private val infoPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.argb(155, 235, 240, 255)
         textSize = 18f
+    }
+    private val rankPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(205, 245, 245, 255)
+        textAlign = Paint.Align.CENTER
+        textSize = 12f
     }
 
     fun setState(newState: EngineOutputState) {
@@ -95,8 +100,9 @@ class EquinoxOutputView(context: Context) : View(context) {
         val meanR = if (s.working.exchanges.isEmpty()) 0.0 else
             s.working.exchanges.sumOf { abs(it.value) } / s.working.exchanges.size.toDouble()
         infoPaint.color = Color.argb(175, 215, 225, 245)
+        val topRank = active.maxByOrNull { it.structuralScore }?.structuralRank ?: "—"
         canvas.drawText(
-            "$modeLabel · ${active.size} aktiv · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)}",
+            "$modeLabel · ${active.size} aktiv · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)} · max $topRank",
             18f,
             height - 18f,
             infoPaint
@@ -118,7 +124,7 @@ class EquinoxOutputView(context: Context) : View(context) {
             val rr = radius * (0.45f + 0.55f * ((node.id ushr 3) and 255) / 255f)
             val x = cx + cos(a).toFloat() * rr
             val y = cy + sin(a).toFloat() * rr
-            val r = 3.5f + 2.0f * node.abstractionLevel
+            val r = 3.5f + 2.0f * node.abstractionLevel + min(6f, node.structuralRankIndex * 0.65f)
             nodePaint.color = withAlpha(levelColor(node.abstractionLevel), 95)
             canvas.drawCircle(x, y, r, nodePaint)
         }
@@ -187,7 +193,8 @@ class EquinoxOutputView(context: Context) : View(context) {
         val a = node.activation.coerceIn(0.0, 1.5).toFloat()
         val e = node.expectation.coerceIn(0.0, 1.5).toFloat()
         val base = 7f + node.abstractionLevel * 3.5f
-        val radius = base * (1f + 0.70f * a)
+        val rankBoost = min(0.55f, node.structuralRankIndex * 0.045f)
+        val radius = base * (1f + 0.70f * a + rankBoost)
         val color = levelColor(node.abstractionLevel)
 
         if (e > 0.01f) {
@@ -211,6 +218,17 @@ class EquinoxOutputView(context: Context) : View(context) {
             linePaint.strokeWidth = 2.5f
             val arcR = radius + 11f
             canvas.drawArc(x - arcR, y - arcR, x + arcR, y + arcR, if (dir > 0) -70f else 110f, 125f * dir, false, linePaint)
+        }
+
+        // RPG-style rank is a derived output annotation only; it never feeds back into learning.
+        if (node.structuralRankIndex >= 5) {
+            if (node.structuralRankIndex >= 6) {
+                haloPaint.color = Color.argb((70 + min(120, node.structuralRankIndex * 8)).coerceAtMost(190), 245, 245, 255)
+                haloPaint.strokeWidth = 1.2f + min(3.5f, (node.structuralRankIndex - 5) * 0.35f)
+                canvas.drawCircle(x, y, radius + 17f + min(10f, node.structuralRankIndex.toFloat()), haloPaint)
+            }
+            rankPaint.textSize = 11f + min(5f, (node.structuralRankIndex - 5) * 0.7f)
+            canvas.drawText(node.structuralRank, x, y - radius - 8f, rankPaint)
         }
     }
 

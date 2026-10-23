@@ -1,35 +1,42 @@
-# Equinox v0.6 — Step 05: Live / Memory / Lab
+# Equinox v0.6 — Step 06: Structural Ranks
 
-Basis: v0.6 Step 04.
+Basis: v0.6 Step 05.
 
-## New in Step 05
+## New in Step 06
 
-- Three separated app pages:
-  - **LIVE** — microphone/camera input → Equinox core → output canvas.
-  - **MEMORY** — no sensor input; already learned macro structures activate each other through the stored relation index.
-  - **LAB** — graph/debug view, display settings, save slots, diagnostics, consolidation and manual sonification.
-- Memory playback is deliberately **non-learning**:
-  - no new observations,
-  - no new candidates/macros,
-  - no macro-weight increments,
-  - no new persistent macro relations,
-  - no persistent overexchange update.
-- Memory playback keeps only a small temporary working set and follows indexed learned neighbors. The full memory is not recalculated.
-- Output canvas now has an explicit LIVE/MEMORY label.
-- Optional **Memory Orchestra** can synthesize the currently materialized memory state with oscillators only; no sample/sound library is used.
-- Event-local overexchange is now separated from the long-term EMA memory so the canvas displays the current exchange rather than a stale global value.
-- v0.6 save slots and long-term diagnostics now correctly use `equinox_v06_memory.json` instead of the legacy Step03 filename.
+- Read-only multidimensional structural profile for every macro.
+- RPG-style rank ladder:
+  - `F -> E -> D -> C -> B -> A -> S -> SS -> SSS -> Ω -> Ω+1 -> Ω+2 -> ...`
+- Rank is **derived**, not a new learning rule. It does not create relations or alter macro promotion.
+- Rank uses four separate evidence dimensions:
+  - recurrence — how often the macro itself was activated,
+  - reuse — how often higher macros reuse it as a component,
+  - relation support — accumulated weight of its learned macro neighborhood,
+  - specificity — how concentrated vs. generic its relation context is.
+- Abstraction level also contributes to the slowly growing structural score.
+- Raw counters are log-compressed in the score, so one huge occurrence counter cannot instantly dominate every other dimension.
+- `Ω+n` has no hard upper rank; each further Omega step requires additional logarithmic structural evidence.
+- Parent-use counts are held in a compact composition index; no new all-to-all graph is introduced.
+- Rank calculation is lazy/on-demand for output nodes and the bounded active working set.
+- LIVE/MEMORY canvas now shows A-rank and above as labels; S/SS/SSS/Omega nodes gain an extra rank halo.
+- Node size gets a capped rank contribution.
+- Orchestra uses rank only as a small output modulation of presence/harmonic richness.
+- Memory/Lab text shows the highest currently active rank and score.
 
-## Memory playback path
+## Important interpretation
 
-`stored macro -> indexed learned neighbors -> temporary working set -> transient overexchange -> canvas/orchestra`
+The rank means **structural maturity in Equinox**, not truth, semantic importance, intelligence, or physical significance.
+A very common generic pattern can have high recurrence but low specificity; a reusable selective pattern can gain rank through a different evidence mix.
 
-The traversal is an output/read path. It does not feed itself back into the learner.
+## Compatibility
+
+The persistent memory file remains `equinox_v06_memory.json` and Step 05 memory loads directly.
+Rank values are reconstructed from existing macro/relation data; they do not need a separate save format.
 
 ## Build
 
-Open exactly `Equinox_v06_Step05_LiveMemoryModes` as the Android Studio project and use **Build > Build APK(s)**.
+Open exactly `Equinox_v06_Step06_StructuralRanks` as the Android Studio project and use **Build > Build APK(s)**.
 
 Application ID remains `de.equinox.v05` so it updates the same installed app when signed with the same key/debug key.
 
-Version: `0.6-step05-live-memory-modes` (versionCode 19).
+Version: `0.6-step06-structural-ranks` (versionCode 20).

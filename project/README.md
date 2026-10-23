@@ -1,5 +1,5 @@
-# Equinox v0.6 — Step 05
+# Equinox v0.6 — Step 06
 
-Open this folder itself in Android Studio (not a parent/older Step folder), then build the debug APK.
+Open this folder itself in Android Studio, then build the debug APK.
 
-Main addition: three clean UI pages: **LIVE**, **MEMORY**, and **LAB**. MEMORY mode traverses only already learned macro relations and does not create new observations or persistent relations.
+Main addition: derived structural ranks `F -> ... -> SSS -> Ω -> Ω+n` based on recurrence, higher-level reuse, relation support and context specificity. Ranking is output/diagnostic metadata and does not change the learner.

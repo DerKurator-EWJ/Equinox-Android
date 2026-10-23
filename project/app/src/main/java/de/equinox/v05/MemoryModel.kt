@@ -25,10 +25,11 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 05
+ * v0.6 Step 06
  *
- * Keeps the bounded active working set and indexed lazy retrieval, and adds a
- * non-learning memory-playback path. External observations can still update long-term
+ * Keeps the bounded active working set and indexed lazy retrieval, plus the
+ * non-learning memory-playback path. Step 06 adds read-only multidimensional
+ * structural ranking (F..SSS..Omega+n) derived from existing evidence. External observations can still update long-term
  * memory; Memory mode only activates already learned macros and relations.
  *
  * Operational definitions used here:
@@ -61,7 +62,9 @@ data class MemoryStats(
     val activeMacros: Int = 0,
     val retrievedMacros: Int = 0,
     val overexchangePairs: Int = 0,
-    val meanAbsOverexchange: Double = 0.0
+    val meanAbsOverexchange: Double = 0.0,
+    val highestActiveRank: String = "—",
+    val highestActiveRankScore: Double = 0.0
 )
 
 data class GraphNode(
@@ -74,7 +77,10 @@ data class GraphNode(
     val modality: String = "audio",
     val displayColor: Int = 0,
     val activation: Double = 0.0,
-    val expectation: Double = 0.0
+    val expectation: Double = 0.0,
+    val structuralRank: String = "F",
+    val structuralRankIndex: Int = 0,
+    val structuralScore: Double = 0.0
 ) {
     val isMacro: Boolean get() = abstractionLevel > 0
 }
@@ -106,7 +112,10 @@ data class SonificationMacro(
     val hz: Double,
     val weight: Long,
     val memberHz: List<Double>,
-    val abstractionLevel: Int
+    val abstractionLevel: Int,
+    val structuralRank: String = "F",
+    val structuralRankIndex: Int = 0,
+    val structuralScore: Double = 0.0
 )
 
 data class SonificationSnapshot(
@@ -121,7 +130,14 @@ data class ActiveMacroNode(
     val activation: Double,
     val expectation: Double,
     val exchangeBias: Double,
-    val retrieved: Boolean
+    val retrieved: Boolean,
+    val structuralRank: String = "F",
+    val structuralRankIndex: Int = 0,
+    val structuralScore: Double = 0.0,
+    val recurrence: Double = 0.0,
+    val reuse: Double = 0.0,
+    val relationSupport: Double = 0.0,
+    val specificity: Double = 0.0
 )
 
 data class ActiveExchange(
@@ -193,6 +209,9 @@ class MemoryModel(context: Context) {
 
     private val macros = mutableMapOf<Int, MacroCode>()
     private val macroBySignature = mutableMapOf<String, Int>()
+    // Number of higher macros that reuse a macro as a component. This is an index, not
+    // another learned relation graph, and lets rank calculation stay local/on-demand.
+    private val macroParentUseCount = mutableMapOf<Int, Int>()
     private val macroRelations = mutableMapOf<Long, Long>()
 
     // Relation lookup index: a macro can retrieve only its known local neighborhood.
@@ -531,6 +550,7 @@ class MemoryModel(context: Context) {
                 )
                 macros[macro.id] = macro
                 macroBySignature[signature] = macro.id
+                indexMacroComposition(macro)
                 created++
                 highest = max(highest, macro.level)
             }
@@ -759,6 +779,7 @@ class MemoryModel(context: Context) {
         }
 
         selectedMacros.forEach { m ->
+            val rank = structuralRankFor(m)
             nodes += GraphNode(
                 id = m.id,
                 weight = m.weight,
@@ -769,7 +790,10 @@ class MemoryModel(context: Context) {
                 modality = m.modality,
                 displayColor = 0,
                 activation = activeWorking[m.id]?.actual ?: 0.0,
-                expectation = activeWorking[m.id]?.expected ?: 0.0
+                expectation = activeWorking[m.id]?.expected ?: 0.0,
+                structuralRank = rank.label,
+                structuralRankIndex = rank.rankIndex,
+                structuralScore = rank.score
             )
         }
 
@@ -834,12 +858,16 @@ class MemoryModel(context: Context) {
             )
             .take(maxMacros)
             .map { m ->
+                val rank = structuralRankFor(m)
                 SonificationMacro(
                     id = m.id,
                     hz = m.representativeHz,
                     weight = m.weight,
                     memberHz = leafHzOf(m.id).distinct().take(8),
-                    abstractionLevel = m.level
+                    abstractionLevel = m.level,
+                    structuralRank = rank.label,
+                    structuralRankIndex = rank.rankIndex,
+                    structuralScore = rank.score
                 )
             }
 
@@ -858,6 +886,7 @@ class MemoryModel(context: Context) {
         val selectedIds = selected.map { it.key }.toSet()
         val nodes = selected.mapNotNull { (id, state) ->
             val macro = macros[id] ?: return@mapNotNull null
+            val rank = structuralRankFor(macro)
             ActiveMacroNode(
                 id = id,
                 abstractionLevel = macro.level,
@@ -865,7 +894,14 @@ class MemoryModel(context: Context) {
                 activation = state.actual,
                 expectation = state.expected,
                 exchangeBias = state.exchangeBias,
-                retrieved = state.retrieved
+                retrieved = state.retrieved,
+                structuralRank = rank.label,
+                structuralRankIndex = rank.rankIndex,
+                structuralScore = rank.score,
+                recurrence = rank.recurrence,
+                reuse = rank.reuse,
+                relationSupport = rank.relationSupport,
+                specificity = rank.specificity
             )
         }
 
@@ -892,6 +928,11 @@ class MemoryModel(context: Context) {
             candidates.values.maxOfOrNull { it.tokens.size } ?: 0,
             macros.values.maxOfOrNull { it.tokens.size } ?: 0
         )
+        val highestActiveRank = activeWorking.keys
+            .asSequence()
+            .mapNotNull { macros[it] }
+            .map { structuralRankFor(it) }
+            .maxByOrNull { it.score }
 
         return MemoryStats(
             persistentCodes = quants.size,
@@ -915,7 +956,9 @@ class MemoryModel(context: Context) {
             activeMacros = activeWorking.size,
             retrievedMacros = activeWorking.values.count { it.retrieved },
             overexchangePairs = lastExchangePairs,
-            meanAbsOverexchange = lastMeanAbsExchange
+            meanAbsOverexchange = lastMeanAbsExchange,
+            highestActiveRank = highestActiveRank?.label ?: "—",
+            highestActiveRankScore = highestActiveRank?.score ?: 0.0
         )
     }
 
@@ -925,6 +968,7 @@ class MemoryModel(context: Context) {
         candidates.clear()
         macros.clear()
         macroBySignature.clear()
+        macroParentUseCount.clear()
         macroRelations.clear()
         relationIndex.clear()
         activeWorking.clear()
@@ -952,6 +996,7 @@ class MemoryModel(context: Context) {
         candidates.clear()
         macros.clear()
         macroBySignature.clear()
+        macroParentUseCount.clear()
         macroRelations.clear()
         relationIndex.clear()
         activeWorking.clear()
@@ -973,7 +1018,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_05)
+                .put("formatVersion", 60_06)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
@@ -1074,6 +1119,8 @@ class MemoryModel(context: Context) {
                 nextMacroId = max(nextMacroId, macro.id + 1)
             }
 
+            rebuildMacroCompositionIndex()
+
             val relationArray = root.optJSONArray("macroRelations") ?: JSONArray()
             for (i in 0 until relationArray.length()) {
                 val o = relationArray.getJSONObject(i)
@@ -1092,6 +1139,36 @@ class MemoryModel(context: Context) {
             }
         } catch (_: Exception) {
         }
+    }
+
+    /** Read-only, on-demand structural profile. It never changes learning or persistence. */
+    private fun structuralRankFor(macro: MacroCode): StructuralRankProfile {
+        val relationWeights = relationIndex[macro.id]
+            ?.asSequence()
+            ?.mapNotNull { macroRelations[it] }
+            ?.toList()
+            ?: emptyList()
+
+        return StructuralRankEngine.evaluate(
+            occurrenceWeight = macro.weight,
+            abstractionLevel = macro.level,
+            parentReuseCount = macroParentUseCount[macro.id] ?: 0,
+            relationWeights = relationWeights
+        )
+    }
+
+    private fun indexMacroComposition(macro: MacroCode) {
+        macro.tokens.asSequence()
+            .filter { it >= MACRO_ID_BASE }
+            .distinct()
+            .forEach { child ->
+                macroParentUseCount[child] = (macroParentUseCount[child] ?: 0) + 1
+            }
+    }
+
+    private fun rebuildMacroCompositionIndex() {
+        macroParentUseCount.clear()
+        macros.values.forEach { indexMacroComposition(it) }
     }
 
     private fun pruneMacroRelations() {

@@ -607,7 +607,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 05 trennt die drei Rollen: LIVE nimmt externe Welt auf, MEMORY spielt ausschließlich mit bereits Gelerntem, LAB enthält Debug-/Speicherfunktionen. Memory-Playback erzeugt keine neuen Beobachtungen oder persistenten Relationen.",
+            "Step 06 behält die drei Rollen und ergänzt strukturelle Ränge: LIVE nimmt externe Welt auf, MEMORY spielt ausschließlich mit bereits Gelerntem, LAB enthält Debug-/Speicherfunktionen. Memory-Playback erzeugt keine neuen Beobachtungen oder persistenten Relationen.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -915,6 +915,7 @@ class MainActivity : ComponentActivity() {
         return "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
             "Makros: ${s.macroCodes} | $levelText | Relationen: ${s.macroRelations}\n" +
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
+            "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
             "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}"
     }
 
