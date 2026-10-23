@@ -7,6 +7,7 @@ import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.projection.MediaProjectionManager
 import android.media.audiofx.AcousticEchoCanceler
 import android.os.Bundle
 import android.os.Handler
@@ -29,6 +30,7 @@ import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -76,6 +78,21 @@ class MainActivity : ComponentActivity() {
     private lateinit var settingsOverlay: ScrollView
     private lateinit var settingsScrim: View
     private lateinit var settingsSheet: FrameLayout
+    private lateinit var captureRecorder: UnifiedCaptureRecorder
+    private lateinit var captureButton: TextView
+    private lateinit var captureStatus: TextView
+    private val capturePermissionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
+            CaptureForegroundService.start(this)
+            // Give the foreground service a brief moment to enter foreground before MediaProjection.
+            uiHandler.postDelayed({ startUnifiedCapture(result.resultCode, data) }, 140L)
+        } else {
+            if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: abgebrochen"
+            if (::captureButton.isInitialized) captureButton.text = "REC"
+            CaptureForegroundService.stop(this)
+        }
+    }
     private val livePipeline = LowLatencyLivePipeline()
     private val performanceGovernor = PerformanceGovernor()
     private var visualAnalyzer: VisualGridAnalyzer? = null
@@ -240,6 +257,7 @@ class MainActivity : ComponentActivity() {
         encoderBenchmark = EncoderBenchmarkManager(this)
         adaptiveQuantizer = AdaptiveAudioQuantizer(this)
         adaptiveVisualQuantizer = AdaptiveVisualQuantizer(this)
+        captureRecorder = UnifiedCaptureRecorder(this)
         val latencyPrefs = getSharedPreferences("equinox_live_latency", MODE_PRIVATE)
         livePipeline.setPreset(
             LowLatencyLivePipeline.DelayPreset.fromName(latencyPrefs.getString("preset", null))
@@ -289,6 +307,17 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(233, 211, 143))
             gravity = Gravity.CENTER
         }
+        captureButton = TextView(this).apply {
+            text = "REC"
+            textSize = 11f
+            letterSpacing = 0.08f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(255, 112, 112))
+            background = roundedBackground(Color.argb(64, 255, 255, 255), 18f)
+            isClickable = true
+            isFocusable = true
+            attachPressMotion(this)
+        }
         val settingsButton = TextView(this).apply {
             text = "⚙"
             textSize = 22f
@@ -301,8 +330,9 @@ class MainActivity : ComponentActivity() {
         }
         controlBar.addView(realityLabel, LinearLayout.LayoutParams(dp(58), dp(48)))
         controlBar.addView(blendSlider, LinearLayout.LayoutParams(0, dp(48), 1f))
-        controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(84), dp(48)))
-        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(58), dp(48)))
+        controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(78), dp(48)))
+        controlBar.addView(captureButton, LinearLayout.LayoutParams(dp(54), dp(48)))
+        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(54), dp(48)))
         val controlBarParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -385,9 +415,13 @@ class MainActivity : ComponentActivity() {
         })
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 35 — PRODUCT UI / MOTION + HAPTICS", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 36 — UNIFIED CAPTURE / EXPORT", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
+        captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Orchestra AAC", 12f, 4).apply {
+            setTextColor(Color.rgb(214, 177, 116))
+        }
+        settingsRoot.addView(captureStatus)
 
         val settingsNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -488,6 +522,14 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+        captureButton.setOnClickListener {
+            if (captureRecorder.isRecording()) {
+                stopUnifiedCapture()
+            } else {
+                val projectionManager = getSystemService(MediaProjectionManager::class.java)
+                capturePermissionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            }
+        }
         settingsButton.setOnClickListener {
             if (settingsOpen) closeSettingsOverlay() else openSettingsOverlay()
         }
@@ -1549,6 +1591,55 @@ class MainActivity : ComponentActivity() {
             "Live-Sync: ${st.preset.label} · effektiv ${st.effectiveDelayMs} ms · Analyse Ø ${"%.1f".format(st.analysisCostEwmaMs)} ms · Render Ø ${"%.1f".format(st.renderCostEwmaMs)} ms · Frames ${st.renderedFrames}/${st.offeredFrames} · verworfen ${st.droppedFrames} · Buffer ${st.bufferedFrames} · Governor ${g.profile.label} (${g.profile.fieldBudget}F/${g.profile.linkBudget}L)"
     }
 
+    private fun startUnifiedCapture(resultCode: Int, data: android.content.Intent) {
+        if (captureRecorder.isRecording()) return
+        val metrics = resources.displayMetrics
+        continuousOrchestra.setPcmTap { pcm -> captureRecorder.offerPcm(pcm) }
+        captureButton.text = "■"
+        captureButton.setTextColor(Color.rgb(255, 92, 92))
+        captureRecorder.start(
+            resultCode = resultCode,
+            resultData = data,
+            width = metrics.widthPixels,
+            height = metrics.heightPixels,
+            densityDpi = metrics.densityDpi,
+            onState = { text -> runOnUiThread {
+                if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: $text"
+            } },
+            onFinished = { result -> runOnUiThread {
+                continuousOrchestra.setPcmTap(null)
+                CaptureForegroundService.stop(this)
+                captureButton.text = "REC"
+                captureButton.setTextColor(Color.rgb(255, 112, 112))
+                if (::captureStatus.isInitialized) {
+                    captureStatus.text = if (result.error == null) {
+                        val where = result.uri?.toString() ?: result.path.orEmpty()
+                        "Aufnahme gespeichert · ${"%.1f".format(result.durationMs / 1000.0)} s · $where"
+                    } else "Aufnahmefehler: ${result.error}"
+                }
+            } }
+        )
+    }
+
+    private fun stopUnifiedCapture() {
+        if (!captureRecorder.isRecording()) return
+        captureButton.text = "…"
+        captureRecorder.stop(
+            onState = { text -> runOnUiThread { if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: $text" } },
+            onFinished = { result -> runOnUiThread {
+                continuousOrchestra.setPcmTap(null)
+                CaptureForegroundService.stop(this)
+                captureButton.text = "REC"
+                captureButton.setTextColor(Color.rgb(255, 112, 112))
+                if (::captureStatus.isInitialized) {
+                    captureStatus.text = if (result.error == null)
+                        "Aufnahme gespeichert · ${"%.1f".format(result.durationMs / 1000.0)} s"
+                    else "Aufnahmefehler: ${result.error}"
+                }
+            } }
+        )
+    }
+
     private fun toggleContinuousOrchestra() {
         if (continuousOrchestra.isRunning()) {
             stopContinuousOrchestra()
@@ -2225,6 +2316,11 @@ class MainActivity : ComponentActivity() {
         stopAudio()
         sonifier.stop()
         orchestra.stop()
+        if (::captureRecorder.isInitialized && captureRecorder.isRecording()) {
+            continuousOrchestra.setPcmTap(null)
+            captureRecorder.stop({}, {})
+        }
+        CaptureForegroundService.stop(this)
         stopContinuousOrchestra()
         releaseEchoCanceler()
         super.onDestroy()

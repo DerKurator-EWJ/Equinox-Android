@@ -119,3 +119,6 @@ Fluid renderer-side hierarchy transitions: persistent macro-ID visual states, ea
 
 ### Step 34 — Performance Governor
 Transient GPU/camera/analysis budgets now adapt to measured render cost, analysis cost, dropped frames and Android thermal pressure. Persistent Equinox learning semantics remain unchanged.
+
+## Step 36 — Unified Capture / Export
+The Unified GPU surface can now be recorded to H.264 MP4. The Unified Orchestra exposes a read-only PCM tap so its generated audio can be encoded as AAC into the same export. Capture does not mutate memory or learning state.

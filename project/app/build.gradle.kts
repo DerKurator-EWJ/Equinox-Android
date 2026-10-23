@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 50
-        versionName = "0.6-step35-product-ui"
+        versionCode = 51
+        versionName = "0.6-step36-unified-capture"
     }
 
     compileOptions {

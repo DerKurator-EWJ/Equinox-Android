@@ -1,7 +1,7 @@
-# Equinox v0.6 — Step 35 Product UI
+# Equinox v0.6 — Step 36
 
-Open this folder directly in Android Studio and build the APK from the `app` module.
+Current milestone: **Unified Capture / Export**.
 
-Step 35 keeps the Step 34 adaptive core, unified OpenGL canvas, orchestra, fluid hierarchy, low-latency pipeline and performance governor. The change is the product layer: animated bottom-sheet settings, floating bottom controls, consistent rounded components, haptic feedback and motion polish.
+Build the Android project in Android Studio and install the APK on device. The new `REC` control records the current Equinox product surface to MP4; when the continuous Generative Orchestra is active, its generated PCM is encoded directly into the same file as AAC.
 
-See `README_STEP35.md` for details.
+See `README_STEP36.md` for the implementation notes. Earlier milestone notes remain in the project for reference.
