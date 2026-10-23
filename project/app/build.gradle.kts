@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 31
-        versionName = "0.6-step17-continuous-audio-io"
+        versionCode = 32
+        versionName = "0.6-step18-adaptive-visual-encoder"
     }
 
     compileOptions {

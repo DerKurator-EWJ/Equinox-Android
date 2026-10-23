@@ -243,7 +243,7 @@ class RelationGraphView(context: Context) : View(context) {
 
         val microCount = snapshot.nodes.count { it.abstractionLevel == 0 }
         val audioCount = snapshot.nodes.count { it.abstractionLevel == 0 && (it.modality == "audio" || it.modality == "audio_direct" || it.modality == "audio_adaptive") }
-        val visionCount = snapshot.nodes.count { it.abstractionLevel == 0 && it.modality == "vision" }
+        val visionCount = snapshot.nodes.count { it.abstractionLevel == 0 && it.modality.startsWith("vision") }
         val levels = snapshot.nodes
             .filter { it.abstractionLevel > 0 }
             .groupingBy { it.abstractionLevel }
@@ -383,7 +383,7 @@ class RelationGraphView(context: Context) : View(context) {
         val baseRadius = (10f + 17f * sqrt(normalized)) * p.scale
 
         if (node.abstractionLevel == 0) {
-            nodePaint.color = if (node.modality == "vision" && node.displayColor != 0) {
+            nodePaint.color = if (node.modality.startsWith("vision") && node.displayColor != 0) {
                 Color.rgb(
                     (node.displayColor shr 16) and 0xff,
                     (node.displayColor shr 8) and 0xff,
@@ -393,7 +393,7 @@ class RelationGraphView(context: Context) : View(context) {
                 frequencyColor(node.representativeHz)
             }
 
-            if (node.modality == "vision") {
+            if (node.modality.startsWith("vision")) {
                 val r = baseRadius * 0.92f
                 canvas.drawRect(p.x - r, p.y - r, p.x + r, p.y + r, nodePaint)
                 val halo = Paint(nodePaint).apply {

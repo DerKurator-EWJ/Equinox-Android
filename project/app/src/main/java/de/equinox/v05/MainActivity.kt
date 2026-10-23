@@ -118,6 +118,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var encoderBenchmarkStatus: TextView
     private lateinit var encoderBenchmarkToggle: CheckBox
     private lateinit var adaptiveQuantizer: AdaptiveAudioQuantizer
+    private lateinit var adaptiveVisualQuantizer: AdaptiveVisualQuantizer
+    private lateinit var adaptiveVisualQuantizerStatus: TextView
     private lateinit var adaptiveQuantizerStatus: TextView
     @Volatile private var parallelEncoderBenchmarkEnabled = false
 
@@ -175,6 +177,7 @@ class MainActivity : ComponentActivity() {
         audioEncoderMode = audioEncoderModeStore.load()
         encoderBenchmark = EncoderBenchmarkManager(this)
         adaptiveQuantizer = AdaptiveAudioQuantizer(this)
+        adaptiveVisualQuantizer = AdaptiveVisualQuantizer(this)
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
@@ -192,7 +195,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 17 — CONTINUOUS AUDIO I/O", 17f, 8).apply {
+        root.addView(label("STEP 18 — ADAPTIVE VISUAL ENCODER", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -297,8 +300,12 @@ class MainActivity : ComponentActivity() {
         cameraFrames = label("Visuelle Frames: 0 · visuelle Beobachtungen: 0", 13f, 5).apply {
             setTextColor(Color.rgb(205, 205, 205))
         }
+        adaptiveVisualQuantizerStatus = label(adaptiveVisualQuantizerText(), 12f, 4).apply {
+            setTextColor(Color.rgb(195, 175, 235))
+        }
         livePage.addView(cameraStatus)
         livePage.addView(cameraFrames)
+        livePage.addView(adaptiveVisualQuantizerStatus)
 
         cameraButton = Button(this).apply {
             text = "KAMERA-LERNEN STARTEN"
@@ -994,7 +1001,7 @@ class MainActivity : ComponentActivity() {
         if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio: AUS"
         if (::startButton.isInitialized) startButton.isEnabled = !running
         if (::stopButton.isInitialized) stopButton.isEnabled = running
-        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · 8×6 Raster" else "Kamera: AUS"
+        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · adaptives 8×6 Raster" else "Kamera: AUS"
         if (::cameraButton.isInitialized) cameraButton.isEnabled = !cameraRunning
         if (::cameraStopButton.isInitialized) cameraStopButton.isEnabled = cameraRunning
     }
@@ -1363,14 +1370,21 @@ class MainActivity : ComponentActivity() {
 
                 analysis.setAnalyzer(
                     cameraExecutor,
-                    VisualGridAnalyzer { result ->
+                    VisualGridAnalyzer(adaptiveVisualQuantizer) { result ->
                         if (!cameraRunning) return@VisualGridAnalyzer
-                        result.observations.forEach { obs -> memory.observeVisual(obs.tokenId, obs.packedRgb) }
+                        // Frame-local reset prevents one spatial macro candidate from crossing
+                        // the image boundary; learned identities/macros themselves remain intact.
+                        memory.beginAdaptiveVisualFrame()
+                        result.observations.forEach { obs ->
+                            memory.observeAdaptiveVisual(obs.tokenId, obs.packedRgb)
+                        }
                         visualFrameCount++
                         visualObservationCount += result.observations.size
 
                         runOnUiThread {
-                            cameraFrames.text = "Visuelle Frames: $visualFrameCount · visuelle Beobachtungen: $visualObservationCount"
+                            cameraFrames.text =
+                                "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · +${result.createdThisFrame} neue IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
+                            adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
                             if (visualFrameCount % 2L == 0L) {
                                 updateMemoryStats()
                                 refreshGraph()
@@ -1382,7 +1396,7 @@ class MainActivity : ComponentActivity() {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
                 cameraRunning = true
-                cameraStatus.text = "Kamera: AKTIV · 8×6 Raster"
+                cameraStatus.text = "Kamera: AKTIV · adaptives 8×6 Raster"
                 cameraButton.isEnabled = false
                 cameraStopButton.isEnabled = true
                 refreshSensorUiState()
@@ -1401,7 +1415,9 @@ class MainActivity : ComponentActivity() {
         cameraRunning = false
         try { cameraProvider?.unbindAll() } catch (_: Exception) { }
         cameraProvider = null
+        adaptiveVisualQuantizer.saveNow()
         cameraStatus.text = "Kamera: AUS"
+        if (::adaptiveVisualQuantizerStatus.isInitialized) adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
         cameraButton.isEnabled = true
         cameraStopButton.isEnabled = false
         refreshSensorUiState()
@@ -1453,6 +1469,11 @@ class MainActivity : ComponentActivity() {
         return "Adaptive-Codebook: ${s.prototypes}/4096 Prototypen · Frames ${s.acceptedFrames} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}${if (s.saturated) " · SATURIERT" else ""}"
     }
 
+    private fun adaptiveVisualQuantizerText(): String {
+        val s = adaptiveVisualQuantizer.stats()
+        return "Visual-Codebook: ${s.prototypes}/1024 Prototypen · Patches ${s.acceptedPatches} · neu ${s.createdIds} · reuse ${s.reusedIds} · Neuheit letzte256 ${"%.1f".format(s.recentNoveltyRate * 100.0)}% · ØDist ${"%.3f".format(s.meanMatchDistance)}${if (s.saturated) " · SATURIERT" else ""}"
+    }
+
     private fun updateMemoryStats() {
         val text = memoryText()
         if (::memoryStats.isInitialized) memoryStats.text = text
@@ -1464,6 +1485,7 @@ class MainActivity : ComponentActivity() {
         val levelText = if (s.levelCounts.isEmpty()) "noch keine" else s.levelCounts.entries.joinToString(" · ") { "L${it.key}:${it.value}" }
         return "Quanten: ${s.persistentCodes} | Kandidaten: ${s.temporaryCodes} | Beobachtungen: ${s.observations}\n" +
             "Audio-Alphabete: FFT ${s.fftAudioCodes} Q/${s.fftAudioMacros} M · Direct ${s.directAudioCodes} Q/${s.directAudioMacros} M · Adaptive ${s.adaptiveAudioCodes} Q/${s.adaptiveAudioMacros} M\n" +
+            "Vision: adaptive ${s.adaptiveVisualCodes} Q/${s.adaptiveVisualMacros} M · visuell gesamt ${s.visualPersistentCodes} Q\n" +
             "Makros: ${s.macroCodes} | $levelText | Relationen: ${s.macroRelations}\n" +
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
             "Predictive Recall: ${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Treffer ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%)\n" +
@@ -1560,6 +1582,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (::adaptiveQuantizer.isInitialized) adaptiveQuantizer.saveNow()
+        if (::adaptiveVisualQuantizer.isInitialized) adaptiveVisualQuantizer.saveNow()
         stopMemoryPlayback(clear = false)
         stopHybridPlayback(clear = false)
         stopCameraLearning()

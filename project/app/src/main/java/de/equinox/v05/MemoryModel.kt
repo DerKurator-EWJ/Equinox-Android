@@ -115,6 +115,8 @@ data class MemoryStats(
     val fftAudioMacros: Int = 0,
     val directAudioMacros: Int = 0,
     val adaptiveAudioMacros: Int = 0,
+    val adaptiveVisualCodes: Int = 0,
+    val adaptiveVisualMacros: Int = 0,
     val hierarchyBaseInputTokens: Long = 0L,
     val hierarchyBaseMacroEmissions: Long = 0L,
     val hierarchyBaseSavedTokens: Long = 0L,
@@ -523,10 +525,38 @@ class MemoryModel(context: Context) {
             code.weight++
             code.displayColor = packedRgb
         }
-
-        // Camera symbols get the same macro mechanism, but in an independent stream.
-        // Audio and vision are intentionally NOT cross-bound in Step 02.
         feedToken(streamLevel = 0, modality = "vision", tokenId = id)
+    }
+
+    /** Step 18 adaptive visual identity. IDs are learned by AdaptiveVisualQuantizer. */
+    @Synchronized
+    fun observeAdaptiveVisual(id: Int, packedRgb: Int) {
+        observations++
+        val code = quants[id]
+        if (code == null) {
+            quants[id] = QuantCode(
+                weight = 1L,
+                representativeHz = 0.0,
+                modality = "vision_adaptive",
+                displayColor = packedRgb
+            )
+        } else {
+            code.weight++
+            // The quantizer already supplies its slowly learned prototype color.
+            code.displayColor = packedRgb
+        }
+        feedToken(streamLevel = 0, modality = "vision_adaptive", tokenId = id)
+    }
+
+    /**
+     * Prevent a macro candidate from accidentally spanning the last cells of one image and
+     * the first cells of the next. Learned macros remain persistent and can immediately be
+     * recognized again inside the next frame. Temporal relations between activated macros
+     * are intentionally left intact for later cross-frame prediction.
+     */
+    @Synchronized
+    fun beginAdaptiveVisualFrame() {
+        rolling.keys.filter { it.startsWith("vision_adaptive|") }.toList().forEach { rolling.remove(it) }
     }
 
     /**
@@ -1498,7 +1528,7 @@ class MemoryModel(context: Context) {
             promotedSequences = macros.size,
             strongestSequenceWeight = max(strongestCandidate, strongestMacro),
             longestSequenceLength = longest,
-            visualPersistentCodes = quants.values.count { it.modality == "vision" },
+            visualPersistentCodes = quants.values.count { it.modality.startsWith("vision") },
             crossModalRelations = 0,
             sequenceCapacity = MAX_PATTERN_CANDIDATES,
             sequenceCapacityUsedPercent = candidates.size * 100.0 / MAX_PATTERN_CANDIDATES.toDouble(),
@@ -1526,6 +1556,8 @@ class MemoryModel(context: Context) {
             fftAudioMacros = macros.values.count { it.modality == "audio" },
             directAudioMacros = macros.values.count { it.modality == "audio_direct" },
             adaptiveAudioMacros = macros.values.count { it.modality == "audio_adaptive" },
+            adaptiveVisualCodes = quants.values.count { it.modality == "vision_adaptive" },
+            adaptiveVisualMacros = macros.values.count { it.modality == "vision_adaptive" },
             hierarchyBaseInputTokens = hierarchyBaseInputTokens,
             hierarchyBaseMacroEmissions = hierarchyBaseMacroEmissions,
             hierarchyBaseSavedTokens = hierarchyBaseSavedTokens,
@@ -1822,7 +1854,7 @@ class MemoryModel(context: Context) {
 
     private fun indexMacroComposition(macro: MacroCode) {
         macro.tokens.asSequence()
-            .filter { it >= MACRO_ID_BASE }
+            .filter { macros.containsKey(it) }
             .distinct()
             .forEach { child ->
                 macroParentUseCount[child] = (macroParentUseCount[child] ?: 0) + 1
@@ -1865,7 +1897,7 @@ class MemoryModel(context: Context) {
 
             // Step 08 only forms substitution classes above the raw quant alphabet.
             // A level-2+ template contains macro tokens as its slot variants.
-            if (isNewVariant && variant >= MACRO_ID_BASE) {
+            if (isNewVariant && macros.containsKey(variant)) {
                 substitutionTokenMeta[variant] = SubstitutionTokenMeta(
                     memberLevel = (macro.level - 1).coerceAtLeast(1),
                     modality = macro.modality
@@ -1875,7 +1907,7 @@ class MemoryModel(context: Context) {
                 // macro tokens are observed as alternatives. The local cap keeps a very
                 // broad template from creating an unbounded pair burst.
                 bucket.variants.asSequence()
-                    .filter { it >= MACRO_ID_BASE }
+                    .filter { macros.containsKey(it) }
                     .take(MAX_CLASS_VARIANTS_PER_TEMPLATE)
                     .forEach { other ->
                         if (other == variant) return@forEach
