@@ -67,6 +67,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step18-adaptivevisualencoder` | `Equinox_v06_Step18_AdaptiveVisualEncoder.zip` | 33 | 0 | `89b922907b0bb1969f60746fc3a0641f9520b845172df248707a886696ce2932` |
 | `android-v06-step19-crossmodalmacros` | `Equinox_v06_Step19_CrossmodalMacros.zip` | 33 | 0 | `5daa9868d180eaed5809e139ff45cce7a9ec61ec1d48bed44852640b1dd93de9` |
 | `android-v06-step20-memoryvideoengine` | `Equinox_v06_Step20_MemoryVideoEngine.zip` | 34 | 0 | `a62f377519e67a97ddf8083b17620d804df4bfa47b23bf0e4221bcd8c0bbf62a` |
+| `android-v06-step21-generativeorchestra` | `Equinox_v06_Step21_GenerativeOrchestra.zip` | 35 | 0 | `72fa83b05709a7821725060a29b7e4bb54e9c146f2f089b3674ca358d2b7e3c8` |
 
 ## Security, licensing, and limitations
 

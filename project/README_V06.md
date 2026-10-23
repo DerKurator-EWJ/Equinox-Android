@@ -1,38 +1,63 @@
-# Equinox v0.6 — Step 20: Memory-Driven Video Engine
+# Equinox v0.6 — Step 21: Generative Orchestra
 
 ## Ziel
-Step 20 schließt erstmals die visuelle Output-Schleife auf dem realen Kamerabild. Die Kamera ist nicht mehr nur Sensor für Visual-IDs: Ein zweiter, **nicht persistierter** Farbstrom dient als Leinwandmaterial. Der gelernte Core bleibt davon getrennt.
+Step 21 bringt die Audio-Ausgabe auf denselben konzeptionellen Stand wie die Memory-Video-Engine: Der aktuelle Equinox-Zustand wird nicht mehr nur als einige Sinustöne projiziert, sondern als **dynamisches, vollständig synthetisiertes Orchester** interpretiert.
 
-## Pipeline
+Es gibt weiterhin **keine Sound-Library, keine Samples und keine Audiodateien als Material**. Jeder hörbare Samplewert entsteht zur Laufzeit aus Oszillatoren, Hüllkurven, FM/Detune, Makro-Mitgliedsfrequenzen und deterministischem Rauschen.
+
+## Read-only Output
 
 ```text
-Kamera
-  ├─ 8×6 langsam → Adaptive Visual IDs → Makros / Memory
-  └─ 48×27 ~11 fps → reines RGB-Pigment → MemoryVideoView
-                                           ↑
-Core → Working Set / Recall / Prediction / Überaustausch / Relevanz
+MemoryModel
+   ↓ read-only
+SonificationSnapshot + WorkingSetSnapshot
+   ↓
+GenerativeOrchestraSceneBuilder
+   ↓
+OrchestraScene
+   ↓
+GenerativeOrchestraSynth
+   ↓
+AudioTrack
 ```
 
-Der 48×27-Strom wird **nicht** gespeichert, quantisiert oder als zweites Gedächtnis verwendet. Er ist nur Output-Material.
+Das Orchester schreibt nichts zurück ins Gedächtnis. Lernen und Klang bleiben getrennt.
 
-## Was das Bild beeinflusst
-- aktuelle Makroaktivierung
-- aus dem Gedächtnis geholte Erwartung
-- Predictive Recall
-- strukturelle Relevanz
-- Betrag und Vorzeichen des Überaustauschs
-- lokale aktive Makrofelder als reine Renderer-Koordinaten
+## Vier Sektionen aus der Abstraktionshierarchie
+Die vorhandenen Makrolevel werden nur für die Ausgabe als Orchesterrollen gelesen:
 
-Dadurch kann derselbe Kameraframe bei unterschiedlichem gelerntem Kontext anders aussehen. Der Renderer schreibt nichts zurück in `MemoryModel`.
+- **L1 → PULSE**: kurze, rhythmische Transienten
+- **L2 → MOTIF**: bewegte Motive / Arpeggien aus den Mitgliedsfrequenzen
+- **L3 → HARMONY**: langsamere harmonische Flächen
+- **L4+ → DRONE**: tiefe, stabile Fundamente
 
-## LIVE vs HYBRID
-- **LIVE VIDEO**: Verformung durch den gerade tatsächlich aktiven Working-State.
-- **HYBRID VIDEO**: derselbe Kamerastrom, aber Recall/Prediction können zusätzlich den Working-State beeinflussen.
+Das ist keine neue semantische Bedeutung im Core; es ist nur ein Decoder für Audio-Output.
 
-Der alte abstrakte State-Canvas bleibt darunter als Debug-/Interpretationsansicht erhalten.
+## Was hörbar wird
+- **Aktivierung** → unmittelbare Präsenz
+- **Erwartung / Predictive Recall** → leise Vorahnung vor dem nächsten Puls
+- **Überaustausch** → Spannung, FM und feines Detuning
+- **strukturelle Relevanz + Rang** → Präsenz und harmonische Dichte
+- **Generality** → offenere/rauschigere Klangfarbe
+- **Crossmodal Links** → zusätzliche spektrale Helligkeit/Breath
+- **Makro-Mitgliedsfrequenzen** → Akkord-/Motivmaterial statt nur einer Repräsentativfrequenz
 
-## Performance
-Der Video-Prototyp sampelt nur 48×27 = 1296 Farbzellen und zeichnet diese per Android Canvas. Das ist bewusst klein und robust. Ein späterer echter Shader-/OpenGL-Renderer kann dieselben read-only State-Werte bei voller Auflösung verwenden.
+## Generatives Tempo
+Das Tempo wird nicht als gespeicherte Eigenschaft eines Knotens behandelt. Es ist ausschließlich ein Output-Parameter und wird aus aktueller Aktivitätsdichte, Prediction und Relationstension abgeleitet. Typischer Bereich: ca. 42–138 BPM.
 
-## Wichtig
-Das ist **keine Behauptung**, dass das Bild eine andere physikalische Realität zeigt. Es ist eine audiovisuelle Projektion des aktuellen, erfahrungsabhängigen Equinox-Zustands auf Live-Sensordaten.
+## Continuous Orchestra
+Der bisherige Continuous-I/O-Pfad benutzt jetzt den neuen generativen Synthesizer. Mikrofon kann parallel weiterlaufen. `suppressionFrequencies()` enthält zusätzlich wichtige Makro-Mitgliedsfrequenzen und Harmonische, damit der Step-17-Eigenklangfilter weiter funktioniert.
+
+## Memory Orchestra
+`MEMORY ALS ORCHESTER SPIELEN` rendert denselben Orchester-Decoder als kurze 8-Sekunden-Performance aus dem aktuellen Memory-State. Dadurch verwenden LIVE/HYBRID und MEMORY denselben Klanggedanken statt zwei voneinander unabhängiger Synthesen.
+
+## Technische Änderungen
+- neu: `GenerativeOrchestraSynth.kt`
+- `ContinuousOrchestraEngine.kt` auf generatives Scene/Synth-Modell umgestellt
+- `OrchestraSonifier.kt` verwendet denselben Synthesizer
+- UI-Texte auf **Generative Orchestra** umgestellt
+- `versionCode = 35`
+- `versionName = 0.6-step21-generative-orchestra`
+
+## Teststatus
+Die neue reine Synthese-/Scene-Schicht wurde mit `kotlinc` kompiliert und mit einem synthetischen Working Set ausgeführt. AudioTrack-Komponenten wurden separat gegen Android-Stubs kompiliert. Ein kompletter Gradle/APK-Build ist in der Erstellungsumgebung mangels Android-SDK weiterhin nicht möglich.

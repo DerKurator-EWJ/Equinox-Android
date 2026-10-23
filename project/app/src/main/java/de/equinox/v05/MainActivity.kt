@@ -341,7 +341,7 @@ class MainActivity : ComponentActivity() {
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(300)).apply { topMargin = dp(12) }
         )
 
-        liveOrchestraStatus = label("Continuous I/O: AUS", 13f, 10).apply {
+        liveOrchestraStatus = label("Generative Orchestra: AUS", 13f, 10).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         livePage.addView(liveOrchestraStatus)
@@ -353,7 +353,7 @@ class MainActivity : ComponentActivity() {
         }
         livePage.addView(liveFeedbackProtectionToggle)
         liveContinuousButton = Button(this).apply {
-            text = "CONTINUOUS ORCHESTRA START"
+            text = "GENERATIVE ORCHESTRA START"
             setOnClickListener { toggleContinuousOrchestra() }
         }
         livePage.addView(liveContinuousButton, buttonParams(6))
@@ -437,7 +437,7 @@ class MainActivity : ComponentActivity() {
         }, weightedButtonParams())
         hybridPage.addView(row, buttonParams(10))
 
-        hybridOrchestraStatus = label("Continuous I/O: AUS", 13f, 10).apply {
+        hybridOrchestraStatus = label("Generative Orchestra: AUS", 13f, 10).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         hybridPage.addView(hybridOrchestraStatus)
@@ -449,7 +449,7 @@ class MainActivity : ComponentActivity() {
         }
         hybridPage.addView(hybridFeedbackProtectionToggle)
         hybridContinuousButton = Button(this).apply {
-            text = "CONTINUOUS ORCHESTRA START"
+            text = "GENERATIVE ORCHESTRA START"
             setOnClickListener { toggleContinuousOrchestra() }
         }
         hybridPage.addView(hybridContinuousButton, buttonParams(6))
@@ -505,19 +505,19 @@ class MainActivity : ComponentActivity() {
         memoryPage.addView(row, buttonParams(10))
 
         memoryAutoOrchestra = CheckBox(this).apply {
-            text = "Orchester automatisch aus aktuellem Memory-State"
+            text = "Generatives Orchester automatisch aus aktuellem Memory-State"
             setTextColor(Color.WHITE)
             isChecked = false
         }
         memoryPage.addView(memoryAutoOrchestra)
 
-        memoryOrchestraStatus = label("Memory-Orchester: AUS", 13f, 8).apply {
+        memoryOrchestraStatus = label("Generative Orchestra: AUS", 13f, 8).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         memoryPage.addView(memoryOrchestraStatus)
 
         memoryPage.addView(Button(this).apply {
-            text = "MEMORY-STATE JETZT SPIELEN"
+            text = "MEMORY ALS ORCHESTER SPIELEN"
             setOnClickListener {
                 sonifier.stop()
                 val state = outputBridge.snapshot(maxSoundMacros = 12)
@@ -900,7 +900,7 @@ class MainActivity : ComponentActivity() {
             setOnClickListener {
                 orchestra.stop()
                 labOrchestraStatus.text = "Orchester: AUS"
-                if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = "Memory-Orchester: AUS"
+                if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = "Generative Orchestra: AUS"
                 if (::liveOrchestraStatus.isInitialized) liveOrchestraStatus.text = "Live-Orchester: AUS"
             }
         }, buttonParams(6))
@@ -916,7 +916,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 20 ergänzt eine strikt read-only Memory-Video-Engine. Die Kamera liefert dafür einen schnelleren 48×27-Farbstrom als Pigment; Lernen bleibt separat im adaptiven 8×6-Encoder. Live-Aktivierung, Recall, Prediction, Relevanz und Überaustausch verformen nur die Ausgabe. Das ist ein Canvas-Prototyp der Video-Engine — noch kein GPU-/Shader-Renderer.",
+            "Step 21 ergänzt das read-only Generative Orchestra. Makroebenen werden zu Sektionen (Pulse, Motif, Harmony, Drone), Prediction wird als Vorahnung hörbar, Überaustausch als Spannung/FM und Crossmodalität als Klangfarbe. Es werden ausschließlich Oszillatoren, Hüllkurven und deterministisches Rauschen erzeugt — keine Sound-Library und keine Samples.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1091,14 +1091,14 @@ class MainActivity : ComponentActivity() {
             }
             pushContinuousOrchestraState()
             updateEchoCancelerState()
-            updateContinuousOrchestraUi("Continuous I/O: STARTET …")
+            updateContinuousOrchestraUi("Generative Orchestra: STARTET …")
         }
     }
 
     private fun stopContinuousOrchestra() {
         if (continuousOrchestra.isRunning()) continuousOrchestra.stop()
         updateEchoCancelerState()
-        updateContinuousOrchestraUi("Continuous I/O: AUS")
+        updateContinuousOrchestraUi("Generative Orchestra: AUS")
     }
 
     private fun pushContinuousOrchestraState() {
@@ -1116,8 +1116,8 @@ class MainActivity : ComponentActivity() {
         val full = text + guard
         if (::liveOrchestraStatus.isInitialized) liveOrchestraStatus.text = full
         if (::hybridOrchestraStatus.isInitialized) hybridOrchestraStatus.text = full
-        if (::liveContinuousButton.isInitialized) liveContinuousButton.text = if (continuousOrchestra.isRunning()) "CONTINUOUS ORCHESTRA STOP" else "CONTINUOUS ORCHESTRA START"
-        if (::hybridContinuousButton.isInitialized) hybridContinuousButton.text = if (continuousOrchestra.isRunning()) "CONTINUOUS ORCHESTRA STOP" else "CONTINUOUS ORCHESTRA START"
+        if (::liveContinuousButton.isInitialized) liveContinuousButton.text = if (continuousOrchestra.isRunning()) "GENERATIVE ORCHESTRA STOP" else "GENERATIVE ORCHESTRA START"
+        if (::hybridContinuousButton.isInitialized) hybridContinuousButton.text = if (continuousOrchestra.isRunning()) "GENERATIVE ORCHESTRA STOP" else "GENERATIVE ORCHESTRA START"
     }
 
     private fun setFeedbackProtection(enabled: Boolean) {
@@ -1131,7 +1131,7 @@ class MainActivity : ComponentActivity() {
             feedbackUiSyncing = false
         }
         updateEchoCancelerState()
-        updateContinuousOrchestraUi(if (continuousOrchestra.isRunning()) "Continuous I/O: AKTIV · ${continuousOrchestra.voiceCount()} Stimmen" else "Continuous I/O: AUS")
+        updateContinuousOrchestraUi(if (continuousOrchestra.isRunning()) "Generative Orchestra: ${continuousOrchestra.sceneSummary()}" else "Generative Orchestra: AUS")
     }
 
     private fun setupEchoCanceler(recorder: AudioRecord) {
