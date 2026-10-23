@@ -9,11 +9,13 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Bundle
 import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.TextView
+import android.widget.ScrollView
 import android.widget.Spinner
-import android.widget.ArrayAdapter
+import android.widget.TextView
 import kotlin.concurrent.thread
 import kotlin.math.log2
 import kotlin.math.max
@@ -39,6 +41,7 @@ class MainActivity : Activity() {
     private lateinit var stopButton: Button
     private lateinit var memoryStats: TextView
     private lateinit var intervalSpinner: Spinner
+    private lateinit var graphView: RelationGraphView
     private lateinit var memory: MemoryModel
     @Volatile private var lastConsolidationMs = 0L
 
@@ -46,12 +49,20 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         memory = MemoryModel(this)
 
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(Color.rgb(16, 18, 22))
+            fillViewport = true
+        }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(48, 64, 48, 48)
+            setPadding(36, 48, 36, 48)
             setBackgroundColor(Color.rgb(16, 18, 22))
         }
+        scroll.addView(root, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
 
         fun label(textValue: String, size: Float = 18f, top: Int = 16): TextView = TextView(this).apply {
             text = textValue
@@ -62,11 +73,11 @@ class MainActivity : Activity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 03 — MEMORY / CONSOLIDATION", 18f, 16).apply {
+        root.addView(label("STEP 04 — RELATIONAL TISSUE", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
-        status = label("Audio: AUS", 20f, 36)
+        status = label("Audio: AUS", 20f, 28)
         frequency = label("Dominante Frequenz: — Hz")
         frequencyId = label("Frequenz-ID: —")
         strength = label("Signalstärke: —")
@@ -77,34 +88,54 @@ class MainActivity : Activity() {
         root.addView(strength)
         root.addView(frames)
 
-        memoryStats = label(memoryText(), 15f, 22).apply { setTextColor(Color.rgb(180, 220, 215)) }
+        memoryStats = label(memoryText(), 15f, 18).apply { setTextColor(Color.rgb(180, 220, 215)) }
         root.addView(memoryStats)
+
+        graphView = RelationGraphView(this)
+        root.addView(graphView, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            dp(420)
+        ).apply { topMargin = dp(18) })
+        refreshGraph()
+
+        root.addView(label(
+            "Punkte = persistente Codes · Kurven = gerichtete Relationen · stärkere Wiederholung = stärkere Krümmung",
+            12f,
+            12
+        ).apply { setTextColor(Color.LTGRAY) })
 
         intervalSpinner = Spinner(this)
         val intervals = arrayOf("3 Sekunden", "30 Sekunden", "1 Minute", "5 Minuten", "15 Minuten", "30 Minuten")
         intervalSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, intervals)
         root.addView(intervalSpinner, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = 20 })
+        ).apply { topMargin = dp(18) })
+
+        val refreshButton = Button(this).apply {
+            text = "GRAPH AKTUALISIEREN"
+            setOnClickListener { refreshGraph() }
+        }
+        root.addView(refreshButton, buttonParams(10))
 
         val consolidateButton = Button(this).apply {
             text = "JETZT KONSOLIDIEREN"
             setOnClickListener {
                 val n = memory.consolidate()
                 memoryStats.text = memoryText() + "\nGerade gespeichert: $n neue Codes"
+                refreshGraph()
             }
         }
-        root.addView(consolidateButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = 10 })
+        root.addView(consolidateButton, buttonParams(8))
 
         val resetButton = Button(this).apply {
             text = "GEDÄCHTNIS LÖSCHEN"
-            setOnClickListener { memory.reset(); memoryStats.text = memoryText() }
+            setOnClickListener {
+                memory.reset()
+                memoryStats.text = memoryText()
+                refreshGraph()
+            }
         }
-        root.addView(resetButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = 8 })
+        root.addView(resetButton, buttonParams(8))
 
         startButton = Button(this).apply {
             text = "AUDIO STARTEN"
@@ -116,22 +147,27 @@ class MainActivity : Activity() {
             setOnClickListener { stopAudio() }
         }
 
-        root.addView(startButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = 40 })
-        root.addView(stopButton, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = 12 })
+        root.addView(startButton, buttonParams(28))
+        root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Audio → Frequenz-ID → temporäre Kandidaten → Wiederholung → persistente Codes → gerichtete Relationen",
-            13f,
-            24
+            "Der Kern speichert keine x/y-Positionen. Die Ansicht erzeugt ihre Koordinaten nur aus dem Relationsgraphen.",
+            12f,
+            18
         ).apply { setTextColor(Color.LTGRAY) })
 
-        setContentView(root)
+        setContentView(scroll)
+    }
+
+    private fun buttonParams(topDp: Int) = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+    ).apply { topMargin = dp(topDp) }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    private fun refreshGraph() {
+        graphView.setSnapshot(memory.graphSnapshot())
     }
 
     private fun ensurePermissionAndStart() {
@@ -230,11 +266,14 @@ class MainActivity : Activity() {
                 val id = if (hz > 0.0) (24.0 * log2(hz / 55.0)).roundToInt() else 0
                 frameCount++
                 memory.observe(id, hz)
+
+                var didConsolidate = false
                 val now = System.currentTimeMillis()
                 val interval = selectedIntervalMs()
                 if (now - lastConsolidationMs >= interval) {
                     memory.consolidate()
                     lastConsolidationMs = now
+                    didConsolidate = true
                 }
 
                 runOnUiThread {
@@ -244,12 +283,12 @@ class MainActivity : Activity() {
                         strength.text = "Signalstärke: %.5f".format(bestMag)
                         frames.text = "Frames verarbeitet: $frameCount"
                         if (frameCount % 5L == 0L) memoryStats.text = memoryText()
+                        if (didConsolidate || frameCount % 12L == 0L) refreshGraph()
                     }
                 }
             }
         }
     }
-
 
     private fun selectedIntervalMs(): Long {
         return when (intervalSpinner.selectedItemPosition) {
@@ -271,14 +310,17 @@ class MainActivity : Activity() {
     private fun stopAudio() {
         if (!running) return
         running = false
-        try { audioRecord?.stop() } catch (_: Exception) {}
-        try { worker?.join(500) } catch (_: InterruptedException) {}
-        try { audioRecord?.release() } catch (_: Exception) {}
+        try { audioRecord?.stop() } catch (_: Exception) { }
+        try { worker?.join(500) } catch (_: InterruptedException) { }
+        try { audioRecord?.release() } catch (_: Exception) { }
         audioRecord = null
         worker = null
         status.text = "Audio: AUS"
         startButton.isEnabled = true
         stopButton.isEnabled = false
+        memory.consolidate()
+        memoryStats.text = memoryText()
+        refreshGraph()
     }
 
     override fun onDestroy() {

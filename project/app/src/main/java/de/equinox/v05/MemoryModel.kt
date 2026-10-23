@@ -14,10 +14,28 @@ data class MemoryStats(
     val strongestWeight: Long
 )
 
+data class GraphNode(
+    val id: Int,
+    val weight: Long,
+    val representativeHz: Double
+)
+
+data class GraphEdge(
+    val fromId: Int,
+    val toId: Int,
+    val weight: Long
+)
+
+data class GraphSnapshot(
+    val nodes: List<GraphNode>,
+    val edges: List<GraphEdge>
+)
+
 class MemoryModel(context: Context) {
     private data class Code(var weight: Long, val representativeHz: Double)
     private data class Candidate(var hits: Int, var hzSum: Double)
 
+    // Same file name as Step 03 on purpose: an update keeps the learned memory.
     private val file = File(context.filesDir, "equinox_step03_memory.json")
     private val persistent = mutableMapOf<Int, Code>()
     private val candidates = mutableMapOf<Int, Candidate>()
@@ -71,6 +89,31 @@ class MemoryModel(context: Context) {
     }
 
     @Synchronized
+    fun graphSnapshot(maxNodes: Int = 48, maxEdges: Int = 160): GraphSnapshot {
+        if (persistent.isEmpty()) return GraphSnapshot(emptyList(), emptyList())
+
+        val strongestIds = persistent.entries
+            .sortedByDescending { it.value.weight }
+            .take(maxNodes)
+            .map { it.key }
+            .toSet()
+
+        val nodes = strongestIds.mapNotNull { id ->
+            persistent[id]?.let { GraphNode(id, it.weight, it.representativeHz) }
+        }.sortedBy { it.id }
+
+        val edges = relations.entries
+            .asSequence()
+            .map { (key, weight) -> GraphEdge(keyFrom(key), keyTo(key), weight) }
+            .filter { it.fromId in strongestIds && it.toId in strongestIds }
+            .sortedByDescending { it.weight }
+            .take(maxEdges)
+            .toList()
+
+        return GraphSnapshot(nodes, edges)
+    }
+
+    @Synchronized
     fun stats(): MemoryStats = MemoryStats(
         persistentCodes = persistent.size,
         temporaryCodes = candidates.size,
@@ -91,6 +134,9 @@ class MemoryModel(context: Context) {
 
     private fun pairKey(a: Int, b: Int): Long =
         (a.toLong() shl 32) xor (b.toLong() and 0xffffffffL)
+
+    private fun keyFrom(key: Long): Int = (key shr 32).toInt()
+    private fun keyTo(key: Long): Int = key.toInt()
 
     private fun pruneRelations() {
         if (relations.size <= 4096) return
