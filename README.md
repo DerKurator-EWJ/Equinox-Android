@@ -23,6 +23,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-eq29-ux` | `Eq29_UX.zip` | 46 | 0 | `506ded303877300600c53b609fb774b934e6f3b2ea8d55ca87d2a26a6b4bbedb` |
 | `android-eq30-unified` | `Eq30_Unified.zip` | 47 | 0 | `5b2f4841edca63cb72d3a8137c0ddb9b9ccf1ec4366a1967bef6ef2cd88b94df` |
 | `android-eq31-unifiedorchestra` | `Eq31_UnifiedOrchestra.zip` | 48 | 0 | `c9f1c6e5b3fb44e5fe1d376de9b063ac0222a9f814a624adc916d11b7a3a6129` |
+| `android-eq32-visualhierarchy` | `Eq32_VisualHierarchy.zip` | 49 | 0 | `e7e7e62cb20e7352872a7e5ef1e6d0f996ecb80bf9f255d2e7f38bb2bc6b4a12` |
 
 ## Security, licensing, and limitations
 

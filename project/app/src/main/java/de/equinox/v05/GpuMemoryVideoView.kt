@@ -14,7 +14,7 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Step 30 — Unified Canvas.
+ * Step 32 — Tier-aware Visual Hierarchy on the Unified Canvas.
  *
  * There is only one physical OpenGL surface. Camera pigment and the read-only Equinox
  * working set are two ingredients of the same renderer. memoryBlend is continuous:
@@ -139,13 +139,31 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     0.10 * predictionEnergy
                 ).coerceIn(0.0, 1.0)
 
-            val strongest = nodes
-                .asSequence()
-                .sortedByDescending {
-                    max(it.activation, it.expectation) * (0.45 + 0.55 * it.structuralRelevance)
+            // Renderer selection deliberately reserves visual room for abstraction depth.
+            // Deep structures must not disappear merely because many F/E nodes are active.
+            // This does NOT change learning, relevance or the working set itself.
+            fun renderScore(node: ActiveMacroNode): Double =
+                max(node.activation, node.expectation) * (0.45 + 0.55 * node.structuralRelevance)
+
+            val strongest = buildList {
+                val chosen = HashSet<Int>()
+                fun addBest(candidates: Sequence<ActiveMacroNode>, count: Int) {
+                    candidates
+                        .filter { chosen.add(it.id) }
+                        .sortedByDescending(::renderScore)
+                        .take(count)
+                        .forEach { add(it) }
                 }
-                .take(MAX_FIELDS)
-                .toList()
+
+                // Fine structures: F/E/D
+                addBest(nodes.asSequence().filter { it.abstractionTierIndex <= 2 }, 2)
+                // Tissue structures: C/B/A/S/SS
+                addBest(nodes.asSequence().filter { it.abstractionTierIndex in 3..7 }, 2)
+                // Large organizations: SSS/Ω/Ω+n
+                addBest(nodes.asSequence().filter { it.abstractionTierIndex >= 8 }, 2)
+                // One final strongest state regardless of depth.
+                addBest(nodes.asSequence(), MAX_FIELDS - size)
+            }.take(MAX_FIELDS)
 
             val positionById = HashMap<Int, Pair<Float, Float>>(strongest.size)
             val fieldData = FloatArray(MAX_FIELDS * 4)
@@ -154,12 +172,13 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 positionById[node.id] = p
                 val activity = max(node.activation, node.expectation).coerceIn(0.0, 1.0).toFloat()
                 val relevance = node.structuralRelevance.coerceIn(0.0, 1.0).toFloat()
-                val exchange = node.exchangeBias.coerceIn(-1.5, 1.5).toFloat()
                 val base = index * 4
                 fieldData[base] = p.first
                 fieldData[base + 1] = p.second
                 fieldData[base + 2] = activity * (0.30f + 0.70f * relevance)
-                fieldData[base + 3] = exchange
+                // Raw zero-based abstraction tier: F=0 ... SSS=8, Ω=9, Ω+n>9.
+                // Tier changes visual organization only; it is not an importance multiplier.
+                fieldData[base + 3] = node.abstractionTierIndex.coerceAtLeast(0).toFloat()
             }
 
             // A very small, GPU-friendly tissue skeleton. Links are chosen only from the
@@ -421,7 +440,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 uniform float uBlend;
                 uniform vec2 uTexel;
                 uniform int uFieldCount;
-                // x/y=renderer-only position, z=strength, w=exchange bias
+                // x/y=renderer-only position, z=strength, w=zero-based abstraction tier
                 uniform vec4 uFields[7];
                 uniform int uLinkCount;
                 // x/y=start, z/w=end
@@ -443,30 +462,70 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     float expectation = clamp(uSummary.z, 0.0, 1.0);
                     float prediction = clamp(uSummary.w, 0.0, 1.0);
 
-                    // The same state field deforms the camera and anchors the memory tissue.
-                    // No time-driven wobble: static state -> static image.
+                    // Tier-aware organization:
+                    // F/E/D are fine local fibers, C..SS become membranes/tissue,
+                    // SSS becomes a broad density field, Ω+n becomes a domain-scale organizer.
+                    // No tier is treated as automatically more important: strength still comes from
+                    // current activity/relevance, while tier only changes spatial expression.
                     vec2 uv = vTex;
-                    float nodeGlow = 0.0;
-                    float nodeCore = 0.0;
+                    float fineFiber = 0.0;
+                    float localTissue = 0.0;
+                    float densityField = 0.0;
+                    float domainField = 0.0;
+                    float coreSpark = 0.0;
+                    vec2 hierarchyWarp = vec2(0.0);
+
                     for (int i = 0; i < 7; ++i) {
                         if (i < uFieldCount) {
                             vec4 f = uFields[i];
                             vec2 delta = vTex - f.xy;
-                            float d2 = 0.018 + dot(delta, delta);
-                            float direction = f.w >= 0.0 ? 1.0 : -1.0;
-                            float exGain = 0.20 + 0.80 * min(1.0, abs(f.w));
-                            vec2 tangent = vec2(-delta.y, delta.x);
-
-                            float deform = (0.00010 + 0.00095 * f.z) * (0.45 + 0.55 * reality);
-                            uv -= delta * (deform / d2);
-                            uv += tangent * ((0.00008 + 0.00080 * f.z * exGain) * direction / d2);
-
                             float d = length(delta);
-                            float radius = 0.025 + 0.035 * f.z;
-                            nodeGlow += (1.0 - smoothstep(radius, radius + 0.035, d)) * f.z;
-                            nodeCore += (1.0 - smoothstep(0.006, 0.018, d)) * (0.35 + 0.65 * f.z);
+                            float d2 = 0.024 + dot(delta, delta);
+                            float tier = max(0.0, f.w);
+                            float strength = clamp(f.z, 0.0, 1.0);
+
+                            // Continuous category weights around the RPG abstraction scale.
+                            float low = 1.0 - smoothstep(2.0, 4.0, tier);
+                            float midIn = smoothstep(2.0, 4.0, tier);
+                            float midOut = 1.0 - smoothstep(6.5, 8.2, tier);
+                            float mid = midIn * midOut;
+                            float high = smoothstep(6.5, 9.2, tier);
+                            float omega = smoothstep(8.8, 10.5, tier);
+
+                            // Low tiers remain filamentary and local instead of appearing as big dots.
+                            float fiberRadius = 0.010 + 0.010 * strength;
+                            fineFiber += (1.0 - smoothstep(fiberRadius, fiberRadius + 0.022, d)) * strength * low;
+                            coreSpark += (1.0 - smoothstep(0.0035, 0.010, d)) * strength * low * 0.55;
+
+                            // Mid tiers are soft membranes/densifications rather than point markers.
+                            float tissueRadius = 0.060 + 0.035 * strength;
+                            localTissue += (1.0 - smoothstep(tissueRadius, tissueRadius + 0.070, d)) * strength * mid;
+
+                            // SSS and nearby tiers organize larger regional density.
+                            float fieldRadius = 0.14 + 0.06 * strength;
+                            densityField += (1.0 - smoothstep(fieldRadius, fieldRadius + 0.16, d)) * strength * high;
+
+                            // Ω and Ω+n act as broad organizing fields, not giant circles.
+                            // Their influence is deliberately low-frequency and distributed.
+                            float domain = (1.0 - smoothstep(0.22, 0.62, d)) * strength * omega;
+                            domainField += domain;
+
+                            vec2 radial = delta / max(0.08, d);
+                            vec2 tangent = vec2(-radial.y, radial.x);
+                            hierarchyWarp -= radial * (0.00010 * fineFiber / d2);
+                            hierarchyWarp += tangent * (0.00018 * localTissue / d2) * sign(signedEx + 0.0001);
+                            hierarchyWarp -= radial * domain * (0.0010 + 0.0012 * memory);
                         }
                     }
+
+                    fineFiber = min(1.25, fineFiber);
+                    localTissue = min(1.25, localTissue);
+                    densityField = min(1.25, densityField);
+                    domainField = min(1.0, domainField);
+                    coreSpark = min(1.0, coreSpark);
+
+                    // Memory depth shapes the same camera pigment. No time-based wobble.
+                    uv += hierarchyWarp * (0.30 + 0.70 * reality);
                     uv = clamp(uv, vec2(0.002), vec2(0.998));
 
                     vec2 chroma = vec2(0.0017 * signedEx * memory * reality, -0.0012 * signedEx * memory * reality);
@@ -493,8 +552,6 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                         }
                     }
                     linkGlow = min(1.4, linkGlow);
-                    nodeGlow = min(1.4, nodeGlow);
-                    nodeCore = min(1.2, nodeCore);
 
                     vec3 memoryBg = vec3(0.002, 0.004, 0.008);
                     vec3 tissueCyan = vec3(0.10, 0.78, 0.92);
@@ -503,19 +560,30 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     vec3 exchangeTint = signedEx >= 0.0 ? tissueCyan : tissueMagenta;
 
                     vec3 tissue = memoryBg;
-                    tissue += mix(tissueCyan, tissueGold, prediction) * linkGlow * (0.20 + 0.80 * memory);
-                    tissue += exchangeTint * nodeGlow * (0.18 + 0.60 * memory);
-                    tissue += vec3(1.0, 0.78, 0.36) * nodeCore * (0.20 + 0.75 * expectation);
+                    // Fine tiers: thread-like cyan/gold filaments.
+                    tissue += mix(tissueCyan, tissueGold, 0.28 + 0.35 * prediction) * fineFiber * (0.12 + 0.55 * memory);
+                    tissue += vec3(1.0, 0.78, 0.36) * coreSpark * (0.08 + 0.35 * expectation);
+                    // Mid tiers: translucent living membrane / local density.
+                    tissue += mix(exchangeTint, tissueGold, 0.35) * localTissue * (0.10 + 0.42 * memory);
+                    // High tiers: broad fields that organize multiple local structures.
+                    tissue += mix(tissueMagenta, tissueCyan, prediction) * densityField * (0.07 + 0.28 * memory);
+                    // Ω+n: very broad, quiet domain tint instead of a huge visible node.
+                    tissue += mix(vec3(0.06, 0.05, 0.16), tissueGold, 0.18 + 0.30 * expectation) * domainField * (0.08 + 0.22 * memory);
+                    // Persistent relation skeleton still ties the hierarchy together.
+                    tissue += mix(tissueCyan, tissueGold, prediction) * linkGlow * (0.10 + 0.50 * memory);
 
-                    // At mid blend, real camera geometry is allowed to "grow" into the same tissue.
+                    // At mid blend, real camera geometry is allowed to grow into the same tissue.
                     float bridge = 4.0 * blend * (1.0 - blend);
-                    tissue += mix(tissueCyan, tissueGold, 0.42) * cameraEdge * bridge * (0.10 + 0.35 * memory);
+                    float hierarchyBridge = max(fineFiber, max(localTissue, densityField));
+                    tissue += mix(tissueCyan, tissueGold, 0.42) * cameraEdge * bridge * (0.08 + 0.25 * memory);
+                    tissue += exchangeTint * cameraEdge * hierarchyBridge * bridge * 0.08;
 
-                    // One continuous surface: there is no hard LIVE/CANVAS switch anymore.
+                    // One continuous surface: Reality and Memory are states of the same renderer.
                     vec3 finalColor = mix(camera, tissue, blend);
-                    // Keep a whisper of state in Reality and a whisper of camera structure in Hybrid.
-                    finalColor += exchangeTint * nodeGlow * memory * reality * 0.045;
-                    finalColor += mix(tissueCyan, tissueGold, prediction) * linkGlow * memory * reality * 0.035;
+                    // Keep subtle hierarchy traces in Reality without turning it back into a node graph.
+                    finalColor += exchangeTint * localTissue * memory * reality * 0.018;
+                    finalColor += mix(tissueCyan, tissueGold, prediction) * fineFiber * memory * reality * 0.022;
+                    finalColor += mix(tissueMagenta, tissueCyan, 0.5) * domainField * memory * reality * 0.012;
 
                     gl_FragColor = vec4(clamp(finalColor, 0.0, 1.0), 1.0);
                 }
