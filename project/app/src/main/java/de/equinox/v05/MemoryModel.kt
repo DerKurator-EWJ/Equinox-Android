@@ -59,7 +59,7 @@ private const val MAX_CROSSMODAL_PARTNERS_PER_EVENT = 3
 private const val MAX_CROSSMODAL_CANDIDATES = 4_000
 
 /**
- * v0.6 Step 19
+ * v0.6 Step 22
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -68,9 +68,11 @@ private const val MAX_CROSSMODAL_CANDIDATES = 4_000
  * adaptive vector-quantizer IDs ("audio_adaptive"). They never mix sequence streams.
  * Step 13 added adaptive hierarchy promotion and non-overlapping macro emission.
  * Step 14 added dependency-safe memory competition. Step 15 added sparse directional
- * predictive recall. Step 16 added HYBRID mode. Step 19 adds a sparse cross-modal layer above the independent
+ * predictive recall. Step 16 added HYBRID mode. Step 19 added a sparse cross-modal layer above the independent
  * audio/vision streams: only already-learned sensor macros can become joint audio+visual macros,
  * and only after repeated near-simultaneous evidence. Raw quants remain modality-local.
+ * Step 22 adds an autonomous read-only DREAM traversal that can switch among learned
+ * predictions, ordinary relations, substitution alternatives and cross-modal bridges.
  * The coincidence clock is runtime-only and is never persisted into the learned identities.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
@@ -152,7 +154,15 @@ data class MemoryStats(
     val crossModalMacros: Int = 0,
     val crossModalCandidates: Int = 0,
     val crossModalActivations: Long = 0L,
-    val strongestCrossModalSupport: Long = 0L
+    val strongestCrossModalSupport: Long = 0L,
+    val dreamSteps: Long = 0L,
+    val dreamPredictionHops: Long = 0L,
+    val dreamRelationHops: Long = 0L,
+    val dreamSubstitutionHops: Long = 0L,
+    val dreamCrossModalHops: Long = 0L,
+    val dreamRestarts: Long = 0L,
+    val dreamLastMode: String = "—",
+    val dreamCursorId: Int = 0
 )
 
 data class GraphNode(
@@ -408,6 +418,9 @@ class MemoryModel(context: Context) {
     // persist in the normal macro table with modality="crossmodal". Pair lookup is sparse.
     private val crossModalCandidates = linkedMapOf<String, CrossModalCandidate>()
     private val crossModalByPair = mutableMapOf<String, Int>()
+    // Step 22: member -> learned joint-macro index. DREAM can jump across modalities
+    // without scanning every cross-modal macro on each autonomous step.
+    private val crossModalMemberIndex = mutableMapOf<Int, MutableSet<Int>>()
     private val recentSensorMacros = mutableMapOf(
         "audio" to ArrayDeque<RecentSensorMacro>(),
         "vision" to ArrayDeque<RecentSensorMacro>()
@@ -453,6 +466,20 @@ class MemoryModel(context: Context) {
     // Memory-mode traversal cursor. It is runtime-only and never learned back.
     private var memoryPlaybackCursor: Int? = null
     private var memoryPlaybackSteps = 0L
+
+    // Step 22 autonomous DREAM traversal. All fields are runtime-only. The dream can
+    // explore learned alternatives but never calls observe(), feedToken() or writes relations.
+    private enum class DreamHopKind { PREDICTION, RELATION, SUBSTITUTION, CROSSMODAL, RESTART }
+    private data class DreamChoice(val targetId: Int, val kind: DreamHopKind, val score: Double)
+    private var dreamPlaybackCursor: Int? = null
+    private var dreamPlaybackSteps = 0L
+    private var dreamPredictionHops = 0L
+    private var dreamRelationHops = 0L
+    private var dreamSubstitutionHops = 0L
+    private var dreamCrossModalHops = 0L
+    private var dreamRestarts = 0L
+    private var dreamLastMode = "—"
+    private val recentDreamIds = ArrayDeque<Int>()
 
     // Step 16 hybrid cursor is reset by every real live macro activation, then may walk
     // through predicted/related memory between sensor events. It is runtime-only.
@@ -938,6 +965,8 @@ class MemoryModel(context: Context) {
         )
         macros[joint.id] = joint
         crossModalByPair[signature] = joint.id
+        crossModalMemberIndex.getOrPut(audio.id) { linkedSetOf() }.add(joint.id)
+        crossModalMemberIndex.getOrPut(visual.id) { linkedSetOf() }.add(joint.id)
         macroBySignature[patternSignature((joint.level - 1).coerceAtLeast(0), joint.modality, joint.tokens)] = joint.id
         indexMacroComposition(joint)
         crossModalCandidates.remove(signature)
@@ -1296,6 +1325,213 @@ class MemoryModel(context: Context) {
 
 
     /**
+     * Step 22 autonomous DREAM activation.
+     *
+     * DREAM is deliberately read-only. One materialized macro becomes the temporary
+     * foreground, while the next cursor is chosen from learned prediction, relation,
+     * substitution or cross-modal alternatives. No observation counters, macro weights,
+     * relation counts, candidate hits or persistent overexchange values are changed.
+     */
+    @Synchronized
+    fun autonomousDreamStep(): Boolean {
+        if (macros.isEmpty()) return false
+
+        decayAndPruneWorkingSet()
+        currentExchanges.clear()
+        currentPredictions.clear()
+
+        val seed = dreamPlaybackCursor?.let { macros[it] } ?: chooseDreamSeed() ?: return false
+        val seedState = activeWorking.getOrPut(seed.id) {
+            WorkingMacro(
+                actual = 0.0,
+                expected = 0.0,
+                lastTouchedObservation = observations,
+                retrieved = true
+            )
+        }
+        // In DREAM, actual means "foreground of the internal projection", never sensor truth.
+        seedState.actual = max(seedState.actual, 0.82)
+        seedState.expected = max(seedState.expected, 0.18)
+        seedState.lastTouchedObservation = observations
+        seedState.retrieved = true
+
+        val retrieved = retrieveNeighborsIntoWorkingSet(seed.id, seed.modality)
+        val predictions = predictNextIntoWorkingSet(seed)
+        currentPredictions.addAll(predictions)
+        lastPredictionCandidates = predictions.size
+        lastTopPredictionConfidence = predictions.maxOfOrNull { it.confidence } ?: 0.0
+
+        val choices = buildDreamChoices(seed, predictions)
+        val chosen = chooseDreamChoice(choices)
+        if (chosen != null) {
+            val expectation = chosen.score.coerceIn(0.18, 0.96)
+            touchAsContext(chosen.targetId, expectation)
+            when (chosen.kind) {
+                DreamHopKind.PREDICTION -> dreamPredictionHops++
+                DreamHopKind.RELATION -> dreamRelationHops++
+                DreamHopKind.SUBSTITUTION -> dreamSubstitutionHops++
+                DreamHopKind.CROSSMODAL -> dreamCrossModalHops++
+                DreamHopKind.RESTART -> dreamRestarts++
+            }
+            dreamLastMode = chosen.kind.name
+        } else {
+            dreamLastMode = DreamHopKind.RESTART.name
+            dreamRestarts++
+        }
+
+        val localIds = LinkedHashSet<Int>()
+        localIds += seed.id
+        localIds.addAll(retrieved)
+        localIds.addAll(predictions.map { it.targetId })
+        chosen?.let { localIds += it.targetId }
+
+        // If a joint cross-modal macro is in the local dream frontier, expose both learned
+        // sensor components as context. This is projection only; it creates no coincidence evidence.
+        localIds.toList().forEach { id ->
+            val joint = macros[id] ?: return@forEach
+            if (joint.modality == "crossmodal") {
+                joint.tokens.filter { macros.containsKey(it) }.forEach { child ->
+                    touchAsContext(child, 0.36)
+                    localIds += child
+                }
+            }
+        }
+
+        val values = ArrayList<Double>()
+        for (otherId in localIds) {
+            if (otherId == seed.id) continue
+            val r = calculateTransientOverexchange(seed.id, otherId) ?: continue
+            values += abs(r)
+        }
+
+        lastRetrievedCount = retrieved.size
+        lastExchangePairs = values.size
+        lastMeanAbsExchange = if (values.isEmpty()) 0.0 else values.average()
+        enforceWorkingSetLimit()
+
+        rememberDreamId(seed.id)
+        dreamPlaybackSteps++
+        dreamPlaybackCursor = chosen?.targetId ?: chooseDreamSeed(excludeId = seed.id)?.id
+        return true
+    }
+
+    private fun buildDreamChoices(seed: MacroCode, predictions: List<ActivePrediction>): List<DreamChoice> {
+        val choices = LinkedHashMap<Int, DreamChoice>()
+
+        fun offer(targetId: Int, kind: DreamHopKind, rawScore: Double) {
+            if (targetId == seed.id) return
+            val target = macros[targetId] ?: return
+            val profile = structuralRankFor(target)
+            val recentPenalty = if (targetId in recentDreamIds) 0.34 else 1.0
+            val levelAffinity = 1.0 / (1.0 + 0.18 * abs(target.level - seed.level).toDouble())
+            val score = (rawScore + 0.22 * profile.relevance + 0.015 * profile.rankIndex) * recentPenalty * levelAffinity
+            val previous = choices[targetId]
+            if (previous == null || score > previous.score) {
+                choices[targetId] = DreamChoice(targetId, kind, score.coerceAtLeast(0.0))
+            }
+        }
+
+        predictions.forEach { p -> offer(p.targetId, DreamHopKind.PREDICTION, 0.55 + 0.95 * p.confidence) }
+
+        relationIndex[seed.id].orEmpty().asSequence()
+            .mapNotNull { key ->
+                val from = keyFrom(key)
+                val to = keyTo(key)
+                val other = if (from == seed.id) to else from
+                val target = macros[other] ?: return@mapNotNull null
+                if (target.modality != seed.modality) return@mapNotNull null
+                val weight = macroRelations[key] ?: return@mapNotNull null
+                Triple(other, weight, relationConfidenceByWeight(weight))
+            }
+            .sortedByDescending { it.second }
+            .take(8)
+            .forEach { (id, _, confidence) -> offer(id, DreamHopKind.RELATION, 0.42 + 0.72 * confidence) }
+
+        dreamSubstitutionAlternatives(seed.id, seed.modality)
+            .take(8)
+            .forEach { id -> offer(id, DreamHopKind.SUBSTITUTION, 0.56) }
+
+        dreamCrossModalAlternatives(seed.id)
+            .take(8)
+            .forEach { id -> offer(id, DreamHopKind.CROSSMODAL, 0.66) }
+
+        return choices.values.toList()
+    }
+
+    private fun chooseDreamChoice(choices: List<DreamChoice>): DreamChoice? {
+        if (choices.isEmpty()) return null
+
+        // Deterministic exploration schedule: autonomous and reproducible, but not locked
+        // forever to the strongest edge. Missing categories simply fall back to best score.
+        val preferred = when ((dreamPlaybackSteps % 9L).toInt()) {
+            0, 4 -> DreamHopKind.PREDICTION
+            1, 6 -> DreamHopKind.RELATION
+            2, 7 -> DreamHopKind.CROSSMODAL
+            3 -> DreamHopKind.SUBSTITUTION
+            else -> null
+        }
+        val pool = preferred?.let { kind -> choices.filter { it.kind == kind } }.orEmpty().ifEmpty { choices }
+        return pool.maxByOrNull { choice -> choice.score + dreamJitter(choice.targetId) }
+    }
+
+    private fun dreamJitter(id: Int): Double {
+        var x = id.toLong() xor (dreamPlaybackSteps * -7046029254386353131L)
+        x = x xor (x ushr 33)
+        x *= -49064778989728563L
+        x = x xor (x ushr 33)
+        val unit = ((x ushr 11) and 0xffffL).toDouble() / 65535.0
+        return unit * 0.14
+    }
+
+    private fun dreamSubstitutionAlternatives(sourceId: Int, modality: String): List<Int> =
+        derivedSubstitutionClasses()
+            .asSequence()
+            .filter { it.modality == modality && sourceId in it.members }
+            .flatMap { it.members.asSequence() }
+            .filter { it != sourceId && macros[it]?.modality == modality }
+            .distinct()
+            .sortedByDescending { macros[it]?.weight ?: 0L }
+            .take(12)
+            .toList()
+
+    private fun dreamCrossModalAlternatives(sourceId: Int): List<Int> {
+        val source = macros[sourceId] ?: return emptyList()
+        if (source.modality == "crossmodal") {
+            return source.tokens.asSequence()
+                .filter { macros.containsKey(it) }
+                .take(8)
+                .toList()
+        }
+        return crossModalMemberIndex[sourceId].orEmpty().asSequence()
+            .filter { macros[it]?.modality == "crossmodal" }
+            .sortedByDescending { macros[it]?.weight ?: 0L }
+            .take(8)
+            .toList()
+    }
+
+    private fun chooseDreamSeed(excludeId: Int? = null): MacroCode? {
+        val top = macros.values.asSequence()
+            .filter { it.id != excludeId }
+            .sortedWith(
+                compareByDescending<MacroCode> { structuralRankFor(it).relevance }
+                    .thenByDescending { it.level }
+                    .thenByDescending { it.weight }
+            )
+            .take(32)
+            .toList()
+        if (top.isEmpty()) return null
+        val preferred = top.filter { it.id !in recentDreamIds }.ifEmpty { top }
+        val index = ((dreamPlaybackSteps + dreamRestarts) % preferred.size.toLong()).toInt()
+        return preferred[index]
+    }
+
+    private fun rememberDreamId(id: Int) {
+        recentDreamIds.remove(id)
+        recentDreamIds.addLast(id)
+        while (recentDreamIds.size > 12) recentDreamIds.removeFirst()
+    }
+
+    /**
      * Step 16 HYBRID activation.
      *
      * The current live macro is the anchor. Between sensor events the cursor may follow one
@@ -1367,6 +1603,15 @@ class MemoryModel(context: Context) {
         lastMeanAbsExchange = 0.0
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
+        dreamPlaybackCursor = null
+        dreamPlaybackSteps = 0L
+        dreamPredictionHops = 0L
+        dreamRelationHops = 0L
+        dreamSubstitutionHops = 0L
+        dreamCrossModalHops = 0L
+        dreamRestarts = 0L
+        dreamLastMode = "—"
+        recentDreamIds.clear()
         hybridPlaybackCursor = null
         hybridPlaybackSteps = 0L
         lastHybridSeedId = 0
@@ -1793,7 +2038,15 @@ class MemoryModel(context: Context) {
             crossModalMacros = macros.values.count { it.modality == "crossmodal" },
             crossModalCandidates = crossModalCandidates.size,
             crossModalActivations = crossModalActivations,
-            strongestCrossModalSupport = crossModalCandidates.values.maxOfOrNull { it.hits } ?: 0L
+            strongestCrossModalSupport = crossModalCandidates.values.maxOfOrNull { it.hits } ?: 0L,
+            dreamSteps = dreamPlaybackSteps,
+            dreamPredictionHops = dreamPredictionHops,
+            dreamRelationHops = dreamRelationHops,
+            dreamSubstitutionHops = dreamSubstitutionHops,
+            dreamCrossModalHops = dreamCrossModalHops,
+            dreamRestarts = dreamRestarts,
+            dreamLastMode = dreamLastMode,
+            dreamCursorId = dreamPlaybackCursor ?: 0
         )
     }
 
@@ -1806,6 +2059,7 @@ class MemoryModel(context: Context) {
         macroParentUseCount.clear()
         crossModalCandidates.clear()
         crossModalByPair.clear()
+        crossModalMemberIndex.clear()
         recentSensorMacros.values.forEach { it.clear() }
         crossModalActivations = 0L
         templateBuckets.clear()
@@ -1823,6 +2077,15 @@ class MemoryModel(context: Context) {
         pendingPredictionsByStream.clear()
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
+        dreamPlaybackCursor = null
+        dreamPlaybackSteps = 0L
+        dreamPredictionHops = 0L
+        dreamRelationHops = 0L
+        dreamSubstitutionHops = 0L
+        dreamCrossModalHops = 0L
+        dreamRestarts = 0L
+        dreamLastMode = "—"
+        recentDreamIds.clear()
         hybridPlaybackCursor = null
         hybridPlaybackSteps = 0L
         lastHybridSeedId = 0
@@ -1868,6 +2131,11 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         macroParentUseCount.clear()
+        crossModalCandidates.clear()
+        crossModalByPair.clear()
+        crossModalMemberIndex.clear()
+        recentSensorMacros.values.forEach { it.clear() }
+        crossModalActivations = 0L
         templateBuckets.clear()
         templateSignaturesByMacro.clear()
         substitutionPairSupport.clear()
@@ -1883,6 +2151,15 @@ class MemoryModel(context: Context) {
         pendingPredictionsByStream.clear()
         memoryPlaybackCursor = null
         memoryPlaybackSteps = 0L
+        dreamPlaybackCursor = null
+        dreamPlaybackSteps = 0L
+        dreamPredictionHops = 0L
+        dreamRelationHops = 0L
+        dreamSubstitutionHops = 0L
+        dreamCrossModalHops = 0L
+        dreamRestarts = 0L
+        dreamLastMode = "—"
+        recentDreamIds.clear()
         hybridPlaybackCursor = null
         hybridPlaybackSteps = 0L
         lastHybridSeedId = 0
@@ -2497,6 +2774,8 @@ class MemoryModel(context: Context) {
 
         previousActiveMacro.entries.removeIf { it.value in removeIds }
         memoryPlaybackCursor = memoryPlaybackCursor?.takeUnless { it in removeIds }
+        dreamPlaybackCursor = dreamPlaybackCursor?.takeUnless { it in removeIds }
+        recentDreamIds.removeIf { it in removeIds }
 
         // Rolling buffers are runtime state only. Remove any now-invalid macro tokens.
         rolling.values.forEach { buffer ->
@@ -2586,6 +2865,7 @@ class MemoryModel(context: Context) {
 
     private fun rebuildCrossModalIndex() {
         crossModalByPair.clear()
+        crossModalMemberIndex.clear()
         macros.values.asSequence()
             .filter { it.modality == "crossmodal" && it.tokens.size == 2 }
             .forEach { joint ->
@@ -2593,6 +2873,8 @@ class MemoryModel(context: Context) {
                 val visualId = joint.tokens.firstOrNull { child -> macros[child]?.let { sensorFamily(it.modality) == "vision" } == true }
                 if (audioId != null && visualId != null) {
                     crossModalByPair[crossModalPairSignature(audioId, visualId)] = joint.id
+                    crossModalMemberIndex.getOrPut(audioId) { linkedSetOf() }.add(joint.id)
+                    crossModalMemberIndex.getOrPut(visualId) { linkedSetOf() }.add(joint.id)
                 }
             }
     }

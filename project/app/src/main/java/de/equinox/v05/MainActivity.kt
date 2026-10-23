@@ -38,6 +38,7 @@ class MainActivity : ComponentActivity() {
         private const val SAMPLE_RATE = 48_000
         private const val FFT_SIZE = 2_048
         private const val MEMORY_STEP_MS = 650L
+        private const val DREAM_STEP_MS = 520L
         private const val HYBRID_STEP_MS = 420L
     }
 
@@ -46,6 +47,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var running = false
     @Volatile private var cameraRunning = false
     @Volatile private var memoryPlaybackRunning = false
+    @Volatile private var dreamPlaybackRunning = false
     @Volatile private var hybridPlaybackRunning = false
 
     private var cameraProvider: ProcessCameraProvider? = null
@@ -78,6 +80,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var memoryCanvas: EquinoxOutputView
     private lateinit var graphView: RelationGraphView
     private lateinit var memoryModeStatus: TextView
+    private lateinit var dreamModeStatus: TextView
     private lateinit var hybridModeStatus: TextView
     private lateinit var hybridSensorStatus: TextView
     private lateinit var memoryOrchestraStatus: TextView
@@ -154,6 +157,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val dreamLoop = object : Runnable {
+        override fun run() {
+            if (!dreamPlaybackRunning) return
+
+            val ok = memory.autonomousDreamStep()
+            if (!ok) {
+                dreamPlaybackRunning = false
+                if (::dreamModeStatus.isInitialized) dreamModeStatus.text = "DREAM: noch keine gelernten Makros"
+                return
+            }
+
+            refreshMemoryPage()
+            updateMemoryStats()
+
+            if (::memoryAutoOrchestra.isInitialized && memoryAutoOrchestra.isChecked && !orchestra.isPlaying()) {
+                val state = outputBridge.snapshot(maxSoundMacros = 12)
+                orchestra.play(state) { text ->
+                    runOnUiThread { if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = text }
+                }
+            }
+
+            uiHandler.postDelayed(this, DREAM_STEP_MS)
+        }
+    }
+
     private val hybridLoop = object : Runnable {
         override fun run() {
             if (!hybridPlaybackRunning) return
@@ -197,7 +225,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 20 — MEMORY-DRIVEN VIDEO ENGINE", 17f, 8).apply {
+        root.addView(label("STEP 22 — AUTONOMOUS MEMORY DREAM", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -460,7 +488,7 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(226, 130, 255))
         })
         memoryPage.addView(label(
-            "Kein Mikrofon, keine Kamera, kein neues Lernen. Equinox traversiert nur bereits gelernte Makros und Relationen und materialisiert daraus ein temporäres Working Set.",
+            "Kein Mikrofon, keine Kamera, kein neues Lernen. MEMORY traversiert gelernte Pfade; DREAM wechselt autonom zwischen Prediction, Relationen, Substitutionsklassen und Crossmodal-Brücken.",
             12f,
             6
         ).apply { setTextColor(Color.LTGRAY) })
@@ -470,7 +498,12 @@ class MainActivity : ComponentActivity() {
         }
         memoryPage.addView(memoryModeStatus)
 
-        memoryCanvas = EquinoxOutputView(this).apply { setModeLabel("MEMORY") }
+        dreamModeStatus = label("DREAM: bereit", 14f, 6).apply {
+            setTextColor(Color.rgb(255, 176, 112))
+        }
+        memoryPage.addView(dreamModeStatus)
+
+        memoryCanvas = EquinoxOutputView(this).apply { setModeLabel("MEMORY / DREAM") }
         memoryPage.addView(
             memoryCanvas,
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(540)).apply { topMargin = dp(12) }
@@ -481,7 +514,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
         }
         val start = Button(this).apply {
-            text = "RUN"
+            text = "MEMORY RUN"
             setOnClickListener { startMemoryPlayback() }
         }
         val step = Button(this).apply {
@@ -503,6 +536,32 @@ class MainActivity : ComponentActivity() {
         row.addView(step, weightedButtonParams())
         row.addView(stop, weightedButtonParams())
         memoryPage.addView(row, buttonParams(10))
+
+        val dreamRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+        dreamRow.addView(Button(this).apply {
+            text = "DREAM RUN"
+            setOnClickListener { startDreamPlayback() }
+        }, weightedButtonParams())
+        dreamRow.addView(Button(this).apply {
+            text = "DREAM STEP"
+            setOnClickListener {
+                stopMemoryPlayback(clear = false)
+                stopAudio()
+                stopCameraLearning()
+                val ok = memory.autonomousDreamStep()
+                dreamModeStatus.text = if (ok) "DREAM: Einzelschritt" else "DREAM: noch keine gelernten Makros"
+                refreshMemoryPage()
+                updateMemoryStats()
+            }
+        }, weightedButtonParams())
+        dreamRow.addView(Button(this).apply {
+            text = "DREAM STOP"
+            setOnClickListener { stopDreamPlayback(clear = false) }
+        }, weightedButtonParams())
+        memoryPage.addView(dreamRow, buttonParams(6))
 
         memoryAutoOrchestra = CheckBox(this).apply {
             text = "Generatives Orchester automatisch aus aktuellem Memory-State"
@@ -964,6 +1023,7 @@ class MainActivity : ComponentActivity() {
                 labPage.visibility = View.GONE
                 memoryPage.visibility = View.VISIBLE
                 memoryModeStatus.text = if (memory.hasLearnedMacros()) "MEMORY: bereit" else "MEMORY: noch keine gelernten Makros"
+                if (::dreamModeStatus.isInitialized) dreamModeStatus.text = if (memory.hasLearnedMacros()) "DREAM: bereit" else "DREAM: noch keine gelernten Makros"
             }
             AppPage.LAB -> {
                 stopMemoryPlayback(clear = false)
@@ -1040,6 +1100,7 @@ class MainActivity : ComponentActivity() {
         stopCameraLearning()
         sonifier.stop()
         stopContinuousOrchestra()
+        stopDreamPlayback(clear = false)
         if (!memoryPlaybackRunning) {
             memoryPlaybackRunning = true
             memoryModeStatus.text = "MEMORY: RUN · nur gelerntes Gedächtnis"
@@ -1050,10 +1111,40 @@ class MainActivity : ComponentActivity() {
 
     private fun stopMemoryPlayback(clear: Boolean) {
         memoryPlaybackRunning = false
+        dreamPlaybackRunning = false
         uiHandler.removeCallbacks(memoryLoop)
+        uiHandler.removeCallbacks(dreamLoop)
         if (clear) memory.clearMomentaryState()
         if (::memoryModeStatus.isInitialized) {
             memoryModeStatus.text = if (memory.hasLearnedMacros()) "MEMORY: gestoppt" else "MEMORY: noch keine gelernten Makros"
+        }
+        if (::dreamModeStatus.isInitialized) {
+            dreamModeStatus.text = if (memory.hasLearnedMacros()) "DREAM: gestoppt" else "DREAM: noch keine gelernten Makros"
+        }
+    }
+
+    private fun startDreamPlayback() {
+        if (!memory.hasLearnedMacros()) {
+            if (::dreamModeStatus.isInitialized) dreamModeStatus.text = "DREAM: noch keine gelernten Makros"
+            return
+        }
+        stopAudio()
+        stopCameraLearning()
+        sonifier.stop()
+        stopContinuousOrchestra()
+        stopMemoryPlayback(clear = false)
+        dreamPlaybackRunning = true
+        dreamModeStatus.text = "DREAM: RUN · read-only autonome Exploration"
+        uiHandler.removeCallbacks(dreamLoop)
+        uiHandler.post(dreamLoop)
+    }
+
+    private fun stopDreamPlayback(clear: Boolean) {
+        dreamPlaybackRunning = false
+        uiHandler.removeCallbacks(dreamLoop)
+        if (clear) memory.clearMomentaryState()
+        if (::dreamModeStatus.isInitialized) {
+            dreamModeStatus.text = if (memory.hasLearnedMacros()) "DREAM: gestoppt" else "DREAM: noch keine gelernten Makros"
         }
     }
 
@@ -1064,6 +1155,10 @@ class MainActivity : ComponentActivity() {
         val w = state.working
         if (::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
             memoryModeStatus.text = "MEMORY: RUN · ${w.nodes.size} aktiv · ${w.exchanges.size} Austausch"
+        }
+        if (::dreamModeStatus.isInitialized && dreamPlaybackRunning) {
+            val d = memory.stats()
+            dreamModeStatus.text = "DREAM: RUN · ${d.dreamLastMode} · Schritt ${d.dreamSteps} · ${w.nodes.size} aktiv"
         }
     }
 
@@ -1528,6 +1623,7 @@ class MainActivity : ComponentActivity() {
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
             "Predictive Recall: ${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Treffer ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%)\n" +
             "Hybrid: ${s.hybridSteps} interne Schritte | letzter Seed ${if (s.hybridSeedId == 0) "—" else s.hybridSeedId}\n" +
+            "Dream: ${s.dreamSteps} Schritte | P ${s.dreamPredictionHops} · R ${s.dreamRelationHops} · S ${s.dreamSubstitutionHops} · X ${s.dreamCrossModalHops} · Restart ${s.dreamRestarts} | letzter Modus ${s.dreamLastMode}\n" +
             "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
