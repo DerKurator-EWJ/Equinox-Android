@@ -242,14 +242,34 @@ class RelationGraphView(context: Context) : View(context) {
             val baseRadius = 10f + 17f * sqrt(normalized)
 
             if (node.abstractionLevel == 0) {
-                nodePaint.color = frequencyColor(node.representativeHz)
-                canvas.drawCircle(x, y, baseRadius, nodePaint)
-                val halo = Paint(nodePaint).apply {
-                    style = Paint.Style.STROKE
-                    strokeWidth = 2f
-                    alpha = 80
+                nodePaint.color = if (node.modality == "vision" && node.displayColor != 0) {
+                    Color.rgb(
+                        (node.displayColor shr 16) and 0xff,
+                        (node.displayColor shr 8) and 0xff,
+                        node.displayColor and 0xff
+                    )
+                } else {
+                    frequencyColor(node.representativeHz)
                 }
-                canvas.drawCircle(x, y, baseRadius + 4f, halo)
+
+                if (node.modality == "vision") {
+                    val r = baseRadius * 0.92f
+                    canvas.drawRect(x - r, y - r, x + r, y + r, nodePaint)
+                    val halo = Paint(nodePaint).apply {
+                        style = Paint.Style.STROKE
+                        strokeWidth = 2f
+                        alpha = 95
+                    }
+                    canvas.drawRect(x - r - 4f, y - r - 4f, x + r + 4f, y + r + 4f, halo)
+                } else {
+                    canvas.drawCircle(x, y, baseRadius, nodePaint)
+                    val halo = Paint(nodePaint).apply {
+                        style = Paint.Style.STROKE
+                        strokeWidth = 2f
+                        alpha = 80
+                    }
+                    canvas.drawCircle(x, y, baseRadius + 4f, halo)
+                }
             } else {
                 val radius = baseRadius + 8f + node.abstractionLevel * 4f
                 nodePaint.color = levelColor(node.abstractionLevel, node.representativeHz)
@@ -274,6 +294,8 @@ class RelationGraphView(context: Context) : View(context) {
         }
 
         val microCount = snapshot.nodes.count { it.abstractionLevel == 0 }
+        val audioCount = snapshot.nodes.count { it.abstractionLevel == 0 && it.modality == "audio" }
+        val visionCount = snapshot.nodes.count { it.abstractionLevel == 0 && it.modality == "vision" }
         val levels = snapshot.nodes
             .filter { it.abstractionLevel > 0 }
             .groupingBy { it.abstractionLevel }
@@ -286,7 +308,7 @@ class RelationGraphView(context: Context) : View(context) {
         infoPaint.textSize = 20f
         val suffix = if (levels.isBlank()) "keine Makroebene" else levels
         canvas.drawText(
-            "$microCount Mikro · $suffix · ${visibleEdges.size}/${snapshot.edges.size} Relationen",
+            "$microCount Mikro (A:$audioCount · V:$visionCount) · $suffix · ${visibleEdges.size}/${snapshot.edges.size} Relationen",
             18f,
             height - 18f,
             infoPaint

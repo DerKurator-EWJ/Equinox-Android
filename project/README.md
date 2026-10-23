@@ -1,31 +1,34 @@
-# Equinox v0.5 — Step 08
+# Equinox v0.5 — Step 09
 
-Step 08 adds sequence memory and sequence compression.
+Step 09 adds the first real visual input and multimodal binding.
 
 ## New
-- Interned sequence memory (trie/DAG-like parent + next-token representation).
-- Repeated chains do not get stored as raw copies; one sequence code increases its weight.
-- Sequence depth is capped at 6 for real-time stability.
-- Sequence memory exists independently on each abstraction stream.
-- Stable sequences are promoted into macro tokens of the next abstraction level.
-- Promoted sequence macros can themselves participate in higher-level sequences.
-- Existing Step 07 memory is migrated automatically.
-- The UI shows:
-  - number of sequence codes
-  - promoted/compressed sequences
-  - longest represented sequence
-  - strongest sequence weight
-- Sequence-derived macro nodes get a distinct spindle/chain glyph.
-- Sequence-node count is capped at 12,000 to prevent runaway RAM/storage growth.
+- Camera permission and CameraX image analysis.
+- Rear camera is analysed directly; no video file is recorded.
+- Coarse 8×6 visual raster.
+- Each sampled cell is quantized to one of 64 coarse RGB color classes.
+- A visual symbol is encoded from `(cell, color class)`.
+- Visual symbols are stored in the same persistent memory graph as audio symbols.
+- Visual microcodes render as colored squares; audio microcodes remain circles.
+- Audio↔vision relations are strengthened when a visual observation occurs while an audio code is active.
+- Visual continuity relations are also stored.
+- Existing sequence compression and recursive abstraction remain active.
+- Existing Step 08 memory is migrated automatically.
+- UI counters show visual frames, visual observations, persistent visual codes and cross-modal relations.
+- Camera analysis is throttled to roughly one frame every 700 ms to keep the phone responsive and to avoid flooding memory.
 
-## Concept
-A recurring chain such as X → C → E → Y is represented by a short internal node chain:
-(parentSequenceId, nextTokenId, weight)
+## Privacy / storage behavior
+Step 09 does NOT save photographs or raw camera frames.
+Only quantized visual symbols and their learned relation weights enter the Equinox memory file.
 
-Repeating the same chain increases weight instead of duplicating the raw chain.
+## Architecture
+Camera -> 8x6 samples -> 64-class color quantization -> visual token IDs
+Audio -> FFT -> frequency IDs
+
+Both streams -> shared relational memory -> recursive macro abstraction
 
 ## Important
-This is an online memory/compression experiment. A high sequence weight means recurrence, not meaning, truth, or semantic importance.
+Cell position is part of the visual encoder's symbol identity; it is not treated as fundamental physical x/y inside the relational core.
 
 ## Install
-Open this folder as a new Android Studio project, generate the APK and install it over the existing `de.equinox.v05` app.
+Open the folder as a fresh Android Studio project, generate the APK and install it over the existing `de.equinox.v05` app.

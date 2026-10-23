@@ -26,7 +26,9 @@ data class MemoryStats(
     val sequenceCodes: Int,
     val promotedSequences: Int,
     val strongestSequenceWeight: Long,
-    val longestSequenceLength: Int
+    val longestSequenceLength: Int,
+    val visualPersistentCodes: Int,
+    val crossModalRelations: Int
 )
 
 data class GraphNode(
@@ -35,7 +37,9 @@ data class GraphNode(
     val representativeHz: Double,
     val abstractionLevel: Int = 0,
     val memberCount: Int = 1,
-    val kind: String = "micro"
+    val kind: String = "micro",
+    val modality: String = "audio",
+    val displayColor: Int = 0
 ) {
     val isMacro: Boolean get() = abstractionLevel > 0
 }
@@ -82,8 +86,18 @@ data class ConsolidationResult(
 )
 
 class MemoryModel(context: Context) {
-    private data class Code(var weight: Long, val representativeHz: Double)
-    private data class Candidate(var hits: Int, var hzSum: Double)
+    private data class Code(
+        var weight: Long,
+        val representativeHz: Double,
+        val modality: String = "audio",
+        var displayColor: Int = 0
+    )
+    private data class Candidate(
+        var hits: Int,
+        var hzSum: Double,
+        val modality: String = "audio",
+        var displayColor: Int = 0
+    )
 
     private data class MacroCode(
         val id: Int,
@@ -123,6 +137,8 @@ class MemoryModel(context: Context) {
     private var nextSequenceId = SEQUENCE_ID_BASE
     private var macroFrozen = false
     private var previousId: Int? = null
+    private var latestAudioId: Int? = null
+    private var previousVisualId: Int? = null
     private val previousByLevel = mutableMapOf<Int, Int>()
     private var observations = 0L
 
@@ -131,13 +147,14 @@ class MemoryModel(context: Context) {
     @Synchronized
     fun observe(id: Int, hz: Double) {
         observations++
+        latestAudioId = id
 
         val known = persistent[id]
         if (known != null) {
             known.weight++
             feedSequenceToken(streamLevel = 0, tokenId = id)
         } else {
-            val c = candidates.getOrPut(id) { Candidate(0, 0.0) }
+            val c = candidates.getOrPut(id) { Candidate(0, 0.0, "audio", 0) }
             c.hits++
             c.hzSum += hz
         }
@@ -258,6 +275,48 @@ class MemoryModel(context: Context) {
     }
 
     @Synchronized
+    fun observeVisual(id: Int, packedRgb: Int) {
+        observations++
+
+        val known = persistent[id]
+        if (known != null) {
+            known.weight++
+            known.displayColor = packedRgb
+        } else {
+            val c = candidates.getOrPut(id) {
+                Candidate(
+                    hits = 0,
+                    hzSum = 0.0,
+                    modality = "vision",
+                    displayColor = packedRgb
+                )
+            }
+            c.hits++
+            c.displayColor = packedRgb
+        }
+
+        // Sparse visual continuity: neighboring observations in the emitted grid stream.
+        previousVisualId?.let { prev ->
+            if (prev != id) {
+                val key = pairKey(prev, id)
+                relations[key] = (relations[key] ?: 0L) + 1L
+            }
+        }
+        previousVisualId = id
+
+        // Cross-modal binding: the latest audio symbol and the current visual symbol
+        // become related when they occur in the same ongoing experience.
+        latestAudioId?.let { audioId ->
+            if (audioId != id) {
+                val forward = pairKey(audioId, id)
+                val backward = pairKey(id, audioId)
+                relations[forward] = (relations[forward] ?: 0L) + 1L
+                relations[backward] = (relations[backward] ?: 0L) + 1L
+            }
+        }
+    }
+
+    @Synchronized
     fun consolidate(
         minHits: Int = 3,
         baseRelationThreshold: Long = 10L,
@@ -273,7 +332,9 @@ class MemoryModel(context: Context) {
                 if (existing == null) {
                     persistent[id] = Code(
                         weight = c.hits.toLong(),
-                        representativeHz = c.hzSum / max(1, c.hits)
+                        representativeHz = if (c.modality == "audio") c.hzSum / max(1, c.hits) else 0.0,
+                        modality = c.modality,
+                        displayColor = c.displayColor
                     )
                 } else {
                     existing.weight += c.hits
@@ -341,15 +402,14 @@ class MemoryModel(context: Context) {
             val orderedTokens = resolveSequenceTokens(seq.id)
             if (orderedTokens.size < 2) continue
 
-            val hzValues = orderedTokens.mapNotNull { representativeHzOf(it) }
-            if (hzValues.isEmpty()) continue
+            val hzValues = orderedTokens.mapNotNull { representativeHzOf(it) }.filter { it > 0.0 }
 
             val macro = MacroCode(
                 id = nextMacroId++,
                 level = seq.streamLevel + 1,
                 members = orderedTokens.toMutableSet(),
                 weight = seq.weight,
-                representativeHz = hzValues.average(),
+                representativeHz = if (hzValues.isEmpty()) 0.0 else hzValues.average(),
                 kind = "sequence",
                 sourceSequenceId = seq.id
             )
@@ -405,12 +465,19 @@ class MemoryModel(context: Context) {
         for ((a, b, weight) in candidatesForMacro) {
             if (relationMacroForPairAtLevel(targetLevel, a, b) != null) continue
 
-            val hzA = representativeHzOf(a) ?: continue
-            val hzB = representativeHzOf(b) ?: continue
+            val hzA = representativeHzOf(a) ?: 0.0
+            val hzB = representativeHzOf(b) ?: 0.0
             val weightA = weightOf(a).coerceAtLeast(1L)
             val weightB = weightOf(b).coerceAtLeast(1L)
-            val total = (weightA + weightB).toDouble()
-            val hz = (hzA * weightA + hzB * weightB) / total
+            val hzParts = mutableListOf<Pair<Double, Long>>()
+            if (hzA > 0.0) hzParts += hzA to weightA
+            if (hzB > 0.0) hzParts += hzB to weightB
+            val hz = if (hzParts.isEmpty()) {
+                0.0
+            } else {
+                val total = hzParts.sumOf { it.second }.toDouble()
+                hzParts.sumOf { it.first * it.second } / total
+            }
 
             val macro = MacroCode(
                 id = nextMacroId++,
@@ -500,7 +567,9 @@ class MemoryModel(context: Context) {
                     representativeHz = it.representativeHz,
                     abstractionLevel = 0,
                     memberCount = 1,
-                    kind = "micro"
+                    kind = "micro",
+                    modality = it.modality,
+                    displayColor = it.displayColor
                 )
             }
         }
@@ -516,7 +585,9 @@ class MemoryModel(context: Context) {
                 } else {
                     m.members.size
                 },
-                kind = m.kind
+                kind = m.kind,
+                modality = "macro",
+                displayColor = 0
             )
         }
 
@@ -580,6 +651,7 @@ class MemoryModel(context: Context) {
     @Synchronized
     fun sonificationSnapshot(maxMicro: Int = 8, maxMacros: Int = 8): SonificationSnapshot {
         val micro = persistent.entries
+            .filter { it.value.modality == "audio" && it.value.representativeHz > 0.0 }
             .sortedByDescending { it.value.weight }
             .take(maxMicro)
             .map { (id, code) ->
@@ -625,7 +697,13 @@ class MemoryModel(context: Context) {
             strongestSequenceWeight = sequences.values
                 .filter { it.length >= 2 }
                 .maxOfOrNull { it.weight } ?: 0L,
-            longestSequenceLength = sequences.values.maxOfOrNull { it.length } ?: 0
+            longestSequenceLength = sequences.values.maxOfOrNull { it.length } ?: 0,
+            visualPersistentCodes = persistent.values.count { it.modality == "vision" },
+            crossModalRelations = relations.entries.count { (key, _) ->
+                val a = persistent[keyFrom(key)]?.modality
+                val b = persistent[keyTo(key)]?.modality
+                a != null && b != null && a != b
+            }
         )
     }
 
@@ -640,6 +718,8 @@ class MemoryModel(context: Context) {
         sequenceIndex.clear()
         activeSequenceSuffixes.clear()
         previousId = null
+        latestAudioId = null
+        previousVisualId = null
         previousByLevel.clear()
         observations = 0L
         nextMacroId = MACRO_ID_BASE
@@ -687,6 +767,8 @@ class MemoryModel(context: Context) {
                         .put("id", id)
                         .put("weight", c.weight)
                         .put("hz", c.representativeHz)
+                        .put("modality", c.modality)
+                        .put("displayColor", c.displayColor)
                 )
             }
             root.put("codes", codes)
@@ -754,8 +836,10 @@ class MemoryModel(context: Context) {
             for (i in 0 until codes.length()) {
                 val o = codes.getJSONObject(i)
                 persistent[o.getInt("id")] = Code(
-                    o.getLong("weight"),
-                    o.getDouble("hz")
+                    weight = o.getLong("weight"),
+                    representativeHz = o.optDouble("hz", 0.0),
+                    modality = o.optString("modality", "audio"),
+                    displayColor = o.optInt("displayColor", 0)
                 )
             }
 
