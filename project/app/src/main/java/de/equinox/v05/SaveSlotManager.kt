@@ -12,7 +12,7 @@ data class SaveSlotInfo(
 )
 
 class SaveSlotManager(private val context: Context) {
-    private val liveFile = File(context.filesDir, "equinox_step03_memory.json")
+    private val liveFile = File(context.filesDir, "equinox_v06_memory.json")
 
     fun info(slot: Int): SaveSlotInfo {
         val f = slotFile(slot)
@@ -55,15 +55,15 @@ class SaveSlotManager(private val context: Context) {
         if (!f.exists()) return "Slot $slot leer"
         return try {
             val root = JSONObject(f.readText())
-            val codes = root.optJSONArray("codes")?.length() ?: 0
+            val quants = root.optJSONArray("quants")?.length() ?: 0
             val macros = root.optJSONArray("macros")?.length() ?: 0
-            val sequences = root.optJSONArray("sequences")?.length() ?: 0
-            "Slot $slot · $codes Mikro · $macros Makro · $sequences Sequenzen · ${f.length()} Bytes"
+            val relations = root.optJSONArray("macroRelations")?.length() ?: 0
+            "Slot $slot · $quants Quanten · $macros Makros · $relations Relationen · ${f.length()} Bytes"
         } catch (_: Exception) {
             "Slot $slot · Datei vorhanden · ${f.length()} Bytes"
         }
     }
 
     private fun slotFile(slot: Int): File =
-        File(context.filesDir, "equinox_slot_${slot.coerceIn(1, 3)}.json")
+        File(context.filesDir, "equinox_v06_slot_${slot.coerceIn(1, 3)}.json")
 }

@@ -24,6 +24,7 @@ import kotlin.math.sqrt
 class EquinoxOutputView(context: Context) : View(context) {
     private var state: EngineOutputState? = null
     private var phase = 0f
+    private var modeLabel = "LIVE"
 
     private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -45,6 +46,11 @@ class EquinoxOutputView(context: Context) : View(context) {
         invalidate()
     }
 
+    fun setModeLabel(label: String) {
+        modeLabel = label.trim().uppercase().ifEmpty { "OUTPUT" }
+        invalidate()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         canvas.drawColor(Color.rgb(5, 7, 12))
@@ -59,7 +65,7 @@ class EquinoxOutputView(context: Context) : View(context) {
         if (active.isEmpty()) {
             drawMemoryField(canvas, s)
             infoPaint.color = Color.argb(150, 200, 210, 225)
-            canvas.drawText("MEMORY FIELD · noch kein aktives Makro", 18f, height - 18f, infoPaint)
+            canvas.drawText("$modeLabel · noch kein aktives Makro", 18f, height - 18f, infoPaint)
             return
         }
 
@@ -90,7 +96,7 @@ class EquinoxOutputView(context: Context) : View(context) {
             s.working.exchanges.sumOf { abs(it.value) } / s.working.exchanges.size.toDouble()
         infoPaint.color = Color.argb(175, 215, 225, 245)
         canvas.drawText(
-            "LIVE STATE · ${active.size} aktiv · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)}",
+            "$modeLabel · ${active.size} aktiv · ${s.working.exchanges.size} Austausch · Ø|R| ${"%.3f".format(meanR)}",
             18f,
             height - 18f,
             infoPaint

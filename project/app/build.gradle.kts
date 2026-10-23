@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.6-step04-output-canvas-orchestra"
+        versionCode = 19
+        versionName = "0.6-step05-live-memory-modes"
     }
 
     compileOptions {

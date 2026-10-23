@@ -31,8 +31,8 @@ data class DiagnosticSummary(
 )
 
 class DiagnosticsManager(private val context: Context) {
-    private val file = File(context.filesDir, "equinox_step12_diagnostics.json")
-    private val memoryFile = File(context.filesDir, "equinox_step03_memory.json")
+    private val file = File(context.filesDir, "equinox_v06_diagnostics.json")
+    private val memoryFile = File(context.filesDir, "equinox_v06_memory.json")
     private val samples = mutableListOf<DiagnosticSample>()
     private var nextSampleIndex = 1L
 
@@ -134,7 +134,7 @@ class DiagnosticsManager(private val context: Context) {
     }
 
     fun writeCsvExport(): File {
-        val out = File(context.filesDir, "equinox_step12_diagnostics.csv")
+        val out = File(context.filesDir, "equinox_v06_diagnostics.csv")
         out.writeText(exportCsvText())
         return out
     }

@@ -25,10 +25,11 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 03
+ * v0.6 Step 05
  *
- * Adds an active working set, indexed lazy retrieval and the first bounded
- * overexchange implementation on top of the Step 02 quant/macro architecture.
+ * Keeps the bounded active working set and indexed lazy retrieval, and adds a
+ * non-learning memory-playback path. External observations can still update long-term
+ * memory; Memory mode only activates already learned macros and relations.
  *
  * Operational definitions used here:
  * - A_i = current/live activation of macro i
@@ -204,6 +205,13 @@ class MemoryModel(context: Context) {
     // Long-term smoothed overexchange memory. Keys are canonical unordered pairs.
     private val exchangeMemory = mutableMapOf<Long, ExchangeMemory>()
 
+    // Event-local exchange values used by the output. These are never persisted.
+    private val currentExchanges = mutableMapOf<Long, Double>()
+
+    // Memory-mode traversal cursor. It is runtime-only and never learned back.
+    private var memoryPlaybackCursor: Int? = null
+    private var memoryPlaybackSteps = 0L
+
     // One short active stream per modality and abstraction source level.
     private val rolling = mutableMapOf<String, ArrayDeque<Int>>()
     private val previousActiveMacro = mutableMapOf<String, Int>()
@@ -313,6 +321,7 @@ class MemoryModel(context: Context) {
         macro.lastActivatedObservation = observations
 
         decayAndPruneWorkingSet()
+        currentExchanges.clear()
 
         val relationStreamKey = streamKey(macro.level, macro.modality)
         val previous = previousActiveMacro[relationStreamKey]
@@ -436,6 +445,7 @@ class MemoryModel(context: Context) {
 
         val key = exchangePairKey(aId, bId)
         val canonicalValue = if (aId <= bId) r else -r
+        currentExchanges[key] = canonicalValue
         val memory = exchangeMemory.getOrPut(key) { ExchangeMemory(ema = 0.0, samples = 0L) }
         memory.ema = if (memory.samples == 0L) {
             canonicalValue
@@ -562,6 +572,134 @@ class MemoryModel(context: Context) {
         quants[id]?.let { return if (it.representativeHz > 0.0) listOf(it.representativeHz) else emptyList() }
         val macro = macros[id] ?: return emptyList()
         return macro.tokens.flatMap { leafHzOf(it, depth + 1) }
+    }
+
+    /**
+     * Step 05 memory-only activation.
+     *
+     * No quant/macro weights, candidate hits, macro relations, observations or persistent
+     * overexchange memories are changed. The method only materializes a small working set
+     * from already learned relations so renderers / sonifiers can play the memory itself.
+     */
+    @Synchronized
+    fun memoryPlaybackStep(): Boolean {
+        if (macros.isEmpty()) return false
+
+        decayAndPruneWorkingSet()
+        currentExchanges.clear()
+
+        val seed = chooseMemoryPlaybackSeed() ?: return false
+        val seedState = activeWorking.getOrPut(seed.id) {
+            WorkingMacro(
+                actual = 0.0,
+                expected = 0.0,
+                lastTouchedObservation = observations,
+                retrieved = true
+            )
+        }
+        // "actual" here means currently materialized in the output working set, not
+        // an external sensor observation. Memory mode never calls observe()/feedToken().
+        seedState.actual = max(seedState.actual, 0.86)
+        seedState.expected = max(seedState.expected, 0.16)
+        seedState.lastTouchedObservation = observations
+        seedState.retrieved = true
+
+        val retrieved = retrieveNeighborsIntoWorkingSet(seed.id, seed.modality)
+        val localIds = LinkedHashSet<Int>()
+        localIds += seed.id
+        localIds.addAll(retrieved)
+
+        val values = ArrayList<Double>()
+        for (otherId in localIds) {
+            if (otherId == seed.id) continue
+            val r = calculateTransientOverexchange(seed.id, otherId) ?: continue
+            values += abs(r)
+        }
+
+        lastRetrievedCount = retrieved.size
+        lastExchangePairs = values.size
+        lastMeanAbsExchange = if (values.isEmpty()) 0.0 else values.average()
+        enforceWorkingSetLimit()
+
+        memoryPlaybackSteps++
+        memoryPlaybackCursor = chooseNextMemoryCursor(seed.id, seed.modality)
+        return true
+    }
+
+    /** Drop only runtime activation. Persistent learned memory remains untouched. */
+    @Synchronized
+    fun clearMomentaryState() {
+        activeWorking.clear()
+        currentExchanges.clear()
+        previousActiveMacro.clear()
+        lastRetrievedCount = 0
+        lastExchangePairs = 0
+        lastMeanAbsExchange = 0.0
+        memoryPlaybackCursor = null
+        memoryPlaybackSteps = 0L
+    }
+
+    @Synchronized
+    fun hasLearnedMacros(): Boolean = macros.isNotEmpty()
+
+    private fun chooseMemoryPlaybackSeed(): MacroCode? {
+        val cursor = memoryPlaybackCursor
+        if (cursor != null) {
+            macros[cursor]?.let { return it }
+        }
+
+        // Only used to enter/re-enter the learned graph. Subsequent steps use the local
+        // relation index and therefore do not scan the entire memory on every tick.
+        val top = macros.values
+            .sortedWith(compareByDescending<MacroCode> { it.weight }.thenByDescending { it.level })
+            .take(24)
+        if (top.isEmpty()) return null
+        return top[(memoryPlaybackSteps % top.size.toLong()).toInt()]
+    }
+
+    private fun chooseNextMemoryCursor(sourceId: Int, modality: String): Int? {
+        val local = relationIndex[sourceId].orEmpty().asSequence()
+            .mapNotNull { key ->
+                val from = keyFrom(key)
+                val to = keyTo(key)
+                val other = if (from == sourceId) to else from
+                val macro = macros[other] ?: return@mapNotNull null
+                if (macro.modality != modality) return@mapNotNull null
+                val weight = macroRelations[key] ?: return@mapNotNull null
+                other to weight
+            }
+            .sortedByDescending { it.second }
+            .take(4)
+            .toList()
+
+        if (local.isNotEmpty()) {
+            return local[(memoryPlaybackSteps % local.size.toLong()).toInt()].first
+        }
+
+        // Dead end: jump to another strong macro. This is traversal, not learning.
+        val fallback = macros.values
+            .asSequence()
+            .filter { it.id != sourceId }
+            .sortedWith(compareByDescending<MacroCode> { it.weight }.thenByDescending { it.level })
+            .take(24)
+            .toList()
+        if (fallback.isEmpty()) return sourceId
+        return fallback[(memoryPlaybackSteps % fallback.size.toLong()).toInt()].id
+    }
+
+    private fun calculateTransientOverexchange(aId: Int, bId: Int): Double? {
+        if (aId == bId) return null
+        val a = activeWorking[aId] ?: return null
+        val b = activeWorking[bId] ?: return null
+        val r = a.actual * b.expected - a.expected * b.actual
+        if (!r.isFinite()) return null
+
+        a.exchangeBias = a.exchangeBias * 0.80 + r * 0.20
+        b.exchangeBias = b.exchangeBias * 0.80 - r * 0.20
+
+        val key = exchangePairKey(aId, bId)
+        currentExchanges[key] = if (aId <= bId) r else -r
+        return r
     }
 
     @Synchronized
@@ -731,12 +869,12 @@ class MemoryModel(context: Context) {
             )
         }
 
-        val exchanges = exchangeMemory.entries.asSequence()
-            .mapNotNull { (key, memory) ->
+        val exchanges = currentExchanges.entries.asSequence()
+            .mapNotNull { (key, value) ->
                 val a = keyFrom(key)
                 val b = keyTo(key)
                 if (a !in selectedIds || b !in selectedIds) return@mapNotNull null
-                ActiveExchange(a, b, memory.ema)
+                ActiveExchange(a, b, value)
             }
             .sortedByDescending { abs(it.value) }
             .take(maxNodes * 2)
@@ -791,6 +929,9 @@ class MemoryModel(context: Context) {
         relationIndex.clear()
         activeWorking.clear()
         exchangeMemory.clear()
+        currentExchanges.clear()
+        memoryPlaybackCursor = null
+        memoryPlaybackSteps = 0L
         rolling.clear()
         previousActiveMacro.clear()
         lastRetrievedCount = 0
@@ -815,6 +956,9 @@ class MemoryModel(context: Context) {
         relationIndex.clear()
         activeWorking.clear()
         exchangeMemory.clear()
+        currentExchanges.clear()
+        memoryPlaybackCursor = null
+        memoryPlaybackSteps = 0L
         rolling.clear()
         previousActiveMacro.clear()
         lastRetrievedCount = 0
@@ -829,7 +973,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_03)
+                .put("formatVersion", 60_05)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
