@@ -1,12 +1,8 @@
-# Equinox v0.6 — Step 38
+# Equinox v0.5 — Step 01
+Minimaler Basistest. Keine Kamera, kein Mikrofon, kein Speicher, keine Relationen.
+Ziel: zuerst sicherstellen, dass Android Studio -> Gradle -> Emulator/Telefon -> App funktioniert.
 
-Current milestone: **Spatial Coupler**.
-
-Build the Android project in Android Studio and install it on device. Camera learning now keeps the adaptive
-visual codebook, but compresses connected near-identical patches into frame-local regions before they enter
-the memory hierarchy. Familiar flat areas also stop refining just because they are familiar.
-
-In **Settings -> camera diagnostics**, compare `Roh -> gekoppelt` to see how much visual core work is removed
-for the current scene.
-
-See `README_STEP38.md` for implementation notes. Step 37 profiles remain format-compatible.
+Erwarteter Bildschirm:
+EQUINOX v0.5
+STEP 01 OK
+Basis-App läuft.

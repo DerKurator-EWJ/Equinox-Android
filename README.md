@@ -30,6 +30,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-eq36-record` | `Eq36_Record.zip` | 56 | 0 | `71e81c53fdbbee10b78969ce12b5254f7a2ab8787d0a06b8dcd536d4134c276d` |
 | `android-eq37-profiles` | `Eq37_Profiles.zip` | 58 | 0 | `1ca92e7c111969f60b5273316593f18cabd8a31e268a80835f0b800d1e592acb` |
 | `android-eq38-spatialcoupler` | `Eq38_SpatialCoupler.zip` | 60 | 0 | `7d9adbc991d8de4548fb88c0a5e8b7d8daaf2fa963279923aeb71acaefd6b720` |
+| `android-v05-step01` | `Equinox_v05_Step01.zip` | 8 | 0 | `a5f900f4c233e8a38ea5fd8de557b76f7349feb76baf782a91b9904a645bc91e` |
 
 ## Security, licensing, and limitations
 
