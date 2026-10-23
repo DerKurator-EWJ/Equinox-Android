@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 52
-        versionName = "0.6-step37-memory-profiles"
+        versionCode = 53
+        versionName = "0.6-step38-spatial-coupler"
     }
 
     compileOptions {

@@ -45,20 +45,28 @@ object AdaptiveScalePolicy {
     const val PREDICTION_MASS_TARGET = 0.94
 
     /**
-     * Familiar regions can be resolved more deeply. New/surprising regions receive exploratory
-     * refinement as well, so unknown things do not remain permanently low-resolution.
+     * Step 38 resolves familiar regions more deeply only when they still contain local detail.
+     * New/surprising regions retain exploratory refinement, so unknown things are not trapped
+     * at low resolution while flat known surfaces become progressively cheaper.
      */
     fun visualRefinementPriority(
         familiarity: Double,
         noveltyRatio: Double,
         created: Boolean,
-        depth: Int
+        depth: Int,
+        detailSignal: Double = 1.0
     ): Double {
         val known = familiarity.coerceIn(0.0, 1.0)
+        val detail = detailSignal.coerceIn(0.0, 1.0)
         val surprise = noveltyRatio.coerceIn(0.0, 3.0) / 3.0
-        val exploration = if (created) 0.72 else surprise * 0.58
+
+        // Step 38: familiarity alone is no longer a reason to spend resolution. A familiar,
+        // flat wall quickly becomes cheap; a familiar textured/edged region may still refine.
+        // Newly created or genuinely surprising identities retain exploratory refinement.
+        val knownDetail = known * (0.08 + 0.92 * detail)
+        val exploration = if (created) 0.72 else surprise * (0.30 + 0.28 * detail)
         val depthCost = 1.0 / (1.0 + depth.coerceAtLeast(0) * 0.42)
-        return (max(known, exploration) * depthCost).coerceIn(0.0, 1.0)
+        return (max(knownDetail, exploration) * depthCost).coerceIn(0.0, 1.0)
     }
 
     fun shouldRefineVisual(
@@ -67,11 +75,12 @@ object AdaptiveScalePolicy {
         created: Boolean,
         depth: Int,
         regionWidthPx: Int,
-        regionHeightPx: Int
+        regionHeightPx: Int,
+        detailSignal: Double = 1.0
     ): Boolean {
         // Natural stop: the source image no longer contains enough pixels to split usefully.
         if (regionWidthPx < 4 || regionHeightPx < 4) return false
-        val priority = visualRefinementPriority(familiarity, noveltyRatio, created, depth)
+        val priority = visualRefinementPriority(familiarity, noveltyRatio, created, depth, detailSignal)
         val threshold = (0.46 + depth * 0.055).coerceAtMost(0.90)
         return priority >= threshold
     }

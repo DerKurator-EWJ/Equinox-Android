@@ -1633,7 +1633,7 @@ class MainActivity : ComponentActivity() {
         if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio: AUS"
         if (::startButton.isInitialized) startButton.isEnabled = !running
         if (::stopButton.isInitialized) stopButton.isEnabled = running
-        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · Lernen adaptiv coarse→fine · Video adaptiv" else "Kamera: AUS"
+        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · Lernen adaptiv + Spatial Coupler · Video adaptiv" else "Kamera: AUS"
         if (::cameraButton.isInitialized) cameraButton.isEnabled = !cameraRunning
         if (::cameraStopButton.isInitialized) cameraStopButton.isEnabled = cameraRunning
     }
@@ -2159,17 +2159,21 @@ class MainActivity : ComponentActivity() {
                             // Frame-local reset prevents one spatial macro candidate from crossing
                             // the image boundary; learned identities/macros themselves remain intact.
                             memory.beginAdaptiveVisualFrame()
-                            result.observations.forEach { obs ->
-                                memory.observeAdaptiveVisual(obs.tokenId, obs.packedRgb)
+                            result.coupledRegions.forEach { region ->
+                                memory.observeAdaptiveVisualRegion(
+                                    region.tokenId,
+                                    region.packedRgb,
+                                    region.supportCount
+                                )
                             }
                             visualFrameCount++
-                            visualObservationCount += result.observations.size
+                            visualObservationCount += result.coupledRegions.size
                             livePipeline.reportAnalysisCost(result.analysisCostMs.toDouble() + result.videoSampleCostMs.toDouble())
 
                             runOnUiThread {
                                 if (settingsOpen) {
                                     cameraFrames.text =
-                                        "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · Regionen ${result.sampledRegions} · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)} · Analyse ${result.analysisCostMs}ms · Video ${result.videoSampleCostMs}ms/${result.videoIntervalMs}ms"
+                                        "Visuelle Frames: $visualFrameCount · Core-Regionen: $visualObservationCount · Roh ${result.sampledRegions} → gekoppelt ${result.coupledRegions.size} (${"%.0f".format(result.couplingReduction * 100.0)}% weniger) · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)} · Analyse ${result.analysisCostMs}ms · Video ${result.videoSampleCostMs}ms/${result.videoIntervalMs}ms"
                                     updateLiveLatencyStatus()
                                     adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
                                     if (visualFrameCount % 2L == 0L) updateMemoryStats()
@@ -2190,7 +2194,7 @@ class MainActivity : ComponentActivity() {
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
                 cameraRunning = true
-                cameraStatus.text = "Kamera: AKTIV · Lernen adaptiv coarse→fine · Video adaptiv"
+                cameraStatus.text = "Kamera: AKTIV · Lernen adaptiv + Spatial Coupler · Video adaptiv"
                 cameraButton.isEnabled = false
                 cameraStopButton.isEnabled = true
                 refreshSensorUiState()

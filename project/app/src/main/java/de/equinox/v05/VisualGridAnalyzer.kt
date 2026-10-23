@@ -18,11 +18,23 @@ data class VisualObservation(
     val resolutionDepth: Int = 0,
     val centerX: Double = 0.5,
     val centerY: Double = 0.5,
-    val familiarity: Double = 0.0
+    val familiarity: Double = 0.0,
+    val x0: Double = centerX,
+    val y0: Double = centerY,
+    val x1: Double = centerX,
+    val y1: Double = centerY,
+    val luminance: Double = 0.0,
+    val chromaRg: Double = 0.5,
+    val chromaBg: Double = 0.5,
+    val saturation: Double = 0.0,
+    val localContrast: Double = 0.0,
+    val gradientX: Double = 0.5,
+    val gradientY: Double = 0.5
 )
 
 data class VisualFrameResult(
     val observations: List<VisualObservation>,
+    val coupledRegions: List<CoupledVisualRegion>,
     val averageRgb: Int,
     val codebookSize: Int,
     val createdThisFrame: Int,
@@ -30,13 +42,14 @@ data class VisualFrameResult(
     val meanFamiliarity: Double = 0.0,
     val maxResolutionDepth: Int = 0,
     val sampledRegions: Int = 0,
+    val couplingReduction: Double = 0.0,
     val analysisCostMs: Long = 0L,
     val videoSampleCostMs: Long = 0L,
     val videoIntervalMs: Long = 90L
 )
 
 /**
- * Step 25 adaptive coarse-to-fine camera analyzer.
+ * Step 38 adaptive coarse-to-fine camera analyzer with spatial coupling.
  *
  * The old 8x6 learning raster is now only the entry lattice. Every coarse region may split
  * into 2x2 children. Familiar regions receive progressively finer analysis, while new or
@@ -46,6 +59,11 @@ data class VisualFrameResult(
  *
  * Output pigment resolution is also dynamic. It scales with learned familiarity/detail and is
  * bounded only by the source frame dimensions plus the adaptive work budget, not by 48x27.
+ *
+ * Step 38 adds a second spatial stage: stable low-detail interiors stop refining early and the
+ * remaining adaptive observations are coupled into connected appearance regions before they
+ * enter MemoryModel. The visual codebook still learns local appearance; the core receives one
+ * event per coupled region instead of one event per sampled patch.
  */
 class VisualGridAnalyzer(
     private val quantizer: AdaptiveVisualQuantizer,
@@ -201,7 +219,18 @@ class VisualGridAnalyzer(
                     resolutionDepth = region.depth,
                     centerX = cx.coerceIn(0.0, 1.0),
                     centerY = cy.coerceIn(0.0, 1.0),
-                    familiarity = q.familiarity
+                    familiarity = q.familiarity,
+                    x0 = region.x0.toDouble() / width.coerceAtLeast(1).toDouble(),
+                    y0 = region.y0.toDouble() / height.coerceAtLeast(1).toDouble(),
+                    x1 = region.x1.toDouble() / width.coerceAtLeast(1).toDouble(),
+                    y1 = region.y1.toDouble() / height.coerceAtLeast(1).toDouble(),
+                    luminance = sample.features[0],
+                    chromaRg = sample.features[1],
+                    chromaBg = sample.features[2],
+                    saturation = sample.features[3],
+                    localContrast = sample.features[4],
+                    gradientX = sample.features[5],
+                    gradientY = sample.features[6]
                 )
                 processed++
                 if (q.created) created++
@@ -212,23 +241,30 @@ class VisualGridAnalyzer(
                 rgbSumG += (sample.rgb shr 8) and 0xff
                 rgbSumB += sample.rgb and 0xff
 
+                val gradientMagnitude = max(
+                    abs(sample.features[5] - 0.5) * 2.0,
+                    abs(sample.features[6] - 0.5) * 2.0
+                ).coerceIn(0.0, 1.0)
+                val detailSignal = max(sample.features[4], gradientMagnitude).coerceIn(0.0, 1.0)
                 if (AdaptiveScalePolicy.shouldRefineVisual(
                         familiarity = q.familiarity,
                         noveltyRatio = noveltyRatio,
                         created = q.created,
                         depth = region.depth,
                         regionWidthPx = region.width,
-                        regionHeightPx = region.height
+                        regionHeightPx = region.height,
+                        detailSignal = detailSignal
                     )
                 ) {
                     split(region).forEach { child ->
                         queue.add(
                             child.copy(
                                 priority = AdaptiveScalePolicy.visualRefinementPriority(
-                                    q.familiarity,
-                                    noveltyRatio,
-                                    q.created,
-                                    child.depth
+                                    familiarity = q.familiarity,
+                                    noveltyRatio = noveltyRatio,
+                                    created = q.created,
+                                    depth = child.depth,
+                                    detailSignal = detailSignal
                                 )
                             )
                         )
@@ -242,6 +278,12 @@ class VisualGridAnalyzer(
                     .thenBy { it.centerX }
                     .thenBy { it.resolutionDepth }
             )
+
+            // Spatial coupling is transient and read-only with respect to the visual codebook:
+            // it only decides how many region-events are forwarded to the memory core.
+            val coupledRegions = SpatialVisualCoupler.couple(observations)
+            val couplingReduction = if (observations.isEmpty()) 0.0 else
+                (1.0 - coupledRegions.size.toDouble() / observations.size.toDouble()).coerceIn(0.0, 1.0)
 
             val elapsedMs = (System.nanoTime() - workStartNs) / 1_000_000L
             // Device-speed adaptation: faster hardware automatically resolves more regions.
@@ -261,6 +303,7 @@ class VisualGridAnalyzer(
             onFrame(
                 VisualFrameResult(
                     observations = observations,
+                    coupledRegions = coupledRegions,
                     averageRgb = avg,
                     codebookSize = quantizer.stats().prototypes,
                     createdThisFrame = created,
@@ -268,6 +311,7 @@ class VisualGridAnalyzer(
                     meanFamiliarity = lastMeanFamiliarity,
                     maxResolutionDepth = maxDepth,
                     sampledRegions = observations.size,
+                    couplingReduction = couplingReduction,
                     analysisCostMs = elapsedMs,
                     videoSampleCostMs = lastVideoSampleCostMs,
                     videoIntervalMs = videoFrameIntervalMs

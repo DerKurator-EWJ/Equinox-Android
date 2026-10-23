@@ -600,18 +600,31 @@ class MemoryModel(context: Context) {
     /** Step 18 adaptive visual identity. IDs are learned by AdaptiveVisualQuantizer. */
     @Synchronized
     fun observeAdaptiveVisual(id: Int, packedRgb: Int) {
+        observeAdaptiveVisualRegion(id, packedRgb, 1)
+    }
+
+    /**
+     * Step 38 spatially coupled visual event.
+     *
+     * One connected appearance region enters the hierarchy once, while supportCount preserves
+     * how much lower-level visual evidence was merged into it. This reduces sequence/relation
+     * work without discarding the fact that a large homogeneous surface had strong support.
+     */
+    @Synchronized
+    fun observeAdaptiveVisualRegion(id: Int, packedRgb: Int, supportCount: Int) {
         observations++
+        val support = supportCount.coerceIn(1, 4_096).toLong()
         val code = quants[id]
         if (code == null) {
             quants[id] = QuantCode(
-                weight = 1L,
+                weight = support,
                 representativeHz = 0.0,
                 modality = "vision_adaptive",
                 displayColor = packedRgb
             )
         } else {
-            code.weight++
-            // The quantizer already supplies its slowly learned prototype color.
+            code.weight += support
+            // The coupler supplies an area-weighted region color derived from learned prototypes.
             code.displayColor = packedRgb
         }
         feedToken(streamLevel = 0, modality = "vision_adaptive", tokenId = id)
