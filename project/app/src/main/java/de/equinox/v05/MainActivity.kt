@@ -1,17 +1,24 @@
 package de.equinox.v05
 
 import android.Manifest
-import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.lifecycle.ProcessCameraProvider
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -21,14 +28,20 @@ import kotlin.math.log2
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
     companion object {
         private const val REQ_MIC = 100
+        private const val REQ_CAMERA = 101
         private const val SAMPLE_RATE = 48_000
         private const val FFT_SIZE = 2_048
     }
 
     @Volatile private var running = false
+    @Volatile private var cameraRunning = false
+    private var cameraProvider: ProcessCameraProvider? = null
+    private lateinit var cameraExecutor: ExecutorService
+    private var visualFrameCount = 0L
+    private var visualObservationCount = 0L
     private var audioRecord: AudioRecord? = null
     private var worker: Thread? = null
 
@@ -43,15 +56,29 @@ class MainActivity : Activity() {
     private lateinit var intervalSpinner: Spinner
     private lateinit var graphView: RelationGraphView
     private lateinit var memory: MemoryModel
+    private lateinit var outputBridge: EngineOutputBridge
     private val sonifier = Sonifier()
     private lateinit var sonificationStatus: TextView
     private lateinit var consolidationStatus: TextView
+    private lateinit var cameraStatus: TextView
+    private lateinit var cameraFrames: TextView
+    private lateinit var cameraButton: Button
+    private lateinit var cameraStopButton: Button
+    private lateinit var displayPrefsStore: DisplayPrefsStore
+    private lateinit var saveSlots: SaveSlotManager
+    private lateinit var diagnostics: DiagnosticsManager
+    private lateinit var diagnosticsStatus: TextView
     private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
     @Volatile private var lastConsolidationMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         memory = MemoryModel(this)
+        outputBridge = EngineOutputBridge(memory)
+        cameraExecutor = Executors.newSingleThreadExecutor()
+        displayPrefsStore = DisplayPrefsStore(this)
+        saveSlots = SaveSlotManager(this)
+        diagnostics = DiagnosticsManager(this)
 
         val scroll = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
@@ -76,8 +103,8 @@ class MainActivity : Activity() {
             setPadding(0, top, 0, 0)
         }
 
-        root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 06.5 — LAB + FLUID VIEW", 18f, 16).apply {
+        root.addView(label("EQUINOX v0.6", 28f, 0))
+        root.addView(label("STEP 01 — CORE / OUTPUT SPLIT", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -92,18 +119,308 @@ class MainActivity : Activity() {
         root.addView(strength)
         root.addView(frames)
 
+        cameraStatus = label("Kamera: AUS", 18f, 20).apply {
+            setTextColor(Color.rgb(235, 175, 95))
+        }
+        cameraFrames = label("Visuelle Frames: 0 · visuelle Beobachtungen: 0", 14f, 8).apply {
+            setTextColor(Color.rgb(205, 205, 205))
+        }
+        root.addView(cameraStatus)
+        root.addView(cameraFrames)
+
+        cameraButton = Button(this).apply {
+            text = "KAMERA-LERNEN STARTEN"
+            setOnClickListener { ensureCameraPermissionAndStart() }
+        }
+        cameraStopButton = Button(this).apply {
+            text = "KAMERA STOPP"
+            isEnabled = false
+            setOnClickListener { stopCameraLearning() }
+        }
+        root.addView(cameraButton, buttonParams(10))
+        root.addView(cameraStopButton, buttonParams(8))
+
         memoryStats = label(memoryText(), 15f, 18).apply { setTextColor(Color.rgb(180, 220, 215)) }
         root.addView(memoryStats)
 
         graphView = RelationGraphView(this)
+        graphView.setDisplayPrefs(displayPrefsStore.load())
         root.addView(graphView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             dp(420)
         ).apply { topMargin = dp(18) })
         refreshGraph()
 
+        val geometryMemory = GeometryGroundMemory.standard()
+        val displayModeLabel = label(
+            "Darstellung: 2D · Geometrie-Grundgedächtnis: ${geometryMemory.totalTemplates} Formregeln",
+            14f,
+            12
+        ).apply { setTextColor(Color.rgb(170, 205, 255)) }
+        root.addView(displayModeLabel)
+
+        val displayRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val button2D = Button(this).apply {
+            text = "2D"
+            isEnabled = false
+        }
+        val button3D = Button(this).apply {
+            text = "3D"
+        }
+
+        fun refreshDisplayButtons() {
+            val is2D = graphView.getDisplayMode() == GraphDisplayMode.TWO_D
+            button2D.isEnabled = !is2D
+            button3D.isEnabled = is2D
+            displayModeLabel.text =
+                "Darstellung: ${if (is2D) "2D" else "3D"} · Geometrie-Grundgedächtnis: ${geometryMemory.totalTemplates} Formregeln"
+        }
+
+        button2D.setOnClickListener {
+            graphView.setDisplayMode(GraphDisplayMode.TWO_D)
+            refreshDisplayButtons()
+        }
+        button3D.setOnClickListener {
+            graphView.setDisplayMode(GraphDisplayMode.THREE_D)
+            refreshDisplayButtons()
+        }
+
+        displayRow.addView(
+            button2D,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginEnd = dp(4)
+            }
+        )
+        displayRow.addView(
+            button3D,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                marginStart = dp(4)
+            }
+        )
+        root.addView(
+            displayRow,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(8) }
+        )
+
+        root.addView(label("LAB — DARSTELLUNG", 17f, 18).apply {
+            setTextColor(Color.rgb(130, 220, 210))
+        })
+
+        val currentPrefs = displayPrefsStore.load()
+
+        fun colorField(labelText: String, initial: Int): Pair<TextView, EditText> {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val left = label(labelText, 14f, 0).apply {
+                setTextColor(Color.LTGRAY)
+            }
+            val input = EditText(this).apply {
+                setSingleLine(true)
+                setText(displayPrefsStore.toHex(initial))
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                setHintTextColor(Color.GRAY)
+            }
+            row.addView(
+                left,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f)
+            )
+            row.addView(
+                input,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            root.addView(row)
+            return left to input
+        }
+
+        val bgInput = colorField("Hintergrund HEX", currentPrefs.backgroundColor).second
+        val edgeInput = colorField("Mikro-Kanten HEX", currentPrefs.audioEdgeColor).second
+        val l1Input = colorField("L1 HEX", currentPrefs.macroLevel1Color).second
+        val l2Input = colorField("L2 HEX", currentPrefs.macroLevel2Color).second
+        val l3Input = colorField("L3 HEX", currentPrefs.macroLevel3Color).second
+        val l4Input = colorField("L4 HEX", currentPrefs.macroLevel4Color).second
+
+        val glowCheck = CheckBox(this).apply {
+            text = "Glow aktiv"
+            isChecked = currentPrefs.glowEnabled
+            setTextColor(Color.WHITE)
+        }
+        root.addView(glowCheck)
+
+        val settingsStatus = label("Darstellung: geladen", 13f, 8).apply {
+            setTextColor(Color.rgb(185, 195, 210))
+        }
+        root.addView(settingsStatus)
+
+        root.addView(Button(this).apply {
+            text = "DARSTELLUNG SPEICHERN"
+            setOnClickListener {
+                val bg = displayPrefsStore.parseHexOrNull(bgInput.text.toString())
+                val edge = displayPrefsStore.parseHexOrNull(edgeInput.text.toString())
+                val l1 = displayPrefsStore.parseHexOrNull(l1Input.text.toString())
+                val l2 = displayPrefsStore.parseHexOrNull(l2Input.text.toString())
+                val l3 = displayPrefsStore.parseHexOrNull(l3Input.text.toString())
+                val l4 = displayPrefsStore.parseHexOrNull(l4Input.text.toString())
+
+                if (listOf(bg, edge, l1, l2, l3, l4).any { it == null }) {
+                    settingsStatus.text = "Fehler: HEX als #RRGGBB eingeben"
+                } else {
+                    val saved = DisplayPrefs(
+                        backgroundColor = bg!!,
+                        audioEdgeColor = edge!!,
+                        macroLevel1Color = l1!!,
+                        macroLevel2Color = l2!!,
+                        macroLevel3Color = l3!!,
+                        macroLevel4Color = l4!!,
+                        glowEnabled = glowCheck.isChecked,
+                        glowStrength = 90
+                    )
+                    displayPrefsStore.save(saved)
+                    graphView.setDisplayPrefs(saved)
+                    settingsStatus.text = "Darstellung gespeichert und angewendet"
+                }
+            }
+        }, buttonParams(8))
+
+        root.addView(label("SAVE SLOTS", 17f, 18).apply {
+            setTextColor(Color.rgb(130, 220, 210))
+        })
+
+        val slotStatus = label("3 lokale Speicherstände verfügbar", 13f, 8).apply {
+            setTextColor(Color.rgb(185, 195, 210))
+        }
+        root.addView(slotStatus)
+
+        for (slot in 1..3) {
+            val slotLabel = label(saveSlots.exportSummary(slot), 13f, 8).apply {
+                setTextColor(Color.LTGRAY)
+            }
+            root.addView(slotLabel)
+
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER
+            }
+
+            val saveButton = Button(this).apply {
+                text = "S$slot SAVE"
+                setOnClickListener {
+                    memory.saveNow()
+                    val ok = saveSlots.saveToSlot(slot)
+                    slotLabel.text = saveSlots.exportSummary(slot)
+                    slotStatus.text = if (ok) "Slot $slot gespeichert" else "Slot $slot konnte nicht gespeichert werden"
+                }
+            }
+
+            val loadButton = Button(this).apply {
+                text = "S$slot LOAD"
+                setOnClickListener {
+                    stopAudio()
+                    stopCameraLearning()
+                    val ok = saveSlots.loadFromSlot(slot)
+                    if (ok) {
+                        memory.reloadFromDisk()
+                        memoryStats.text = memoryText()
+                        refreshGraph()
+                        slotStatus.text = "Slot $slot geladen"
+                    } else {
+                        slotStatus.text = "Slot $slot ist leer"
+                    }
+                }
+            }
+
+            val deleteButton = Button(this).apply {
+                text = "S$slot DEL"
+                setOnClickListener {
+                    val ok = saveSlots.deleteSlot(slot)
+                    slotLabel.text = saveSlots.exportSummary(slot)
+                    slotStatus.text = if (ok) "Slot $slot gelöscht" else "Slot $slot konnte nicht gelöscht werden"
+                }
+            }
+
+            row.addView(saveButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(loadButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            row.addView(deleteButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            root.addView(row)
+        }
+
+        root.addView(label("LANGZEITDIAGNOSE", 17f, 18).apply {
+            setTextColor(Color.rgb(130, 220, 210))
+        })
+
+        diagnosticsStatus = label("Noch keine Diagnose-Samples", 13f, 8).apply {
+            setTextColor(Color.rgb(190, 205, 220))
+        }
+        root.addView(diagnosticsStatus)
+
+        fun refreshDiagnosticsStatus() {
+            val d = diagnostics.summary()
+            diagnosticsStatus.text = if (d.samples == 0) {
+                "Noch keine Diagnose-Samples"
+            } else {
+                "Samples: ${d.samples} · ΔObs ${d.observationsSinceFirst}\n" +
+                    "ΔMikro ${d.newMicroSinceFirst} · ΔMakro ${d.newMacroSinceFirst} · ΔSeq ${d.newSequencesSinceFirst}\n" +
+                    "Neue Mikro/1000 Obs: ${"%.3f".format(d.microPer1000Observations)} · neue Seq/1000 Obs: ${"%.3f".format(d.sequencePer1000Observations)}\n" +
+                    "Memory-Datei: ${d.latestMemoryBytes / 1024} KB · Java-Heap: ${d.latestHeapBytes / (1024 * 1024)} MB"
+            }
+        }
+
+        val diagRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        val sampleButton = Button(this).apply {
+            text = "DIAG SAMPLE"
+            setOnClickListener {
+                memory.saveNow()
+                diagnostics.capture(memory.stats())
+                refreshDiagnosticsStatus()
+            }
+        }
+
+        val csvButton = Button(this).apply {
+            text = "CSV SCHREIBEN"
+            setOnClickListener {
+                val f = diagnostics.writeCsvExport()
+                refreshDiagnosticsStatus()
+                diagnosticsStatus.text = diagnosticsStatus.text.toString() +
+                    "\nCSV intern: ${f.name} (${f.length()} Bytes)"
+            }
+        }
+
+        val resetDiagButton = Button(this).apply {
+            text = "DIAG RESET"
+            setOnClickListener {
+                diagnostics.reset()
+                refreshDiagnosticsStatus()
+            }
+        }
+
+        diagRow.addView(sampleButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        diagRow.addView(csvButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        diagRow.addView(resetDiagButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(diagRow)
+
         root.addView(label(
-            "Kreise = Mikrocodes · orange Felder = Makrocodes · orange Kurven = Makro-/Mitgliedsrelationen",
+            "Härtetest-Ziel: In einer bekannten Umgebung sollten Beobachtungen weiter steigen, während die Rate neuer stabiler Mikrocodes und Sequenzen langfristig sinkt. Das wäre ein Hinweis auf Wiederverwendung/Kompression statt bloßer Struktur-Explosion.",
+            13f,
+            12
+        ).apply { setTextColor(Color.rgb(210, 190, 125)) })
+
+        refreshDiagnosticsStatus()
+
+        root.addView(label(
+            "2D und 3D zeigen exakt dasselbe relationale Gedächtnis. Die räumliche Tiefe existiert nur im Renderer. Höhere Knoten bekommen Formvorschläge aus einem kleinen mathematischen Geometrie-Grundgedächtnis; diese Formen sind Vorlagen, keine fundamentalen Raumobjekte.",
             12f,
             12
         ).apply { setTextColor(Color.LTGRAY) })
@@ -129,7 +446,7 @@ class MainActivity : Activity() {
             setOnClickListener {
                 val result = memory.consolidate()
                 lastConsolidationMs = System.currentTimeMillis()
-                lastConsolidationSummary = "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Makro"
+                lastConsolidationSummary = consolidationSummary(result)
                 updateConsolidationStatus()
                 memoryStats.text = memoryText()
                 refreshGraph()
@@ -160,7 +477,7 @@ class MainActivity : Activity() {
                 // Deliberately stop the microphone first: otherwise Equinox would immediately
                 // hear and learn its own speaker output, creating an uncontrolled feedback loop.
                 if (running) stopAudio()
-                val snap = memory.sonificationSnapshot()
+                val snap = outputBridge.snapshot().sound
                 sonifier.play(snap) { state -> runOnUiThread { sonificationStatus.text = state } }
             }
         }
@@ -199,7 +516,7 @@ class MainActivity : Activity() {
         root.addView(stopButton, buttonParams(8))
 
         root.addView(label(
-            "Sonifikation liest nur das persistente Gedächtnis. Mikrocodes werden Töne; Makrocodes werden Akkorde aus ihren Mitgliedern. Während der Ausgabe wird das Mikrofon gestoppt, damit Equinox nicht unkontrolliert sich selbst lernt.",
+            "Step 12 ergänzt Langzeitdiagnose statt neuer Kernfunktionen. Diagnose-Samples messen Wachstum von Mikro-, Makro- und Sequenzcodes, Beobachtungen, Relationszahl, interne Dateigröße und Java-Heap. Ziel ist zu prüfen, ob Equinox bei vertrauten Daten zunehmend vorhandene Strukturen wiederverwendet.",
             12f,
             18
         ).apply { setTextColor(Color.LTGRAY) })
@@ -215,7 +532,7 @@ class MainActivity : Activity() {
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     private fun refreshGraph() {
-        graphView.setSnapshot(memory.graphSnapshot())
+        graphView.setSnapshot(outputBridge.snapshot().graph)
     }
 
     private fun ensurePermissionAndStart() {
@@ -228,7 +545,7 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(
         requestCode: Int,
-        permissions: Array<out String>,
+        permissions: Array<String>,
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
@@ -237,6 +554,12 @@ class MainActivity : Activity() {
                 startAudio()
             } else {
                 status.text = "Audio: Mikrofon-Berechtigung fehlt"
+            }
+        } else if (requestCode == REQ_CAMERA) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startCameraLearning()
+            } else {
+                cameraStatus.text = "Kamera: Berechtigung fehlt"
             }
         }
     }
@@ -311,7 +634,7 @@ class MainActivity : Activity() {
                 }
 
                 val hz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
-                val id = if (hz > 0.0) (24.0 * log2(hz / 55.0)).roundToInt() else 0
+                val id = AudioQuantizer.idForHz(hz)
                 frameCount++
                 memory.observe(id, hz)
 
@@ -321,7 +644,7 @@ class MainActivity : Activity() {
                 if (now - lastConsolidationMs >= interval) {
                     val result = memory.consolidate()
                     lastConsolidationMs = now
-                    lastConsolidationSummary = "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Makro"
+                    lastConsolidationSummary = consolidationSummary(result)
                     didConsolidate = true
                 }
 
@@ -337,6 +660,82 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun ensureCameraPermissionAndStart() {
+        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            startCameraLearning()
+        } else {
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), REQ_CAMERA)
+        }
+    }
+
+    private fun startCameraLearning() {
+        if (cameraRunning) return
+
+        val providerFuture = ProcessCameraProvider.getInstance(this)
+        providerFuture.addListener({
+            try {
+                val provider = providerFuture.get()
+                cameraProvider = provider
+
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+
+                analysis.setAnalyzer(
+                    cameraExecutor,
+                    VisualGridAnalyzer { result ->
+                        if (!cameraRunning) return@VisualGridAnalyzer
+
+                        result.observations.forEach { obs ->
+                            memory.observeVisual(obs.tokenId, obs.packedRgb)
+                        }
+
+                        visualFrameCount++
+                        visualObservationCount += result.observations.size
+
+                        runOnUiThread {
+                            cameraFrames.text =
+                                "Visuelle Frames: $visualFrameCount · visuelle Beobachtungen: $visualObservationCount"
+                            if (visualFrameCount % 2L == 0L) {
+                                memoryStats.text = memoryText()
+                                refreshGraph()
+                            }
+                        }
+                    }
+                )
+
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    this,
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    analysis
+                )
+
+                cameraRunning = true
+                cameraStatus.text = "Kamera: AKTIV · 8×6 Raster"
+                cameraButton.isEnabled = false
+                cameraStopButton.isEnabled = true
+            } catch (e: Exception) {
+                cameraRunning = false
+                cameraStatus.text = "Kamera: Startfehler ${e.javaClass.simpleName}"
+                cameraButton.isEnabled = true
+                cameraStopButton.isEnabled = false
+            }
+        }, mainExecutor)
+    }
+
+    private fun stopCameraLearning() {
+        if (!cameraRunning && cameraProvider == null) return
+        cameraRunning = false
+        try { cameraProvider?.unbindAll() } catch (_: Exception) { }
+        cameraProvider = null
+        cameraStatus.text = "Kamera: AUS"
+        cameraButton.isEnabled = true
+        cameraStopButton.isEnabled = false
+        memoryStats.text = memoryText()
+        refreshGraph()
     }
 
     private fun selectedIntervalMs(): Long {
@@ -362,9 +761,27 @@ class MainActivity : Activity() {
 
     private fun memoryText(): String {
         val s = memory.stats()
+        val levelText = if (s.levelCounts.isEmpty()) {
+            "noch keine"
+        } else {
+            s.levelCounts.entries.joinToString(" · ") { "L${it.key}:${it.value}" }
+        }
         return "Mikro: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
-            "Makro: ${s.macroCodes} Codes | ${s.macroRelations} Relationen | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
-            "Beobachtungen: ${s.observations} | stärkstes Mikrogewicht: ${s.strongestWeight}"
+            "Abstraktion: $levelText | höchste Ebene: L${s.maxAbstractionLevel} | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
+            "Makro gesamt: ${s.macroCodes} | Makrorelationen: ${s.macroRelations}\n" +
+            "Sequenzen: ${s.sequenceCodes} Codes | ${s.promotedSequences} verdichtet | max Länge ${s.longestSequenceLength} | stärkstes Gewicht ${s.strongestSequenceWeight}\n" +
+            "Vision: ${s.visualPersistentCodes} persistente Codes | Crossmodal: ${s.crossModalRelations} Relationen\n" +
+            "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}\n" +
+            "Beobachtungen gesamt: ${s.observations} | stärkstes Mikrogewicht: ${s.strongestWeight}"
+    }
+
+    private fun consolidationSummary(result: ConsolidationResult): String {
+        val levelPart = if (result.highestNewLevel > 0) {
+            " · höchste neue Ebene L${result.highestNewLevel}"
+        } else {
+            ""
+        }
+        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten · davon ${result.sequencePromoted} Sequenzen$levelPart"
     }
 
     private fun stopAudio() {
@@ -379,13 +796,15 @@ class MainActivity : Activity() {
         startButton.isEnabled = true
         stopButton.isEnabled = false
         val result = memory.consolidate()
-        lastConsolidationSummary = "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Makro"
+        lastConsolidationSummary = consolidationSummary(result)
         updateConsolidationStatus()
         memoryStats.text = memoryText()
         refreshGraph()
     }
 
     override fun onDestroy() {
+        stopCameraLearning()
+        try { cameraExecutor.shutdownNow() } catch (_: Exception) { }
         stopAudio()
         sonifier.stop()
         super.onDestroy()
