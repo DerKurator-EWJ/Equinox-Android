@@ -1,5 +1,4 @@
-# Equinox v0.6 Step 07
+Equinox v0.6 Step 08 — Substitution Classes
 
-Template / Slot Abstraction on top of the Step 06 structural-rank build.
-
-See `README_V06.md` for architecture, compatibility and build notes.
+Open this folder directly in Android Studio and build the APK.
+See README_V06.md for the architecture and verification notes.

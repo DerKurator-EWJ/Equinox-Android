@@ -147,7 +147,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 05 — LIVE / MEMORY / LAB", 17f, 8).apply {
+        root.addView(label("STEP 08 — SUBSTITUTION CLASSES", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -607,7 +607,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 07 ergänzt eine sparsame Slot-/Template-Abstraktion: stabile Makros mit gleichen festen Positionen und unterschiedlichen Werten an genau einer Stelle werden als Muster mit variablem Slot erkannt. Das ist strukturelle Substitution, keine eingebaute Wortbedeutung.",
+            "Step 08 bildet aus wiederholt geteilten Slot-Rollen sparsame Substitutionsklassen. Erst wenn Makro-Tokens sich in mindestens zwei unterschiedlichen gelernten Strukturrollen gegenseitig ersetzen konnten, werden sie als strukturell ähnlich gruppiert. Das ist weiterhin keine eingebaute Wortbedeutung.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -917,13 +917,15 @@ class MainActivity : ComponentActivity() {
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
             "Höchster aktiver Rang: ${s.highestActiveRank} · Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
+            "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
             "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}"
     }
 
     private fun consolidationSummary(result: ConsolidationResult): String {
         val levelPart = if (result.highestNewLevel > 0) " · höchste neue Ebene L${result.highestNewLevel}" else ""
         val templatePart = if (result.templatesDiscovered > 0) " · +${result.templatesDiscovered} Templates" else ""
-        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten · davon ${result.sequencePromoted} Sequenzen$levelPart$templatePart"
+        val classPart = if (result.substitutionClassesDiscovered > 0) " · +${result.substitutionClassesDiscovered} Substitutionsklassen" else ""
+        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten · davon ${result.sequencePromoted} Sequenzen$levelPart$templatePart$classPart"
     }
 
     private fun stopAudio() {

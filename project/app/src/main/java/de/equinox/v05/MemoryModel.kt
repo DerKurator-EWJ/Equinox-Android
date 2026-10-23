@@ -16,11 +16,18 @@ private const val MAX_PATTERN_LENGTH = 6
 private const val MAX_PATTERN_CANDIDATES = 6_000
 private const val MAX_PROMOTIONS_PER_LEVEL = 24
 
-// Step 07: one-slot structural templates are indexed from already stable macros.
+// Step 07/08: one-slot templates feed the sparse substitution-class layer.
 private const val MAX_TEMPLATE_BUCKETS = 12_000
 private const val MIN_TEMPLATE_LENGTH = 3
 private const val MIN_TEMPLATE_VARIANTS = 2
 private const val SLOT_TOKEN = Int.MIN_VALUE
+
+// Step 08: sparse substitution classes above the raw quant alphabet.
+// Two macro tokens become structurally linked only when they can replace each other
+// in at least two distinct learned template roles.
+private const val MIN_SUBSTITUTION_ROLE_SUPPORT = 2
+private const val MAX_SUBSTITUTION_PAIR_INDEX = 24_000
+private const val MAX_CLASS_VARIANTS_PER_TEMPLATE = 24
 
 // Step 03: bounded event-driven working set.
 private const val MAX_ACTIVE_MACROS = 48
@@ -31,12 +38,14 @@ private const val EXPECTATION_DECAY = 0.78
 private const val EXCHANGE_EMA_ALPHA = 0.15
 
 /**
- * v0.6 Step 07
+ * v0.6 Step 08
  *
- * Keeps the bounded active working set and indexed lazy retrieval, plus the
- * non-learning memory-playback path. Step 07 keeps read-only multidimensional
- * structural ranking and adds one-slot template abstraction derived from stable macros. External observations can still update long-term
- * memory; Memory mode only activates already learned macros and relations.
+ * Keeps the bounded active working set, indexed lazy retrieval, structural ranks
+ * and one-slot templates. Step 08 derives sparse substitution classes from repeated
+ * template roles: macro tokens that can replace each other in multiple distinct
+ * structural contexts become members of the same read-only structural class.
+ * External observations can still update long-term memory; Memory mode only
+ * activates already learned macros and relations.
  *
  * Operational definitions used here:
  * - A_i = current/live activation of macro i
@@ -74,7 +83,11 @@ data class MemoryStats(
     val templateCodes: Int = 0,
     val activeTemplates: Int = 0,
     val templateVariantLinks: Int = 0,
-    val widestTemplateVariants: Int = 0
+    val widestTemplateVariants: Int = 0,
+    val substitutionClasses: Int = 0,
+    val activeSubstitutionClasses: Int = 0,
+    val substitutionMembers: Int = 0,
+    val strongestSubstitutionSupport: Int = 0
 )
 
 data class GraphNode(
@@ -176,12 +189,27 @@ data class TemplateSlotSummary(
     val active: Boolean
 )
 
+/**
+ * A derived structural class. Members share multiple independently observed
+ * substitution roles. No semantic label is assigned.
+ */
+data class SubstitutionClassSummary(
+    val classId: Int,
+    val memberLevel: Int,
+    val modality: String,
+    val members: List<Int>,
+    val roleEvidence: Int,
+    val strongestPairSupport: Int,
+    val activeMembers: Int
+)
+
 data class ConsolidationResult(
     val microPromoted: Int,
     val macroPromoted: Int,
     val sequencePromoted: Int,
     val highestNewLevel: Int,
-    val templatesDiscovered: Int = 0
+    val templatesDiscovered: Int = 0,
+    val substitutionClassesDiscovered: Int = 0
 )
 
 class MemoryModel(context: Context) {
@@ -223,6 +251,20 @@ class MemoryModel(context: Context) {
         val variants: MutableSet<Int> = linkedSetOf()
     )
 
+    private data class SubstitutionTokenMeta(
+        val memberLevel: Int,
+        val modality: String
+    )
+
+    private data class DerivedSubstitutionClass(
+        val classId: Int,
+        val memberLevel: Int,
+        val modality: String,
+        val members: List<Int>,
+        val roleEvidence: Int,
+        val strongestPairSupport: Int
+    )
+
     private data class WorkingMacro(
         var actual: Double,
         var expected: Double,
@@ -253,10 +295,17 @@ class MemoryModel(context: Context) {
     // another learned relation graph, and lets rank calculation stay local/on-demand.
     private val macroParentUseCount = mutableMapOf<Int, Int>()
 
-    // Step 07 structural generalization index. Each stable macro contributes at most
+    // Step 07/08 structural generalization index. Each stable macro contributes at most
     // MAX_PATTERN_LENGTH masked signatures; no pairwise macro comparison is required.
     private val templateBuckets = linkedMapOf<String, TemplateBucket>()
     private val templateSignaturesByMacro = mutableMapOf<Int, MutableSet<String>>()
+
+    // Sparse structural-role evidence. Only macro tokens (never raw quant IDs) enter
+    // this index, and support counts distinct template roles rather than raw frequency.
+    private val substitutionPairSupport = mutableMapOf<Long, Int>()
+    private val substitutionTokenMeta = mutableMapOf<Int, SubstitutionTokenMeta>()
+    private var substitutionClassesCache: List<DerivedSubstitutionClass> = emptyList()
+    private var substitutionClassesDirty = true
 
     private val macroRelations = mutableMapOf<Long, Long>()
 
@@ -569,6 +618,7 @@ class MemoryModel(context: Context) {
 
         val threshold = max(2L, minSequenceHits)
         val templatesBefore = learnedTemplateCount()
+        val substitutionClassesBefore = derivedSubstitutionClasses().size
         var created = 0
         var highest = 0
 
@@ -615,7 +665,9 @@ class MemoryModel(context: Context) {
             macroPromoted = created,
             sequencePromoted = created,
             highestNewLevel = highest,
-            templatesDiscovered = (learnedTemplateCount() - templatesBefore).coerceAtLeast(0)
+            templatesDiscovered = (learnedTemplateCount() - templatesBefore).coerceAtLeast(0),
+            substitutionClassesDiscovered =
+                (derivedSubstitutionClasses().size - substitutionClassesBefore).coerceAtLeast(0)
         )
     }
 
@@ -744,6 +796,10 @@ class MemoryModel(context: Context) {
         if (local.isNotEmpty()) {
             return local[(memoryPlaybackSteps % local.size.toLong()).toInt()].first
         }
+
+        // Step 08: if the ordinary relation graph has no continuation, a learned
+        // structural alternative may continue the memory-playback walk.
+        chooseSubstitutionAlternative(sourceId, modality)?.let { return it }
 
         // Dead end: jump to another strong macro. This is traversal, not learning.
         val fallback = macros.values
@@ -990,6 +1046,18 @@ class MemoryModel(context: Context) {
         val templateVariantLinks = learnedTemplates.sumOf { it.variants.size }
         val widestTemplate = learnedTemplates.maxOfOrNull { it.variants.size } ?: 0
 
+        val substitutionClassesNow = derivedSubstitutionClasses()
+        val activeSubstitutionClasses = substitutionClassesNow.count { clazz ->
+            clazz.members.any { activeWorking.containsKey(it) }
+        }
+        val substitutionMembers = substitutionClassesNow
+            .asSequence()
+            .flatMap { it.members.asSequence() }
+            .distinct()
+            .count()
+        val strongestSubstitutionSupport =
+            substitutionClassesNow.maxOfOrNull { it.strongestPairSupport } ?: 0
+
         return MemoryStats(
             persistentCodes = quants.size,
             temporaryCodes = candidates.size,
@@ -1018,7 +1086,11 @@ class MemoryModel(context: Context) {
             templateCodes = learnedTemplates.size,
             activeTemplates = activeTemplateCount,
             templateVariantLinks = templateVariantLinks,
-            widestTemplateVariants = widestTemplate
+            widestTemplateVariants = widestTemplate,
+            substitutionClasses = substitutionClassesNow.size,
+            activeSubstitutionClasses = activeSubstitutionClasses,
+            substitutionMembers = substitutionMembers,
+            strongestSubstitutionSupport = strongestSubstitutionSupport
         )
     }
 
@@ -1031,6 +1103,10 @@ class MemoryModel(context: Context) {
         macroParentUseCount.clear()
         templateBuckets.clear()
         templateSignaturesByMacro.clear()
+        substitutionPairSupport.clear()
+        substitutionTokenMeta.clear()
+        substitutionClassesCache = emptyList()
+        substitutionClassesDirty = true
         macroRelations.clear()
         relationIndex.clear()
         activeWorking.clear()
@@ -1061,6 +1137,10 @@ class MemoryModel(context: Context) {
         macroParentUseCount.clear()
         templateBuckets.clear()
         templateSignaturesByMacro.clear()
+        substitutionPairSupport.clear()
+        substitutionTokenMeta.clear()
+        substitutionClassesCache = emptyList()
+        substitutionClassesDirty = true
         macroRelations.clear()
         relationIndex.clear()
         activeWorking.clear()
@@ -1261,7 +1341,37 @@ class MemoryModel(context: Context) {
             }
 
             bucket.macroIds += macro.id
-            bucket.variants += macro.tokens[slot]
+
+            val variant = macro.tokens[slot]
+            val isNewVariant = variant !in bucket.variants
+
+            // Step 08 only forms substitution classes above the raw quant alphabet.
+            // A level-2+ template contains macro tokens as its slot variants.
+            if (isNewVariant && variant >= MACRO_ID_BASE) {
+                substitutionTokenMeta[variant] = SubstitutionTokenMeta(
+                    memberLevel = (macro.level - 1).coerceAtLeast(1),
+                    modality = macro.modality
+                )
+
+                // Count one unit of evidence per distinct structural role in which two
+                // macro tokens are observed as alternatives. The local cap keeps a very
+                // broad template from creating an unbounded pair burst.
+                bucket.variants.asSequence()
+                    .filter { it >= MACRO_ID_BASE }
+                    .take(MAX_CLASS_VARIANTS_PER_TEMPLATE)
+                    .forEach { other ->
+                        if (other == variant) return@forEach
+                        val key = canonicalPairKey(variant, other)
+                        if (substitutionPairSupport.containsKey(key) ||
+                            substitutionPairSupport.size < MAX_SUBSTITUTION_PAIR_INDEX
+                        ) {
+                            substitutionPairSupport[key] = (substitutionPairSupport[key] ?: 0) + 1
+                            substitutionClassesDirty = true
+                        }
+                    }
+            }
+
+            bucket.variants += variant
             templateSignaturesByMacro.getOrPut(macro.id) { linkedSetOf() }.add(signature)
         }
     }
@@ -1269,6 +1379,10 @@ class MemoryModel(context: Context) {
     private fun rebuildTemplateIndex() {
         templateBuckets.clear()
         templateSignaturesByMacro.clear()
+        substitutionPairSupport.clear()
+        substitutionTokenMeta.clear()
+        substitutionClassesCache = emptyList()
+        substitutionClassesDirty = true
         // Higher-weight structures get first access if the bounded index ever fills.
         macros.values
             .sortedWith(compareByDescending<MacroCode> { it.weight }.thenByDescending { it.level })
@@ -1314,6 +1428,148 @@ class MemoryModel(context: Context) {
             .take(maxTemplates.coerceAtLeast(0))
             .toList()
 
+
+    /**
+     * Derived substitution classes. A class is a connected component of macro tokens
+     * whose pair evidence reached MIN_SUBSTITUTION_ROLE_SUPPORT in the same modality
+     * and abstraction level. The classes are cached and rebuilt only when the template
+     * index changes.
+     */
+    private fun derivedSubstitutionClasses(): List<DerivedSubstitutionClass> {
+        if (!substitutionClassesDirty) return substitutionClassesCache
+
+        val qualifyingEdges = substitutionPairSupport.entries.asSequence()
+            .filter { it.value >= MIN_SUBSTITUTION_ROLE_SUPPORT }
+            .mapNotNull { (key, support) ->
+                val a = keyFrom(key)
+                val b = keyTo(key)
+                val ma = substitutionTokenMeta[a] ?: return@mapNotNull null
+                val mb = substitutionTokenMeta[b] ?: return@mapNotNull null
+                if (ma != mb) return@mapNotNull null
+                Triple(a, b, support)
+            }
+            .toList()
+
+        if (qualifyingEdges.isEmpty()) {
+            substitutionClassesCache = emptyList()
+            substitutionClassesDirty = false
+            return substitutionClassesCache
+        }
+
+        val parent = mutableMapOf<Int, Int>()
+
+        fun find(x: Int): Int {
+            val p = parent.getOrPut(x) { x }
+            if (p == x) return x
+            val root = find(p)
+            parent[x] = root
+            return root
+        }
+
+        fun union(a: Int, b: Int) {
+            val ra = find(a)
+            val rb = find(b)
+            if (ra == rb) return
+            // Deterministic root keeps class IDs stable across rebuilds.
+            if (ra <= rb) parent[rb] = ra else parent[ra] = rb
+        }
+
+        qualifyingEdges.forEach { (a, b, _) -> union(a, b) }
+
+        val groups = linkedMapOf<Int, MutableSet<Int>>()
+        parent.keys.forEach { token ->
+            groups.getOrPut(find(token)) { linkedSetOf() }.add(token)
+        }
+
+        val edgeSupportByRoot = mutableMapOf<Int, Int>()
+        val strongestByRoot = mutableMapOf<Int, Int>()
+        qualifyingEdges.forEach { (a, b, support) ->
+            val root = find(a)
+            if (root != find(b)) return@forEach
+            edgeSupportByRoot[root] = (edgeSupportByRoot[root] ?: 0) + support
+            strongestByRoot[root] = max(strongestByRoot[root] ?: 0, support)
+        }
+
+        substitutionClassesCache = groups.entries.asSequence()
+            .mapNotNull { (root, memberSet) ->
+                if (memberSet.size < 2) return@mapNotNull null
+                val members = memberSet.toList()
+                    .sortedWith(
+                        compareByDescending<Int> { macros[it]?.weight ?: 0L }
+                            .thenBy { it }
+                    )
+                val meta = members.firstNotNullOfOrNull { substitutionTokenMeta[it] }
+                    ?: return@mapNotNull null
+                DerivedSubstitutionClass(
+                    classId = members.minOrNull() ?: root,
+                    memberLevel = meta.memberLevel,
+                    modality = meta.modality,
+                    members = members,
+                    roleEvidence = edgeSupportByRoot[root] ?: 0,
+                    strongestPairSupport = strongestByRoot[root] ?: 0
+                )
+            }
+            .sortedWith(
+                compareByDescending<DerivedSubstitutionClass> { it.strongestPairSupport }
+                    .thenByDescending { it.roleEvidence }
+                    .thenByDescending { it.members.size }
+                    .thenBy { it.classId }
+            )
+            .toList()
+
+        substitutionClassesDirty = false
+        return substitutionClassesCache
+    }
+
+    /**
+     * Public read-only view for LAB/diagnostics. These are structural equivalence
+     * candidates, not semantic categories.
+     */
+    @Synchronized
+    fun substitutionClassSnapshot(maxClasses: Int = 24): List<SubstitutionClassSummary> =
+        derivedSubstitutionClasses()
+            .asSequence()
+            .map { clazz ->
+                SubstitutionClassSummary(
+                    classId = clazz.classId,
+                    memberLevel = clazz.memberLevel,
+                    modality = clazz.modality,
+                    members = clazz.members,
+                    roleEvidence = clazz.roleEvidence,
+                    strongestPairSupport = clazz.strongestPairSupport,
+                    activeMembers = clazz.members.count { activeWorking.containsKey(it) }
+                )
+            }
+            .sortedWith(
+                compareByDescending<SubstitutionClassSummary> { it.activeMembers > 0 }
+                    .thenByDescending { it.strongestPairSupport }
+                    .thenByDescending { it.roleEvidence }
+                    .thenByDescending { it.members.size }
+            )
+            .take(maxClasses.coerceAtLeast(0))
+            .toList()
+
+    /**
+     * Memory-only playback can use structural alternatives as a fallback when the
+     * ordinary relation graph reaches a dead end. This never changes live expectation,
+     * never creates relations and never learns a class back into memory.
+     */
+    private fun chooseSubstitutionAlternative(sourceId: Int, modality: String): Int? {
+        val clazz = derivedSubstitutionClasses()
+            .firstOrNull { it.modality == modality && sourceId in it.members }
+            ?: return null
+
+        val alternatives = clazz.members
+            .asSequence()
+            .filter { it != sourceId && macros[it]?.modality == modality }
+            .sortedByDescending { macros[it]?.weight ?: 0L }
+            .take(12)
+            .toList()
+
+        if (alternatives.isEmpty()) return null
+        return alternatives[(memoryPlaybackSteps % alternatives.size.toLong()).toInt()]
+    }
+
     private fun templateSignature(level: Int, modality: String, tokens: List<Int>, slotIndex: Int): String =
         buildString {
             append(modality).append('|').append(level).append("|slot=").append(slotIndex).append('|')
@@ -1350,8 +1606,10 @@ class MemoryModel(context: Context) {
         relationIndex.getOrPut(to) { linkedSetOf() }.add(key)
     }
 
-    private fun exchangePairKey(a: Int, b: Int): Long =
+    private fun canonicalPairKey(a: Int, b: Int): Long =
         if (a <= b) pairKey(a, b) else pairKey(b, a)
+
+    private fun exchangePairKey(a: Int, b: Int): Long = canonicalPairKey(a, b)
 
     private fun exchangeValue(from: Int, to: Int): Double {
         val memory = exchangeMemory[exchangePairKey(from, to)] ?: return 0.0

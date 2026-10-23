@@ -1,81 +1,89 @@
-# Equinox v0.6 — Step 07: Template / Slot Abstraction
+# Equinox v0.6 — Step 08: Substitution Classes
 
-Basis: v0.6 Step 06 Structural Ranks.
+Basis: v0.6 Step 07 Template / Slot Abstraction.
 
-## New in Step 07
+## New in Step 08
 
-Step 07 adds the first structural generalization layer above exact macro sequences.
+Step 08 turns repeated slot substitution into a higher structural layer.
 
-If stable macros exist such as:
+Step 07 could infer a template such as:
 
 - `[A, B, C, D]`
 - `[A, B, C, E]`
-- `[A, B, C, F]`
+- -> `[A, B, C, □]`
 
-Equinox can now infer a compact structural template:
+Step 08 now asks a stricter question:
 
-- `[A, B, C, □]`
+> Do the same macro tokens repeatedly replace each other in more than one independent learned role?
 
-The slot does **not** mean a noun, object, fruit, word or semantic category. It only means:
+If macro tokens X and Y can substitute for each other in at least **two distinct learned template contexts**, Equinox records sparse structural-role evidence between them. Connected tokens with sufficient evidence form a derived **substitution class**.
 
-> multiple already-learned stable macro patterns share the same fixed structure and differ at this position.
+This does **not** mean that Equinox knows a noun, fruit, object, word, meaning, or semantic label. It only means that the learned structures repeatedly treated those macro tokens as structurally interchangeable.
 
-That keeps the rule purely structural and data-driven.
+## Important boundary
+
+Raw quant/frequency IDs do not enter substitution classes.
+
+Only **macro tokens** can become class members. This keeps the fixed quant alphabet as a low-level encoder and prevents broad frequency-bin combinations from flooding the structural class layer.
 
 ## Efficiency
 
-There is no pairwise all-to-all macro comparison.
+There is still no global all-to-all comparison.
 
-Each newly promoted stable macro contributes a bounded number of masked signatures, one per possible slot position. Example:
-
-`[A,B,C,D] -> [□,B,C,D], [A,□,C,D], [A,B,□,D], [A,B,C,□]`
-
-Those signatures are indexed directly. A later macro with the same masked signature lands in the same bucket in approximately O(pattern length) work rather than O(number of macros²).
+When a new stable macro joins an existing one-slot template bucket, Step 08 compares its slot variant only with the variants already present in that same local bucket.
 
 Limits:
 
-- template input patterns must contain at least 3 tokens,
-- at least 2 different observed slot variants are required,
-- the template index is bounded to 12,000 buckets,
-- templates do not create a second relation graph.
+- a pair needs at least 2 independent template-role matches,
+- at most 24 existing variants per template contribute new pair evidence,
+- the sparse pair-evidence index is bounded to 24,000 pairs,
+- classes are derived/cached and are not a second persistent graph,
+- class rebuilding happens only when template-role evidence changes.
+
+This keeps the expensive work tied to actually observed structural roles rather than total memory size.
+
+## Memory mode
+
+Ordinary learned macro relations remain the first path for MEMORY traversal.
+
+If a memory path reaches a relation dead end, Step 08 may use a member of the same learned substitution class as a **read-only structural alternative** before falling back to an unrelated strong macro.
+
+This does not create new observations, new relations, or new class evidence.
 
 ## Persistence
 
-Templates are deliberately **derived from the stable macro memory** rather than saved as a second authoritative database.
+Substitution classes are derived from stable macro/template memory and are not separately saved.
 
-`equinox_v06_memory.json` remains compatible with Step 05/06. On load, the template index is rebuilt from the existing macro structures. This avoids duplicating the same structural information and keeps migration simple.
+`equinox_v06_memory.json` therefore remains compatible with Step 05–07. On load, the template and substitution indexes are reconstructed from the existing macros.
 
 ## UI / diagnostics
 
-LIVE / MEMORY / LAB memory statistics now include:
+Memory statistics now show:
 
-- learned template count,
-- currently active templates,
-- total observed slot-variant links,
-- widest template slot (number of alternatives).
+- substitution class count,
+- currently active substitution classes,
+- number of unique class members,
+- strongest observed shared-role support.
 
-Consolidation reports how many new templates became valid after newly promoted macros were indexed.
-
-## What is intentionally NOT done yet
-
-- Templates do not carry semantic labels.
-- A slot does not yet become its own learned category.
-- Templates do not yet replace their matching macro sequence as a higher token.
-- No grammar is hard-coded.
-- Templates do not alter structural ranks yet.
-
-This step only establishes the sparse, testable mechanism for discovering substitutable positions.
+Consolidation also reports newly formed substitution classes.
 
 ## Verification performed here
 
-The modified Kotlin core was compiled against JVM stubs for Android/JSON dependencies. A synthetic sequence test using repeated `[10,20,30,40]` and `[10,20,30,50]` patterns produced stable macros and inferred the expected `[10,20,30,□]` template family.
+The Step 08 `MemoryModel.kt` and `StructuralRank.kt` compile successfully against JVM stubs for Android/JSON dependencies.
+
+A synthetic multi-round training test produced higher-level macros, learned templates and then a substitution class only after two independent shared structural roles were available. The test reached:
+
+- 287 macro nodes,
+- 43 learned templates,
+- 1 substitution class,
+- pair support 2.
 
 A complete Android APK build is not possible in this environment because the Android SDK/build tools are not installed.
 
 ## Build
 
-Open exactly `Equinox_v06_Step07_TemplateSlots` as the Android Studio project and use **Build > Build APK(s)**.
+Open exactly `Equinox_v06_Step08_SubstitutionClasses` as the Android Studio project and use **Build > Build APK(s)**.
 
 Application ID remains `de.equinox.v05`, so it updates the same installed app when signed with the same key/debug key.
 
-Version: `0.6-step07-template-slots` (versionCode 21).
+Version: `0.6-step08-substitution-classes` (versionCode 22).

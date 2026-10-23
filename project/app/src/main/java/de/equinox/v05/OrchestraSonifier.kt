@@ -11,7 +11,7 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Step 07: library-free generative audio projection of EngineOutputState.
+ * Step 08: library-free generative audio projection of EngineOutputState.
  * It uses only oscillators. No sample pack, no media library and no writes to memory.
  */
 class OrchestraSonifier {

@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.6-step07-template-slots"
+        versionCode = 22
+        versionName = "0.6-step08-substitution-classes"
     }
 
     compileOptions {
