@@ -70,7 +70,7 @@ class MainActivity : ComponentActivity() {
     private var settingsOpen = false
     private var lastLabRenderMs = 0L
     private lateinit var surfaceCanvas: EquinoxOutputView
-    private lateinit var surfaceVideo: MemoryVideoView
+    private lateinit var surfaceVideo: GpuMemoryVideoView
     private lateinit var settingsOverlay: ScrollView
     private val livePipeline = LowLatencyLivePipeline()
     private val liveRenderPosted = AtomicBoolean(false)
@@ -258,7 +258,7 @@ class MainActivity : ComponentActivity() {
             setModeLabel("CANVAS")
             visibility = View.GONE
         }
-        surfaceVideo = MemoryVideoView(this).apply {
+        surfaceVideo = GpuMemoryVideoView(this).apply {
             setModeLabel("LIVE")
             visibility = View.VISIBLE
         }
@@ -304,7 +304,7 @@ class MainActivity : ComponentActivity() {
         ))
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 27 — LOW-LATENCY LIVE / FRAME SYNC", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 28 — GPU LIVE RENDERER / FRAME SYNC", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -2000,6 +2000,16 @@ class MainActivity : ComponentActivity() {
     )
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
+
+    override fun onResume() {
+        super.onResume()
+        if (::surfaceVideo.isInitialized) surfaceVideo.onResume()
+    }
+
+    override fun onPause() {
+        if (::surfaceVideo.isInitialized) surfaceVideo.onPause()
+        super.onPause()
+    }
 
     override fun onDestroy() {
         uiHandler.removeCallbacks(hardTestLoop)

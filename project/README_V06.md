@@ -96,3 +96,7 @@ A synthetic repeated Direct-ID stream was run against the Step-25 core after com
 - Orchestra tier controls role/timbre, while presence is driven by activation/relevance/expectation.
 - Runtime output DTOs now use explicit names: `abstractionTier`, `abstractionTierIndex`, `maturityScore`.
 - Indexed memory format is unchanged.
+
+## Step 28 — GPU LIVE renderer
+
+The visible LIVE surface now uses OpenGL ES 2.0. Camera pigment is uploaded as a texture and Equinox state deforms/colors it in a fragment shader. The learning core remains independent of output coordinates and the renderer never writes back into memory. Step 27's delayed/latest-frame policy remains the synchronization layer.

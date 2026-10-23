@@ -1,5 +1,5 @@
-# Equinox v0.6 — Step 27
+# Equinox v0.6 — Step 28
 
-Current step: **Low-Latency Live / Frame Sync**.
+GPU LIVE renderer on top of Step 27 low-latency frame synchronization.
 
-See `README_STEP27.md` for the changes in this build and `README_V06.md` for the broader v0.6 architecture notes.
+See `README_STEP28.md` for the changes in this build and `README_V06.md` for the wider architecture.

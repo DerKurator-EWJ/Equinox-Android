@@ -5,6 +5,7 @@ import androidx.camera.core.ImageProxy
 import java.util.PriorityQueue
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /** One adaptive appearance identity observed at one dynamically resolved region. */
@@ -80,6 +81,9 @@ class VisualGridAnalyzer(
     private var lastVideoFrameMs = 0L
     private var videoFrameIntervalMs = 66L
     private var lastVideoSampleCostMs = 0L
+    // Step 28: output pigment density is a device-time budget, not a fixed raster ceiling.
+    // It may grow toward the source frame resolution when conversion remains cheap.
+    private var adaptiveVideoCellBudget = 72 * 40
     private var adaptivePatchBudget = BASE_GRID_W * BASE_GRID_H * 2
     private var lastMeanFamiliarity = 0.0
     private var lastMaxDepth = 0
@@ -102,7 +106,9 @@ class VisualGridAnalyzer(
                 lastVideoFrameMs = now
                 val videoStartNs = System.nanoTime()
                 val detailFactor = 1.0 + 1.7 * lastMeanFamiliarity + 0.22 * lastMaxDepth.toDouble()
-                val desiredCells = (48.0 * 27.0 * detailFactor).toInt().coerceAtLeast(48 * 27)
+                val desiredCells = (adaptiveVideoCellBudget.toDouble() * detailFactor)
+                    .toInt()
+                    .coerceIn(48 * 27, width * height)
                 val aspect = width.toDouble() / height.coerceAtLeast(1).toDouble()
                 val videoH = sqrt(desiredCells / aspect).toInt().coerceIn(1, height)
                 val videoW = (videoH * aspect).toInt().coerceIn(1, width)
@@ -116,6 +122,18 @@ class VisualGridAnalyzer(
                 }
                 val rotated = rotateGrid(raw, videoW, videoH, image.imageInfo.rotationDegrees)
                 lastVideoSampleCostMs = ((System.nanoTime() - videoStartNs) / 1_000_000L).coerceAtLeast(0L)
+
+                // GPU drawing is no longer the raster bottleneck. Let the CPU pigment sampler grow
+                // or shrink toward the device's measured conversion budget. The only hard ceiling is
+                // the actual source-frame pixel count; there is no semantic output-raster maximum.
+                adaptiveVideoCellBudget = when {
+                    lastVideoSampleCostMs <= 8L -> (adaptiveVideoCellBudget * 1.15).roundToInt()
+                    lastVideoSampleCostMs <= 14L -> (adaptiveVideoCellBudget * 1.05).roundToInt()
+                    lastVideoSampleCostMs >= 45L -> (adaptiveVideoCellBudget * 0.72).roundToInt()
+                    lastVideoSampleCostMs >= 28L -> (adaptiveVideoCellBudget * 0.86).roundToInt()
+                    else -> adaptiveVideoCellBudget
+                }.coerceIn(48 * 27, width * height)
+
                 // Prefer fresh frames over a backlog. Faster devices automatically approach 30 fps;
                 // slower ones back off before conversion itself starts starving learning.
                 videoFrameIntervalMs = when {
