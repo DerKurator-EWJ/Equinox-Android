@@ -17,6 +17,7 @@ import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Spinner
@@ -43,6 +44,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private enum class AppPage { LIVE, HYBRID, MEMORY, LAB }
+    private enum class SurfaceMode { CANVAS, LIVE }
 
     @Volatile private var running = false
     @Volatile private var cameraRunning = false
@@ -62,6 +64,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var memoryPage: LinearLayout
     private lateinit var labPage: LinearLayout
     private var currentPage = AppPage.LIVE
+    private var currentSurface = SurfaceMode.LIVE
+    private var settingsOpen = false
+    private var lastLabRenderMs = 0L
+    private lateinit var surfaceCanvas: EquinoxOutputView
+    private lateinit var surfaceVideo: MemoryVideoView
+    private lateinit var settingsOverlay: ScrollView
 
     private lateinit var status: TextView
     private lateinit var frequency: TextView
@@ -220,71 +228,154 @@ class MainActivity : ComponentActivity() {
         adaptiveQuantizer = AdaptiveAudioQuantizer(this)
         adaptiveVisualQuantizer = AdaptiveVisualQuantizer(this)
 
-        val scroll = ScrollView(this).apply {
+        // Step 26: the normal app has only two render surfaces. All controls/debug
+        // live behind the settings overlay and therefore do not participate in the
+        // hot render path while the overlay is closed.
+        val rootFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(6, 8, 12))
+        }
+
+        val surfaceHost = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(6, 8, 12))
+        }
+        rootFrame.addView(surfaceHost, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        surfaceCanvas = EquinoxOutputView(this).apply {
+            setModeLabel("CANVAS")
+            visibility = View.GONE
+        }
+        surfaceVideo = MemoryVideoView(this).apply {
+            setModeLabel("LIVE")
+            visibility = View.VISIBLE
+        }
+        surfaceHost.addView(surfaceCanvas, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        surfaceHost.addView(surfaceVideo, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        val topBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setBackgroundColor(Color.argb(178, 8, 10, 14))
+        }
+        val canvasTab = Button(this).apply { text = "CANVAS" }
+        val liveTab = Button(this).apply { text = "LIVE"; isEnabled = false }
+        val settingsButton = Button(this).apply { text = "⚙" }
+        topBar.addView(canvasTab, weightedButtonParams())
+        topBar.addView(liveTab, weightedButtonParams())
+        topBar.addView(settingsButton, LinearLayout.LayoutParams(dp(64), dp(52)))
+        rootFrame.addView(topBar, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP
+        ))
+
+        settingsOverlay = ScrollView(this).apply {
             setBackgroundColor(Color.rgb(16, 18, 22))
             isFillViewport = true
+            visibility = View.GONE
         }
-        val root = LinearLayout(this).apply {
+        val settingsRoot = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(18), dp(24), dp(18), dp(36))
+            setPadding(dp(18), dp(20), dp(18), dp(36))
             setBackgroundColor(Color.rgb(16, 18, 22))
         }
-        scroll.addView(
-            root,
-            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        )
+        settingsOverlay.addView(settingsRoot, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        rootFrame.addView(settingsOverlay, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
 
-        root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 22 — AUTONOMOUS MEMORY DREAM", 17f, 8).apply {
+        settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
+        settingsRoot.addView(label("STEP 26 — MINIMAL UI / RENDER ISOLATION", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
-        val modeRow = LinearLayout(this).apply {
+        val settingsNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val liveTab = Button(this).apply { text = "LIVE" }
-        val hybridTab = Button(this).apply { text = "HYBRID" }
-        val memoryTab = Button(this).apply { text = "MEMORY" }
-        val labTab = Button(this).apply { text = "LAB" }
-        modeRow.addView(liveTab, weightedButtonParams())
-        modeRow.addView(hybridTab, weightedButtonParams())
-        modeRow.addView(memoryTab, weightedButtonParams())
-        modeRow.addView(labTab, weightedButtonParams())
-        root.addView(modeRow, buttonParams(14))
+        val inputSettings = Button(this).apply { text = "INPUT" }
+        val memorySettings = Button(this).apply { text = "MEMORY" }
+        val labSettings = Button(this).apply { text = "LAB" }
+        val closeSettings = Button(this).apply { text = "✕" }
+        settingsNav.addView(inputSettings, weightedButtonParams())
+        settingsNav.addView(memorySettings, weightedButtonParams())
+        settingsNav.addView(labSettings, weightedButtonParams())
+        settingsNav.addView(closeSettings, weightedButtonParams())
+        settingsRoot.addView(settingsNav, buttonParams(8))
 
+        // Existing control builders are retained so no engine controls are lost.
+        // Their former preview canvases are hidden below; the two hot surfaces above
+        // are the only views that receive continuous render updates.
         livePage = pageContainer()
         hybridPage = pageContainer()
         memoryPage = pageContainer()
         labPage = pageContainer()
-        root.addView(livePage)
-        root.addView(hybridPage)
-        root.addView(memoryPage)
-        root.addView(labPage)
-
+        settingsRoot.addView(livePage)
+        settingsRoot.addView(hybridPage)
+        settingsRoot.addView(memoryPage)
+        settingsRoot.addView(labPage)
         buildLivePage()
         buildHybridPage()
         buildMemoryPage()
         buildLabPage()
 
-        fun selectPage(page: AppPage) {
-            showPage(page)
-            liveTab.isEnabled = page != AppPage.LIVE
-            hybridTab.isEnabled = page != AppPage.HYBRID
-            memoryTab.isEnabled = page != AppPage.MEMORY
-            labTab.isEnabled = page != AppPage.LAB
+        // Legacy embedded previews are deliberately disabled in Step 26.
+        if (::liveVideoCanvas.isInitialized) liveVideoCanvas.visibility = View.GONE
+        if (::outputCanvas.isInitialized) outputCanvas.visibility = View.GONE
+        if (::hybridVideoCanvas.isInitialized) hybridVideoCanvas.visibility = View.GONE
+        if (::hybridCanvas.isInitialized) hybridCanvas.visibility = View.GONE
+        if (::memoryCanvas.isInitialized) memoryCanvas.visibility = View.GONE
+
+        fun showSettingsSection(page: AppPage) {
+            currentPage = page
+            livePage.visibility = if (page == AppPage.LIVE) View.VISIBLE else View.GONE
+            // Hybrid controls are intentionally grouped with INPUT.
+            hybridPage.visibility = if (page == AppPage.LIVE) View.VISIBLE else View.GONE
+            memoryPage.visibility = if (page == AppPage.MEMORY) View.VISIBLE else View.GONE
+            labPage.visibility = if (page == AppPage.LAB) View.VISIBLE else View.GONE
+            if (page == AppPage.LIVE) refreshSensorUiState()
+            updateMemoryStats()
+            refreshGraph()
         }
 
-        liveTab.setOnClickListener { selectPage(AppPage.LIVE) }
-        hybridTab.setOnClickListener { selectPage(AppPage.HYBRID) }
-        memoryTab.setOnClickListener { selectPage(AppPage.MEMORY) }
-        labTab.setOnClickListener { selectPage(AppPage.LAB) }
+        fun setSurface(mode: SurfaceMode) {
+            currentSurface = mode
+            surfaceCanvas.visibility = if (mode == SurfaceMode.CANVAS) View.VISIBLE else View.GONE
+            surfaceVideo.visibility = if (mode == SurfaceMode.LIVE) View.VISIBLE else View.GONE
+            canvasTab.isEnabled = mode != SurfaceMode.CANVAS
+            liveTab.isEnabled = mode != SurfaceMode.LIVE
+            refreshGraph()
+        }
 
-        setContentView(scroll)
-        selectPage(AppPage.LIVE)
-        updateMemoryStats()
-        refreshGraph()
+        fun closeSettingsOverlay() {
+            settingsOpen = false
+            settingsOverlay.visibility = View.GONE
+            refreshGraph()
+        }
+
+        canvasTab.setOnClickListener { setSurface(SurfaceMode.CANVAS) }
+        liveTab.setOnClickListener { setSurface(SurfaceMode.LIVE) }
+        settingsButton.setOnClickListener {
+            settingsOpen = !settingsOpen
+            settingsOverlay.visibility = if (settingsOpen) View.VISIBLE else View.GONE
+            if (settingsOpen) showSettingsSection(currentPage)
+        }
+        inputSettings.setOnClickListener { showSettingsSection(AppPage.LIVE) }
+        memorySettings.setOnClickListener { showSettingsSection(AppPage.MEMORY) }
+        labSettings.setOnClickListener { showSettingsSection(AppPage.LAB) }
+        closeSettings.setOnClickListener { closeSettingsOverlay() }
+
+        setContentView(rootFrame)
+        showSettingsSection(AppPage.LIVE)
+        closeSettingsOverlay()
+        setSurface(SurfaceMode.LIVE)
     }
 
     private fun buildLivePage() {
@@ -1129,12 +1220,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshHybridPage(ok: Boolean) {
-        if (!::hybridCanvas.isInitialized) return
         val state = outputBridge.snapshot()
-        hybridCanvas.setState(state)
-        if (::hybridVideoCanvas.isInitialized) hybridVideoCanvas.setEngineState(state)
+        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS) surfaceCanvas.setState(state)
+        if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE) surfaceVideo.setEngineState(state)
         val w = state.working
-        if (::hybridModeStatus.isInitialized) {
+        if (settingsOpen && ::hybridModeStatus.isInitialized) {
             hybridModeStatus.text = if (!ok && w.nodes.none { it.activation > 0.12 }) {
                 "HYBRID: wartet auf Live-Makro"
             } else if (hybridPlaybackRunning) {
@@ -1143,10 +1233,11 @@ class MainActivity : ComponentActivity() {
                 "HYBRID: ${w.nodes.size} Working-Set-Knoten · ${w.predictions.size} Prediction"
             }
         }
-        refreshSensorUiState()
+        if (settingsOpen) refreshSensorUiState()
     }
 
     private fun refreshSensorUiState() {
+        if (!settingsOpen) return
         if (::hybridSensorStatus.isInitialized) {
             hybridSensorStatus.text = "Sensoren: Audio ${if (running) "AKTIV" else "AUS"} · Kamera ${if (cameraRunning) "AKTIV" else "AUS"}"
         }
@@ -1216,14 +1307,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshMemoryPage() {
-        if (!::memoryCanvas.isInitialized) return
         val state = outputBridge.snapshot()
-        memoryCanvas.setState(state)
+        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS) surfaceCanvas.setState(state)
         val w = state.working
-        if (::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
+        if (settingsOpen && ::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
             memoryModeStatus.text = "MEMORY: RUN · ${w.nodes.size} aktiv · ${w.exchanges.size} Austausch"
         }
-        if (::dreamModeStatus.isInitialized && dreamPlaybackRunning) {
+        if (settingsOpen && ::dreamModeStatus.isInitialized && dreamPlaybackRunning) {
             val d = memory.stats()
             dreamModeStatus.text = "DREAM: RUN · ${d.dreamLastMode} · Schritt ${d.dreamSteps} · ${w.nodes.size} aktiv"
         }
@@ -1231,12 +1321,25 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshGraph() {
         val state = outputBridge.snapshot()
-        if (::outputCanvas.isInitialized && livePage.visibility == View.VISIBLE) outputCanvas.setState(state)
-        if (::liveVideoCanvas.isInitialized && livePage.visibility == View.VISIBLE) liveVideoCanvas.setEngineState(state)
-        if (::hybridCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridCanvas.setState(state)
-        if (::hybridVideoCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridVideoCanvas.setEngineState(state)
-        if (::memoryCanvas.isInitialized && memoryPage.visibility == View.VISIBLE) memoryCanvas.setState(state)
-        if (::graphView.isInitialized && labPage.visibility == View.VISIBLE) graphView.setSnapshot(state.graph)
+
+        // Hot path: update exactly one visible surface. Hidden previews never receive
+        // state and therefore cannot consume Canvas work while the user is switching UI.
+        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS && surfaceCanvas.visibility == View.VISIBLE) {
+            surfaceCanvas.setState(state)
+        }
+        if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE && surfaceVideo.visibility == View.VISIBLE) {
+            surfaceVideo.setEngineState(state)
+        }
+
+        // LAB is intentionally low-frequency. A huge debug graph should never run at
+        // camera/audio frame rate just because the engine itself is active.
+        if (settingsOpen && currentPage == AppPage.LAB && ::graphView.isInitialized && labPage.visibility == View.VISIBLE) {
+            val now = System.currentTimeMillis()
+            if (now - lastLabRenderMs >= 250L) {
+                lastLabRenderMs = now
+                graphView.setSnapshot(state.graph)
+            }
+        }
     }
 
     private fun toggleContinuousOrchestra() {
@@ -1519,16 +1622,18 @@ class MainActivity : ComponentActivity() {
 
                 runOnUiThread {
                     if (running) {
-                        frequency.text = primaryText
-                        frequencyId.text = idText
-                        strength.text = strengthText
-                        frames.text = "Frames verarbeitet: $frameCount"
-                        if (frameCount % 5L == 0L) {
-                            updateMemoryStats()
-                            updateConsolidationStatus()
-                            if (::adaptiveQuantizerStatus.isInitialized) adaptiveQuantizerStatus.text = adaptiveQuantizerText()
+                        if (settingsOpen) {
+                            frequency.text = primaryText
+                            frequencyId.text = idText
+                            strength.text = strengthText
+                            frames.text = "Frames verarbeitet: $frameCount"
+                            if (frameCount % 5L == 0L) {
+                                updateMemoryStats()
+                                updateConsolidationStatus()
+                                if (::adaptiveQuantizerStatus.isInitialized) adaptiveQuantizerStatus.text = adaptiveQuantizerText()
+                            }
+                            if (parallelTest && frameCount % 24L == 0L) refreshEncoderBenchmarkStatus()
                         }
-                        if (parallelTest && frameCount % 24L == 0L) refreshEncoderBenchmarkStatus()
                         if (didConsolidate || frameCount % 12L == 0L) refreshGraph()
                     }
                 }
@@ -1573,20 +1678,21 @@ class MainActivity : ComponentActivity() {
                             visualObservationCount += result.observations.size
 
                             runOnUiThread {
-                                cameraFrames.text =
-                                    "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · Regionen ${result.sampledRegions} · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
-                                adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
-                                if (visualFrameCount % 2L == 0L) {
-                                    updateMemoryStats()
-                                    refreshGraph()
+                                if (settingsOpen) {
+                                    cameraFrames.text =
+                                        "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · Regionen ${result.sampledRegions} · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
+                                    adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
+                                    if (visualFrameCount % 2L == 0L) updateMemoryStats()
                                 }
+                                if (visualFrameCount % 2L == 0L) refreshGraph()
                             }
                         },
                         onVideoFrame = { video ->
                             if (!cameraRunning) return@VisualGridAnalyzer
                             runOnUiThread {
-                                if (::liveVideoCanvas.isInitialized && livePage.visibility == View.VISIBLE) liveVideoCanvas.setFrame(video)
-                                if (::hybridVideoCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridVideoCanvas.setFrame(video)
+                                if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE && surfaceVideo.visibility == View.VISIBLE) {
+                                    surfaceVideo.setFrame(video)
+                                }
                             }
                         }
                     )
@@ -1704,9 +1810,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateMemoryStats() {
+        if (!settingsOpen) return
         val text = memoryText()
-        if (::memoryStats.isInitialized) memoryStats.text = text
-        if (::labMemoryStats.isInitialized) labMemoryStats.text = text
+        if (::memoryStats.isInitialized && livePage.visibility == View.VISIBLE) memoryStats.text = text
+        if (::labMemoryStats.isInitialized && labPage.visibility == View.VISIBLE) labMemoryStats.text = text
     }
 
     private fun memoryText(): String {

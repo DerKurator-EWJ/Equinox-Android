@@ -17,6 +17,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | Tag | Source ZIP | Included files | Omitted files | Input ZIP SHA-256 |
 |---|---|---:|---:|---|
 | `android-eq25-1-cleanup` | `Eq25_1_Cleanup.zip` | 40 | 0 | `ac072c22e2809d92741566ccd1f160f803379a90364bf651d81944b658163f97` |
+| `android-eq26-ui` | `Eq26_UI.zip` | 41 | 0 | `f297dd254c11d97f76934f0eeb3bdd4751876666c24fd9a00ac80d3f1da26a1a` |
 
 ## Security, licensing, and limitations
 
