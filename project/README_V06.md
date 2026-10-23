@@ -1,4 +1,8 @@
-# Equinox v0.6 — Step 25: Unbounded Adaptive Resolution
+# Equinox v0.6 — Step 25.1: Semantic Cleanup
+
+> Step 25.1 is a cleanup layer on top of Step 25. The adaptive/unbounded mechanics remain unchanged.
+> The cleanup makes one rule consistent everywhere: **Tier = abstraction depth only**; maturity/relevance/stability are separate signals.
+
 
 Step 25 removes the major **semantic hard ceilings** that were still left over from the prototype architecture. Physical phone resources remain finite, but the model no longer says that memory ends at 4096 audio IDs, 1024 visual IDs, 48 active macros, L4, 6000 candidates or 12000 template buckets.
 
@@ -81,3 +85,40 @@ A synthetic repeated Direct-ID stream was run against the Step-25 core after com
 
 ## Step 25 fixed build
 - Fixed `MainActivity.memoryText()` to use the actual field name `adaptiveQuantizer` instead of the stale `adaptiveAudioQuantizer` reference.
+
+
+## Step 25.1 semantic cleanup
+
+- Highest active tier is computed by maximum active macro depth, not by maturity score.
+- Maturity score no longer receives an abstraction-depth bonus.
+- Memory competition no longer protects S/SS/SSS/Ω nodes merely because they are deep.
+- Renderer node size no longer double-counts tier.
+- Orchestra tier controls role/timbre, while presence is driven by activation/relevance/expectation.
+- Runtime output DTOs now use explicit names: `abstractionTier`, `abstractionTierIndex`, `maturityScore`.
+- Indexed memory format is unchanged.
+
+## Step 28 — GPU LIVE renderer
+
+The visible LIVE surface now uses OpenGL ES 2.0. Camera pigment is uploaded as a texture and Equinox state deforms/colors it in a fragment shader. The learning core remains independent of output coordinates and the renderer never writes back into memory. Step 27's delayed/latest-frame policy remains the synchronization layer.
+
+## Step 30 — Unified Canvas
+CANVAS and LIVE are no longer separate hot render surfaces. One persistent OpenGL canvas continuously blends Reality and Memory, while the generative orchestra reads the same active working state.
+
+
+## Step 31 — Unified Orchestra
+The Reality ↔ Memory blend is now shared by the single GPU canvas and the continuous generative orchestra. Audio is no longer conceptually a separate mode: the same live/recalled working state is rendered visually and acoustically with one continuous mix parameter.
+
+---
+
+## Step 32 — Tier-aware Visual Hierarchy
+
+The unified OpenGL canvas no longer treats every active macro as the same point-like visual primitive. The RPG abstraction depth now selects the *kind* of spatial expression: F/E/D become fine fibers, middle tiers become local membranes/tissue, SSS-level structures become regional density, and Ω+n becomes a broad organizing domain. Relevance/activity remain separate from abstraction depth, so deeper does not automatically mean brighter or more important. The renderer also reserves a small number of field slots across shallow/mid/deep groups so deep structures are not hidden by a flood of low-tier activity.
+
+### Step 33
+Fluid renderer-side hierarchy transitions: persistent macro-ID visual states, eased Reality/Memory blend, fade-in/out for fields and links, continuous tier morphing, and on-demand animation frames only while a transition is active.
+
+### Step 34 — Performance Governor
+Transient GPU/camera/analysis budgets now adapt to measured render cost, analysis cost, dropped frames and Android thermal pressure. Persistent Equinox learning semantics remain unchanged.
+
+## Step 36 — Unified Capture / Export
+The Unified GPU surface can now be recorded to H.264 MP4. The Unified Orchestra exposes a read-only PCM tap so its generated audio can be encoded as AAC into the same export. Capture does not mutate memory or learning state.

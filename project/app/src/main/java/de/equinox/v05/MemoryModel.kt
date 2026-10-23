@@ -46,7 +46,7 @@ private const val CROSSMODAL_WINDOW_NS = 900_000_000L
 private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
 
 /**
- * v0.6 Step 23
+ * v0.6 Step 39
  *
  * Keeps the active working set, indexed lazy retrieval, structural tiers,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -63,7 +63,9 @@ private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
  * Step 23 replaces the monolithic JSON checkpoint with a compact indexed long-term store.
  * Macro headers stay lightweight in RAM while token payloads are disk-backed and read lazily.
  * Step 25 removes semantic ceilings: hierarchy depth, working-set breadth, candidate/template counts
- * and adaptive codebook sizes are evidence/resource-driven rather than fixed constants.
+ * and adaptive codebook sizes are evidence/resource-driven rather than fixed constants. Step 39
+ * adds a derived sparse routing index over learned macro signatures so familiar tails can skip
+ * redundant lower-tail candidate work while longer novel context remains learnable.
  * The coincidence clock is runtime-only and is never persisted into the learned identities.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
@@ -99,8 +101,8 @@ data class MemoryStats(
     val retrievedMacros: Int = 0,
     val overexchangePairs: Int = 0,
     val meanAbsOverexchange: Double = 0.0,
-    val highestActiveRank: String = "—",
-    val highestActiveRankScore: Double = 0.0,
+    val highestActiveTier: String = "—",
+    val highestActiveMaturityScore: Double = 0.0,
     val templateCodes: Int = 0,
     val activeTemplates: Int = 0,
     val templateVariantLinks: Int = 0,
@@ -128,6 +130,15 @@ data class MemoryStats(
     val hierarchyAllMacroEmissions: Long = 0L,
     val hierarchyAutoPromotions: Long = 0L,
     val hierarchyMeanAcceptedSpan: Double = 0.0,
+    val routingQueries: Long = 0L,
+    val routingHits: Long = 0L,
+    val routingHitRate: Double = 0.0,
+    val routingSignatureChecks: Long = 0L,
+    val routingChecksAvoided: Long = 0L,
+    val routingMeanMatchedSpan: Double = 0.0,
+    val routingIndexStreams: Int = 0,
+    val routingIndexAnchors: Int = 0,
+    val routingIndexSignatures: Int = 0,
     val competitionRuns: Long = 0L,
     val competitionMacrosPruned: Long = 0L,
     val competitionRelationsPruned: Long = 0L,
@@ -171,9 +182,9 @@ data class GraphNode(
     val displayColor: Int = 0,
     val activation: Double = 0.0,
     val expectation: Double = 0.0,
-    val structuralRank: String = "F",
-    val structuralRankIndex: Int = 0,
-    val structuralScore: Double = 0.0,
+    val abstractionTier: String = "F",
+    val abstractionTierIndex: Int = 0,
+    val maturityScore: Double = 0.0,
     val structuralRelevance: Double = 0.0,
     val contextEntropy: Double = 0.0,
     val persistence: Double = 0.0,
@@ -210,9 +221,9 @@ data class SonificationMacro(
     val weight: Long,
     val memberHz: List<Double>,
     val abstractionLevel: Int,
-    val structuralRank: String = "F",
-    val structuralRankIndex: Int = 0,
-    val structuralScore: Double = 0.0,
+    val abstractionTier: String = "F",
+    val abstractionTierIndex: Int = 0,
+    val maturityScore: Double = 0.0,
     val structuralRelevance: Double = 0.0,
     val contextEntropy: Double = 0.0,
     val persistence: Double = 0.0,
@@ -232,9 +243,9 @@ data class ActiveMacroNode(
     val expectation: Double,
     val exchangeBias: Double,
     val retrieved: Boolean,
-    val structuralRank: String = "F",
-    val structuralRankIndex: Int = 0,
-    val structuralScore: Double = 0.0,
+    val abstractionTier: String = "F",
+    val abstractionTierIndex: Int = 0,
+    val maturityScore: Double = 0.0,
     val recurrence: Double = 0.0,
     val reuse: Double = 0.0,
     val relationSupport: Double = 0.0,
@@ -406,6 +417,16 @@ class MemoryModel(context: Context) {
 
     private val macros = mutableMapOf<Int, MacroCode>()
     private val macroBySignature = mutableMapOf<String, Int>()
+
+    // Step 39: sparse address index for familiar hierarchical compositions. It mirrors
+    // learned macro signatures but is not learned state and is never persisted separately.
+    private val hierarchyRouter = HierarchicalRouteIndex()
+    private var routingQueries = 0L
+    private var routingHits = 0L
+    private var routingSignatureChecks = 0L
+    private var routingChecksAvoided = 0L
+    private var routingMatchedSpanTotal = 0L
+
     // Number of higher macros that reuse a macro as a component. This is an index, not
     // another learned relation graph, and lets rank calculation stay local/on-demand.
     private val macroParentUseCount = mutableMapOf<Int, Int>()
@@ -659,11 +680,51 @@ class MemoryModel(context: Context) {
         val lastAutoPromotionAt = hierarchyLastAutoPromotionAt[streamKey] ?: Long.MIN_VALUE / 4L
         val autoPromotionAllowed = streamPosition - lastAutoPromotionAt >= promotionCooldown
 
-        for (length in MIN_PATTERN_LENGTH..current.size) {
-            val tail = current.takeLast(length)
-            val signature = patternSignature(streamLevel, modality, tail)
+        // Step 39: route familiar tails before opening the generic candidate path. The old
+        // Step-38 path materialized one full signature for every possible tail length. The
+        // router first asks only those spans that are actually addressable under the current
+        // learned two-token anchor. Once a familiar macro is found, shorter contained tails
+        // are redundant here: their structure is already represented by that macro and the
+        // macro itself is emitted upward for further learning. Longer tails remain open for
+        // novelty/context learning.
+        val baselineTailChecks = (current.size - MIN_PATTERN_LENGTH + 1).coerceAtLeast(0)
+        val maxAllowedSpan = (streamPosition - coveredUntilBeforeEvent)
+            .coerceAtLeast(0L)
+            .coerceAtMost(Int.MAX_VALUE.toLong())
+            .toInt()
+        val routeProbe = if (baselineTailChecks > 0) {
+            routingQueries++
+            hierarchyRouter.probe(
+                sourceLevel = streamLevel,
+                modality = modality,
+                current = current,
+                maxAllowedSpan = maxAllowedSpan
+            )
+        } else {
+            HierarchicalRouteIndex.Probe(null, emptyMap(), 0)
+        }
+        val materializedSignatureLengths = routeProbe.checkedSignatures.keys.toMutableSet()
+        val routedMatch = routeProbe.match
+        if (routedMatch != null) {
+            val routedMacro = macros[routedMatch.macroId]
+            if (routedMacro != null) {
+                bestActivated = routedMacro
+                routingHits++
+                routingMatchedSpanTotal += routedMatch.span.toLong()
+            }
+        }
 
-            // Direct lookup: no global macro comparison.
+        val familiarSpan = routedMatch?.span ?: 0
+        val explorationStart = max(MIN_PATTERN_LENGTH, familiarSpan + 1)
+
+        for (length in explorationStart..current.size) {
+            val tail = current.takeLast(length)
+            val signature = routeProbe.checkedSignatures[length]
+                ?: patternSignature(streamLevel, modality, tail).also { materializedSignatureLengths += length }
+
+            // Correctness fallback + novelty shell: direct signature lookup remains O(1), but
+            // it is no longer executed for every shorter tail already explained by a routed
+            // familiar macro.
             val existingMacro = macroBySignature[signature]?.let { macros[it] }
             if (existingMacro != null) {
                 val spanStart = streamPosition - existingMacro.tokens.size.toLong() + 1L
@@ -690,7 +751,7 @@ class MemoryModel(context: Context) {
                 ).also { candidates[signature] = it }
             }
 
-            if (!macroFrozen && autoPromotionAllowed && effectiveCandidate != null) {
+            if (!macroFrozen && autoPromotionAllowed) {
                 val score = AdaptiveHierarchyPolicy.evaluate(
                     patternLength = effectiveCandidate.tokens.size,
                     hits = effectiveCandidate.hits,
@@ -703,6 +764,11 @@ class MemoryModel(context: Context) {
                 }
             }
         }
+
+        routingSignatureChecks += materializedSignatureLengths.size.toLong()
+        routingChecksAvoided += (baselineTailChecks - materializedSignatureLengths.size)
+            .coerceAtLeast(0)
+            .toLong()
 
         // At most one self-promotion per input token. This keeps live learning bounded even
         // when several overlapping tails become compressible at the same instant.
@@ -761,6 +827,7 @@ class MemoryModel(context: Context) {
         )
         macros[macro.id] = macro
         macroBySignature[signature] = macro.id
+        hierarchyRouter.registerTokens(candidate.streamLevel, candidate.modality, candidate.tokens, macro.id)
         indexMacroComposition(macro)
         indexMacroForTemplates(macro)
         candidates.remove(signature)
@@ -972,7 +1039,10 @@ class MemoryModel(context: Context) {
         crossModalByPair[signature] = joint.id
         crossModalMemberIndex.getOrPut(audio.id) { linkedSetOf() }.add(joint.id)
         crossModalMemberIndex.getOrPut(visual.id) { linkedSetOf() }.add(joint.id)
-        macroBySignature[patternSignature((joint.level - 1).coerceAtLeast(0), joint.modality, joint.tokens)] = joint.id
+        val jointSourceLevel = (joint.level - 1).coerceAtLeast(0)
+        val jointSignature = patternSignature(jointSourceLevel, joint.modality, joint.tokens)
+        macroBySignature[jointSignature] = joint.id
+        hierarchyRouter.registerTokens(jointSourceLevel, joint.modality, joint.tokens, joint.id)
         indexMacroComposition(joint)
         crossModalCandidates.remove(signature)
         return joint
@@ -1481,10 +1551,10 @@ class MemoryModel(context: Context) {
         fun offer(targetId: Int, kind: DreamHopKind, rawScore: Double) {
             if (targetId == seed.id) return
             val target = macros[targetId] ?: return
-            val profile = structuralRankFor(target)
+            val profile = structuralProfileFor(target)
             val recentPenalty = if (targetId in recentDreamIds) 0.34 else 1.0
             val levelAffinity = 1.0 / (1.0 + 0.18 * abs(target.level - seed.level).toDouble())
-            val score = (rawScore + 0.22 * profile.relevance + 0.015 * profile.rankIndex) * recentPenalty * levelAffinity
+            val score = (rawScore + 0.22 * profile.relevance) * recentPenalty * levelAffinity
             val previous = choices[targetId]
             if (previous == null || score > previous.score) {
                 choices[targetId] = DreamChoice(targetId, kind, score.coerceAtLeast(0.0))
@@ -1567,7 +1637,7 @@ class MemoryModel(context: Context) {
         val top = macros.values.asSequence()
             .filter { it.id != excludeId }
             .sortedWith(
-                compareByDescending<MacroCode> { structuralRankFor(it).relevance }
+                compareByDescending<MacroCode> { structuralProfileFor(it).relevance }
                     .thenByDescending { it.level }
                     .thenByDescending { it.weight }
             )
@@ -1792,7 +1862,7 @@ class MemoryModel(context: Context) {
         }
 
         selectedMacros.forEach { m ->
-            val rank = structuralRankFor(m)
+            val profile = structuralProfileFor(m)
             nodes += GraphNode(
                 id = m.id,
                 weight = m.weight,
@@ -1804,13 +1874,13 @@ class MemoryModel(context: Context) {
                 displayColor = 0,
                 activation = activeWorking[m.id]?.actual ?: 0.0,
                 expectation = activeWorking[m.id]?.expected ?: 0.0,
-                structuralRank = rank.label,
-                structuralRankIndex = rank.rankIndex,
-                structuralScore = rank.score,
-                structuralRelevance = rank.relevance,
-                contextEntropy = rank.contextEntropy,
-                persistence = rank.persistence,
-                generality = rank.generality
+                abstractionTier = profile.tierLabel,
+                abstractionTierIndex = profile.tierIndex,
+                maturityScore = profile.score,
+                structuralRelevance = profile.relevance,
+                contextEntropy = profile.contextEntropy,
+                persistence = profile.persistence,
+                generality = profile.generality
             )
         }
 
@@ -1882,20 +1952,20 @@ class MemoryModel(context: Context) {
             )
             .take(maxMacros)
             .map { m ->
-                val rank = structuralRankFor(m)
+                val profile = structuralProfileFor(m)
                 SonificationMacro(
                     id = m.id,
                     hz = if (m.representativeHz > 0.0) m.representativeHz else projectionHzForMacro(m),
                     weight = m.weight,
                     memberHz = leafHzOf(m.id).distinct().take(8),
                     abstractionLevel = m.level,
-                    structuralRank = rank.label,
-                    structuralRankIndex = rank.rankIndex,
-                    structuralScore = rank.score,
-                    structuralRelevance = rank.relevance,
-                    contextEntropy = rank.contextEntropy,
-                    persistence = rank.persistence,
-                    generality = rank.generality
+                    abstractionTier = profile.tierLabel,
+                    abstractionTierIndex = profile.tierIndex,
+                    maturityScore = profile.score,
+                    structuralRelevance = profile.relevance,
+                    contextEntropy = profile.contextEntropy,
+                    persistence = profile.persistence,
+                    generality = profile.generality
                 )
             }
 
@@ -1914,7 +1984,7 @@ class MemoryModel(context: Context) {
         val selectedIds = selected.map { it.key }.toSet()
         val nodes = selected.mapNotNull { (id, state) ->
             val macro = macros[id] ?: return@mapNotNull null
-            val rank = structuralRankFor(macro)
+            val profile = structuralProfileFor(macro)
             ActiveMacroNode(
                 id = id,
                 abstractionLevel = macro.level,
@@ -1923,17 +1993,17 @@ class MemoryModel(context: Context) {
                 expectation = state.expected,
                 exchangeBias = state.exchangeBias,
                 retrieved = state.retrieved,
-                structuralRank = rank.label,
-                structuralRankIndex = rank.rankIndex,
-                structuralScore = rank.score,
-                recurrence = rank.recurrence,
-                reuse = rank.reuse,
-                relationSupport = rank.relationSupport,
-                specificity = rank.specificity,
-                contextEntropy = rank.contextEntropy,
-                persistence = rank.persistence,
-                generality = rank.generality,
-                structuralRelevance = rank.relevance
+                abstractionTier = profile.tierLabel,
+                abstractionTierIndex = profile.tierIndex,
+                maturityScore = profile.score,
+                recurrence = profile.recurrence,
+                reuse = profile.reuse,
+                relationSupport = profile.relationSupport,
+                specificity = profile.specificity,
+                contextEntropy = profile.contextEntropy,
+                persistence = profile.persistence,
+                generality = profile.generality,
+                structuralRelevance = profile.relevance
             )
         }
 
@@ -1983,12 +2053,14 @@ class MemoryModel(context: Context) {
             candidates.values.maxOfOrNull { it.tokens.size } ?: 0,
             macros.values.maxOfOrNull { it.tokens.size } ?: 0
         )
-        val activeProfiles = activeWorking.keys
+        val activeMacrosNow = activeWorking.keys
             .asSequence()
             .mapNotNull { macros[it] }
-            .map { structuralRankFor(it) }
             .toList()
-        val highestActiveRank = activeProfiles.maxByOrNull { it.score }
+        val activeProfiles = activeMacrosNow.map { structuralProfileFor(it) }
+        val highestActiveDepth = activeMacrosNow.maxOfOrNull { it.level } ?: 0
+        val highestActiveTier = if (highestActiveDepth > 0) AbstractionTier.labelForMacroDepth(highestActiveDepth) else "—"
+        val highestActiveMaturityScore = activeProfiles.maxOfOrNull { it.score } ?: 0.0
         val meanActiveRelevance =
             if (activeProfiles.isEmpty()) 0.0 else activeProfiles.map { it.relevance }.average()
         val highestActiveRelevance = activeProfiles.maxOfOrNull { it.relevance } ?: 0.0
@@ -2015,6 +2087,7 @@ class MemoryModel(context: Context) {
         val strongestSubstitutionSupport =
             substitutionClassesNow.maxOfOrNull { it.strongestPairSupport } ?: 0
         val storageStats = longTermStore.stats()
+        val routingIndexStats = hierarchyRouter.stats()
 
         return MemoryStats(
             persistentCodes = quants.size,
@@ -2039,8 +2112,8 @@ class MemoryModel(context: Context) {
             retrievedMacros = activeWorking.values.count { it.retrieved },
             overexchangePairs = lastExchangePairs,
             meanAbsOverexchange = lastMeanAbsExchange,
-            highestActiveRank = highestActiveRank?.label ?: "—",
-            highestActiveRankScore = highestActiveRank?.score ?: 0.0,
+            highestActiveTier = highestActiveTier,
+            highestActiveMaturityScore = highestActiveMaturityScore,
             templateCodes = learnedTemplates.size,
             activeTemplates = activeTemplateCount,
             templateVariantLinks = templateVariantLinks,
@@ -2070,6 +2143,15 @@ class MemoryModel(context: Context) {
             hierarchyAutoPromotions = hierarchyAutoPromotions,
             hierarchyMeanAcceptedSpan = if (hierarchyAllMacroEmissions <= 0L) 0.0 else
                 hierarchyAcceptedSpanTotal.toDouble() / hierarchyAllMacroEmissions.toDouble(),
+            routingQueries = routingQueries,
+            routingHits = routingHits,
+            routingHitRate = if (routingQueries <= 0L) 0.0 else routingHits.toDouble() / routingQueries.toDouble(),
+            routingSignatureChecks = routingSignatureChecks,
+            routingChecksAvoided = routingChecksAvoided,
+            routingMeanMatchedSpan = if (routingHits <= 0L) 0.0 else routingMatchedSpanTotal.toDouble() / routingHits.toDouble(),
+            routingIndexStreams = routingIndexStats.streams,
+            routingIndexAnchors = routingIndexStats.anchors,
+            routingIndexSignatures = routingIndexStats.signatures,
             competitionRuns = competitionRuns,
             competitionMacrosPruned = competitionMacrosPruned,
             competitionRelationsPruned = competitionRelationsPruned,
@@ -2109,6 +2191,12 @@ class MemoryModel(context: Context) {
         candidates.clear()
         macros.clear()
         macroBySignature.clear()
+        hierarchyRouter.clear()
+        routingQueries = 0L
+        routingHits = 0L
+        routingSignatureChecks = 0L
+        routingChecksAvoided = 0L
+        routingMatchedSpanTotal = 0L
         macroParentUseCount.clear()
         crossModalCandidates.clear()
         crossModalByPair.clear()
@@ -2183,6 +2271,12 @@ class MemoryModel(context: Context) {
         candidates.clear()
         macros.clear()
         macroBySignature.clear()
+        hierarchyRouter.clear()
+        routingQueries = 0L
+        routingHits = 0L
+        routingSignatureChecks = 0L
+        routingChecksAvoided = 0L
+        routingMatchedSpanTotal = 0L
         macroParentUseCount.clear()
         crossModalCandidates.clear()
         crossModalByPair.clear()
@@ -2348,6 +2442,13 @@ class MemoryModel(context: Context) {
                 )
                 macros[macro.id] = macro
                 macroBySignature[h.signature] = macro.id
+                hierarchyRouter.registerPersisted(
+                    sourceLevel = (macro.level - 1).coerceAtLeast(0),
+                    modality = macro.modality,
+                    signature = h.signature,
+                    macroId = macro.id,
+                    tokenCount = h.tokenCount
+                )
                 nextMacroId = max(nextMacroId, macro.id + 1)
             }
 
@@ -2414,6 +2515,7 @@ class MemoryModel(context: Context) {
                     tokens = macro.tokens
                 )
                 macroBySignature[signature] = macro.id
+                hierarchyRouter.registerTokens((macro.level - 1).coerceAtLeast(0), macro.modality, macro.tokens, macro.id)
                 nextMacroId = max(nextMacroId, macro.id + 1)
             }
 
@@ -2444,14 +2546,14 @@ class MemoryModel(context: Context) {
     }
 
     /** Read-only, on-demand structural profile. It never changes learning or persistence. */
-    private fun structuralRankFor(macro: MacroCode): StructuralRankProfile {
+    private fun structuralProfileFor(macro: MacroCode): StructuralProfile {
         val relationWeights = relationIndex[macro.id]
             ?.asSequence()
             ?.mapNotNull { macroRelations[it] }
             ?.toList()
             ?: emptyList()
 
-        return StructuralRankEngine.evaluate(
+        return StructuralProfileEngine.evaluate(
             occurrenceWeight = macro.weight,
             abstractionLevel = macro.level,
             parentReuseCount = macroParentUseCount[macro.id] ?: 0,
@@ -2474,6 +2576,18 @@ class MemoryModel(context: Context) {
     private fun rebuildMacroCompositionIndex() {
         macroParentUseCount.clear()
         macros.values.forEach { indexMacroComposition(it) }
+    }
+
+    private fun rebuildHierarchyRouteIndex() {
+        hierarchyRouter.clear()
+        macros.values.forEach { macro ->
+            hierarchyRouter.registerTokens(
+                sourceLevel = (macro.level - 1).coerceAtLeast(0),
+                modality = macro.modality,
+                tokens = macro.tokens,
+                macroId = macro.id
+            )
+        }
     }
 
     /**
@@ -2793,10 +2907,9 @@ class MemoryModel(context: Context) {
                 val relationKeys = relationIndex[macro.id].orEmpty()
                 val relationWeights = relationKeys.mapNotNull { macroRelations[it] }
                 val relationMass = relationWeights.sum()
-                val profile = structuralRankFor(macro)
+                val profile = structuralProfileFor(macro)
                 val score = MemoryCompetitionPolicy.evaluate(
                     weight = macro.weight,
-                    abstractionLevel = macro.level,
                     parentReuseCount = macroParentUseCount[macro.id] ?: 0,
                     relationMass = relationMass,
                     relationDegree = relationWeights.size,
@@ -2900,6 +3013,7 @@ class MemoryModel(context: Context) {
         macroParentUseCount.clear()
         rebuildCrossModalIndex()
         rebuildMacroCompositionIndex()
+        rebuildHierarchyRouteIndex()
         rebuildTemplateIndex()
         relationIndex.clear()
         macroRelations.keys.forEach { indexRelation(it) }

@@ -25,6 +25,8 @@ class ContinuousOrchestraEngine {
     @Volatile private var suppressionHz = DoubleArray(0)
     @Volatile private var activeVoiceCount = 0
     @Volatile private var latestSummary = "0 Stimmen"
+    @Volatile private var memoryBlend = 0.35
+    @Volatile private var pcmTap: ((ShortArray) -> Unit)? = null
 
     private var worker: Thread? = null
     private var track: AudioTrack? = null
@@ -32,6 +34,13 @@ class ContinuousOrchestraEngine {
     fun isRunning(): Boolean = running
     fun voiceCount(): Int = activeVoiceCount
     fun sceneSummary(): String = latestSummary
+
+    /** Same continuous Reality ↔ Memory state as the unified GPU canvas. */
+    fun setMemoryBlend(value: Float) { memoryBlend = value.coerceIn(0f, 1f).toDouble() }
+    fun memoryBlend(): Double = memoryBlend
+
+    /** Read-only PCM tap used by the export recorder. The recorder must copy the array immediately. */
+    fun setPcmTap(tap: ((ShortArray) -> Unit)?) { pcmTap = tap }
 
     /** Frequencies currently synthesized, including important members/harmonics. */
     fun suppressionFrequencies(): DoubleArray = suppressionHz.copyOf()
@@ -77,13 +86,14 @@ class ContinuousOrchestraEngine {
 
                 var lastStatusAt = 0L
                 while (running) {
-                    val scene = GenerativeOrchestraSceneBuilder.build(latestSound, latestWorking)
+                    val scene = GenerativeOrchestraSceneBuilder.build(latestSound, latestWorking, memoryBlend = memoryBlend)
                     activeVoiceCount = scene.voices.size
                     latestSummary = scene.compactSummary()
                     suppressionHz = synth.suppressionFrequencies(scene)
 
                     val pcm = synth.render(scene, CHUNK_SAMPLES)
                     if (!running) break
+                    try { pcmTap?.invoke(pcm) } catch (_: Exception) { }
                     audioTrack.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
 
                     val now = System.currentTimeMillis()

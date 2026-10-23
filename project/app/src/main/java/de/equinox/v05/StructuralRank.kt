@@ -11,10 +11,10 @@ import kotlin.math.ln
  * score remains a diagnostic maturity score, while relevance stays a bounded
  * multidimensional estimate. Neither value changes the tier label.
  */
-data class StructuralRankProfile(
+data class StructuralProfile(
     val score: Double,
-    val rankIndex: Int,
-    val label: String,
+    val tierIndex: Int,
+    val tierLabel: String,
     val recurrence: Double,
     val reuse: Double,
     val relationSupport: Double,
@@ -25,7 +25,7 @@ data class StructuralRankProfile(
     val relevance: Double = 0.0
 )
 
-object StructuralRankEngine {
+object StructuralProfileEngine {
 
     fun evaluate(
         occurrenceWeight: Long,
@@ -35,7 +35,7 @@ object StructuralRankEngine {
         firstActivatedObservation: Long = 0L,
         lastActivatedObservation: Long = 0L,
         currentObservation: Long = 0L
-    ): StructuralRankProfile {
+    ): StructuralProfile {
         val safeOccurrence = occurrenceWeight.coerceAtLeast(0L)
         val safeReuse = parentReuseCount.coerceAtLeast(0)
         val positiveRelations = relationWeights.filter { it > 0L }
@@ -50,21 +50,21 @@ object StructuralRankEngine {
             currentObservation = currentObservation
         )
 
-        // Maturity remains slowly unbounded for F -> ... -> Ω+n.
-        // Raw repetition contributes, but structural reuse and abstraction carry more weight.
+        // Maturity is intentionally independent of abstraction depth.
+        // Tier says only how deep a macro is composed; maturity says how established
+        // that macro is within its own tier.
         val score =
             0.72 * ln(1.0 + safeOccurrence.toDouble()) +
             1.65 * ln(1.0 + safeReuse.toDouble()) +
             0.72 * ln(1.0 + relationMass) +
             1.35 * relevance.specificity +
-            1.05 * relevance.persistence +
-            1.10 * abstractionLevel.coerceAtLeast(0).toDouble()
+            1.05 * relevance.persistence
 
-        val rankIndex = AbstractionTier.indexForMacroDepth(abstractionLevel)
-        return StructuralRankProfile(
+        val tierIndex = AbstractionTier.indexForMacroDepth(abstractionLevel)
+        return StructuralProfile(
             score = score,
-            rankIndex = rankIndex,
-            label = AbstractionTier.labelForMacroDepth(abstractionLevel),
+            tierIndex = tierIndex,
+            tierLabel = AbstractionTier.labelForMacroDepth(abstractionLevel),
             recurrence = relevance.frequency,
             reuse = relevance.reuse,
             relationSupport = relevance.relationSupport,
@@ -77,6 +77,6 @@ object StructuralRankEngine {
     }
 
     /** Compatibility helper for older UI call sites. */
-    fun labelFor(rankIndex: Int): String = AbstractionTier.labelForIndex(rankIndex)
+    fun tierLabelFor(tierIndex: Int): String = AbstractionTier.labelForIndex(tierIndex)
 
 }

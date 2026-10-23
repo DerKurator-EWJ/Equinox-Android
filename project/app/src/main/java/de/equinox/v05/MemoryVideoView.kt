@@ -36,8 +36,11 @@ data class VideoFrameSnapshot(
 class MemoryVideoView(context: Context) : View(context) {
     private var frame: VideoFrameSnapshot? = null
     private var engine: EngineOutputState? = null
+    private var workingOverride: WorkingSetSnapshot? = null
     private var phase = 0f
     private var modeLabel = "LIVE"
+    @Volatile private var syncInfo = ""
+    @Volatile private var lastDrawCostMs = 0.0
 
     private val pixelPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val overlayPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -57,9 +60,25 @@ class MemoryVideoView(context: Context) : View(context) {
 
     fun setEngineState(newState: EngineOutputState) {
         engine = newState
+        workingOverride = null
         phase = (phase + 0.009f) % 1f
         invalidate()
     }
+
+    /** Step 27 hot path: frame + compact WorkingSet arrive as one synchronized render packet. */
+    fun setSynchronizedFrame(
+        newFrame: VideoFrameSnapshot,
+        working: WorkingSetSnapshot?,
+        info: String = ""
+    ) {
+        frame = newFrame
+        workingOverride = working
+        syncInfo = info
+        phase = (phase + 0.021f) % 1f
+        invalidate()
+    }
+
+    fun lastRenderCostMs(): Double = lastDrawCostMs
 
     fun setModeLabel(label: String) {
         modeLabel = label.trim().uppercase().ifEmpty { "VIDEO" }
@@ -67,6 +86,7 @@ class MemoryVideoView(context: Context) : View(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
+        val drawStartNs = System.nanoTime()
         super.onDraw(canvas)
         canvas.drawColor(Color.rgb(3, 5, 9))
 
@@ -77,10 +97,10 @@ class MemoryVideoView(context: Context) : View(context) {
             return
         }
 
-        val s = engine
-        val nodes = s?.working?.nodes.orEmpty()
-        val exchanges = s?.working?.exchanges.orEmpty()
-        val predictions = s?.working?.predictions.orEmpty()
+        val working = workingOverride ?: engine?.working
+        val nodes = working?.nodes.orEmpty()
+        val exchanges = working?.exchanges.orEmpty()
+        val predictions = working?.predictions.orEmpty()
 
         val meanActivation = if (nodes.isEmpty()) 0.0 else nodes.map { it.activation.coerceIn(0.0, 1.0) }.average()
         val meanExpectation = if (nodes.isEmpty()) 0.0 else nodes.map { it.expectation.coerceIn(0.0, 1.0) }.average()
@@ -164,12 +184,12 @@ class MemoryVideoView(context: Context) : View(context) {
         }
 
         textPaint.color = Color.argb(210, 240, 244, 255)
-        canvas.drawText(
-            "$modeLabel VIDEO · Memory ${(memoryEnergy * 100.0).toInt()}% · ${nodes.size} aktiv · ${predictions.size} Prognosen · ${exchanges.size} Austausch",
-            14f,
-            height - 16f,
-            textPaint
-        )
+        val footer = buildString {
+            append("$modeLabel VIDEO · Memory ${(memoryEnergy * 100.0).toInt()}% · ${nodes.size} aktiv · ${predictions.size} Prognosen · ${exchanges.size} Austausch")
+            if (syncInfo.isNotBlank()) append(" · ").append(syncInfo)
+        }
+        canvas.drawText(footer, 14f, height - 16f, textPaint)
+        lastDrawCostMs = (System.nanoTime() - drawStartNs) / 1_000_000.0
     }
 
     private fun memoryColor(rgb: Int, memoryEnergy: Double, signedExchange: Double, expectation: Double): Int {

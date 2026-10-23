@@ -73,6 +73,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step24-longtermhardtest` | `Equinox_v06_Step24_LongTermHardTest.zip` | 37 | 0 | `296d08fc00bcc456d8c15c921d243f5ffe3c0f5240f1e2bd97dbcfce8c28fb0c` |
 | `android-v06-step25-unboundedadaptiveresolution` | `Equinox_v06_Step25_UnboundedAdaptiveResolution.zip` | 39 | 0 | `9bb193b89e8420956315f1df2e918d3d587189608d29f17dc24bc86a90cbc92d` |
 | `android-v06-step25-unboundedadaptiveresolution-fixed` | `Equinox_v06_Step25_UnboundedAdaptiveResolution_fixed.zip` | 39 | 0 | `068e23833f516d60f38f12a2452ca1ea4aa791312b42581691d58acb7920cc17` |
+| `android-v06-step39-hierarchicalrouting` | `Equinox_v06_Step39_HierarchicalRouting.zip` | 62 | 0 | `909c87fd3cc5aead36b9192980137e1416806b7f997bd9467ffcf0ac5f4f467e` |
 
 ## Security, licensing, and limitations
 

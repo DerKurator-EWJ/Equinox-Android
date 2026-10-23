@@ -53,7 +53,6 @@ object MemoryCompetitionPolicy {
 
     fun evaluate(
         weight: Long,
-        abstractionLevel: Int,
         parentReuseCount: Int,
         relationMass: Long,
         relationDegree: Int,
@@ -61,7 +60,7 @@ object MemoryCompetitionPolicy {
         ageObservations: Long,
         active: Boolean,
         previousContext: Boolean,
-        profile: StructuralRankProfile
+        profile: StructuralProfile
     ): MemoryCompetitionScore {
         val age = ageObservations.coerceAtLeast(0L)
         val recency = 1.0 / (1.0 + age.toDouble() / 768.0)
@@ -69,25 +68,26 @@ object MemoryCompetitionPolicy {
         val relationSupport = relationMass.coerceAtLeast(0L).toDouble() / (relationMass.coerceAtLeast(0L).toDouble() + 32.0)
         val relationBreadth = relationDegree.coerceAtLeast(0).toDouble() / (relationDegree.coerceAtLeast(0).toDouble() + 6.0)
         val templateSupport = templateRoleCount.coerceAtLeast(0).toDouble() / (templateRoleCount.coerceAtLeast(0).toDouble() + 4.0)
-        val levelSupport = (ln(1.0 + abstractionLevel.coerceAtLeast(0).toDouble()) / ln(16.0)).coerceIn(0.0, 1.0)
         val maturity = (ln(1.0 + profile.score.coerceAtLeast(0.0)) / ln(1.0 + 20.0)).coerceIn(0.0, 1.0)
 
+        // Abstraction tier is NOT an importance signal. A deep node does not survive
+        // merely because it is deep; survival comes from reuse, relevance, persistence,
+        // relations and current context.
         val utility = (
-            0.13 * frequency +
-            0.26 * profile.relevance +
+            0.14 * frequency +
+            0.28 * profile.relevance +
             0.14 * relationSupport +
             0.06 * relationBreadth +
-            0.13 * templateSupport +
+            0.14 * templateSupport +
             0.12 * recency +
-            0.08 * levelSupport +
-            0.08 * maturity
+            0.12 * maturity
         ).coerceIn(0.0, 1.0)
 
         val protected = active ||
             previousContext ||
             parentReuseCount > 0 ||
-            profile.rankIndex >= 6 || // S and above survive automatic competition.
-            templateRoleCount >= 5
+            templateRoleCount >= 5 ||
+            (profile.relevance >= 0.88 && profile.persistence >= 0.72)
 
         return MemoryCompetitionScore(
             utility = utility,

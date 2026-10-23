@@ -1,32 +1,43 @@
 package de.equinox.v05
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.projection.MediaProjectionManager
 import android.media.audiofx.AcousticEchoCanceler
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.os.PowerManager
 import android.view.Gravity
+import android.view.HapticFeedbackConstants
 import android.view.View
 import android.view.ViewGroup
+import android.widget.AdapterView
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -62,6 +73,57 @@ class MainActivity : ComponentActivity() {
     private lateinit var memoryPage: LinearLayout
     private lateinit var labPage: LinearLayout
     private var currentPage = AppPage.LIVE
+    private var settingsOpen = false
+    private var lastLabRenderMs = 0L
+    private lateinit var surfaceVideo: GpuMemoryVideoView
+    private lateinit var settingsOverlay: ScrollView
+    private lateinit var settingsScrim: View
+    private lateinit var settingsSheet: FrameLayout
+    private lateinit var captureRecorder: UnifiedCaptureRecorder
+    private lateinit var captureButton: TextView
+    private lateinit var captureStatus: TextView
+    private val capturePermissionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        if (result.resultCode == android.app.Activity.RESULT_OK && data != null) {
+            CaptureForegroundService.start(this)
+            // Give the foreground service a brief moment to enter foreground before MediaProjection.
+            uiHandler.postDelayed({ startUnifiedCapture(result.resultCode, data) }, 140L)
+        } else {
+            if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: abgebrochen"
+            if (::captureButton.isInitialized) captureButton.text = "REC"
+            CaptureForegroundService.stop(this)
+        }
+    }
+    private val profileExportLauncher = registerForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        if (uri == null || !::profiles.isInitialized) return@registerForActivityResult
+        val selected = selectedProfileInfo() ?: return@registerForActivityResult
+        val ok = runCatching {
+            contentResolver.openOutputStream(uri)?.let { profiles.exportProfile(selected.id, it) } ?: false
+        }.getOrDefault(false)
+        if (::profileStatus.isInitialized) profileStatus.text = if (ok) "Profil exportiert: ${selected.name}" else "Profil-Export fehlgeschlagen"
+    }
+
+    private val profileImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null || !::profiles.isInitialized) return@registerForActivityResult
+        val suggested = uri.lastPathSegment?.substringAfterLast('/') ?: "Imported Memory"
+        val imported = runCatching {
+            contentResolver.openInputStream(uri)?.let { profiles.importProfile(it, suggested) }
+        }.getOrNull()
+        if (imported != null) {
+            refreshProfileControls(selectId = imported.id)
+            if (::profileStatus.isInitialized) profileStatus.text = "Importiert: ${imported.name} · LOAD zum Aktivieren"
+        } else if (::profileStatus.isInitialized) {
+            profileStatus.text = "Profil-Import fehlgeschlagen"
+        }
+    }
+
+    private val livePipeline = LowLatencyLivePipeline()
+    private val performanceGovernor = PerformanceGovernor()
+    private var visualAnalyzer: VisualGridAnalyzer? = null
+    private var lastGovernorUpdateMs = 0L
+    private val liveRenderPosted = AtomicBoolean(false)
+    private lateinit var liveDelaySpinner: Spinner
+    private lateinit var liveLatencyStatus: TextView
 
     private lateinit var status: TextView
     private lateinit var frequency: TextView
@@ -113,6 +175,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var cameraStopButton: Button
     private lateinit var displayPrefsStore: DisplayPrefsStore
     private lateinit var saveSlots: SaveSlotManager
+    private lateinit var profiles: MemoryProfileManager
+    private lateinit var profileSpinner: Spinner
+    private lateinit var profileStatus: TextView
+    private var profileSpinnerSyncing = false
     private lateinit var diagnostics: DiagnosticsManager
     private lateinit var diagnosticsStatus: TextView
     private lateinit var hardTest: LongTermHardTestManager
@@ -212,6 +278,7 @@ class MainActivity : ComponentActivity() {
         cameraExecutor = Executors.newSingleThreadExecutor()
         displayPrefsStore = DisplayPrefsStore(this)
         saveSlots = SaveSlotManager(this)
+        profiles = MemoryProfileManager(this)
         diagnostics = DiagnosticsManager(this)
         hardTest = LongTermHardTestManager(this)
         audioEncoderModeStore = AudioEncoderModeStore(this)
@@ -219,72 +286,291 @@ class MainActivity : ComponentActivity() {
         encoderBenchmark = EncoderBenchmarkManager(this)
         adaptiveQuantizer = AdaptiveAudioQuantizer(this)
         adaptiveVisualQuantizer = AdaptiveVisualQuantizer(this)
-
-        val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(16, 18, 22))
-            isFillViewport = true
-        }
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(dp(18), dp(24), dp(18), dp(36))
-            setBackgroundColor(Color.rgb(16, 18, 22))
-        }
-        scroll.addView(
-            root,
-            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        captureRecorder = UnifiedCaptureRecorder(this)
+        val latencyPrefs = getSharedPreferences("equinox_live_latency", MODE_PRIVATE)
+        livePipeline.setPreset(
+            LowLatencyLivePipeline.DelayPreset.fromName(latencyPrefs.getString("preset", null))
         )
 
-        root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 22 — AUTONOMOUS MEMORY DREAM", 17f, 8).apply {
-            setTextColor(Color.rgb(53, 214, 200))
+        // Step 30: one physical GPU surface. Reality, Hybrid and Memory are no longer
+        // separate render windows; they are blend states of the same persistent OpenGL canvas.
+        val rootFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(6, 8, 12))
+        }
+
+        surfaceVideo = GpuMemoryVideoView(this).apply {
+            setModeLabel("UNIFIED")
+            setMemoryBlend(0.35f)
+            continuousOrchestra.setMemoryBlend(0.35f)
+            visibility = View.VISIBLE
+        }
+        rootFrame.addView(surfaceVideo, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        // One continuous Reality <-> Memory control instead of CANVAS/LIVE tabs.
+        // 0 = camera pigment dominates, 1 = naked memory tissue. Everything between is Hybrid.
+        val controlBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(10), dp(8))
+            background = roundedBackground(Color.argb(232, 12, 14, 20), 24f, Color.argb(46, 255, 255, 255), 1)
+            elevation = dp(12).toFloat()
+        }
+        val realityLabel = TextView(this).apply {
+            text = "REALITY"
+            textSize = 10f
+            letterSpacing = 0.12f
+            setTextColor(Color.rgb(188, 197, 211))
+            gravity = Gravity.CENTER
+        }
+        val blendSlider = SeekBar(this).apply {
+            max = 100
+            progress = 35
+            splitTrack = false
+        }
+        val memoryLabel = TextView(this).apply {
+            text = "MEMORY 35%"
+            textSize = 10f
+            letterSpacing = 0.06f
+            setTextColor(Color.rgb(233, 211, 143))
+            gravity = Gravity.CENTER
+        }
+        captureButton = TextView(this).apply {
+            text = "REC"
+            textSize = 11f
+            letterSpacing = 0.08f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(255, 112, 112))
+            background = roundedBackground(Color.argb(64, 255, 255, 255), 18f)
+            isClickable = true
+            isFocusable = true
+            attachPressMotion(this)
+        }
+        val settingsButton = TextView(this).apply {
+            text = "⚙"
+            textSize = 22f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = roundedBackground(Color.argb(64, 255, 255, 255), 18f)
+            isClickable = true
+            isFocusable = true
+            attachPressMotion(this)
+        }
+        controlBar.addView(realityLabel, LinearLayout.LayoutParams(dp(58), dp(48)))
+        controlBar.addView(blendSlider, LinearLayout.LayoutParams(0, dp(48), 1f))
+        controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(78), dp(48)))
+        controlBar.addView(captureButton, LinearLayout.LayoutParams(dp(54), dp(48)))
+        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(54), dp(48)))
+        val controlBarParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM
+        ).apply {
+            marginStart = dp(12)
+            marginEnd = dp(12)
+            bottomMargin = dp(10)
+        }
+        rootFrame.addView(controlBar, controlBarParams)
+
+        rootFrame.setOnApplyWindowInsetsListener { _, insets ->
+            val lp = controlBar.layoutParams as FrameLayout.LayoutParams
+            val bottom = insets.systemWindowInsetBottom + dp(10)
+            if (lp.bottomMargin != bottom) {
+                lp.bottomMargin = bottom
+                controlBar.layoutParams = lp
+            }
+            if (::settingsSheet.isInitialized) {
+                val sheetLp = settingsSheet.layoutParams as FrameLayout.LayoutParams
+                val sheetBottom = insets.systemWindowInsetBottom
+                if (sheetLp.bottomMargin != sheetBottom) {
+                    sheetLp.bottomMargin = sheetBottom
+                    settingsSheet.layoutParams = sheetLp
+                }
+            }
+            insets
+        }
+
+        // Step 35: settings are a true animated bottom sheet. The unified canvas remains
+        // visible beneath a dim scrim, so opening controls never feels like navigating away.
+        settingsScrim = View(this).apply {
+            setBackgroundColor(Color.argb(150, 0, 0, 0))
+            alpha = 0f
+            visibility = View.GONE
+            isClickable = true
+        }
+        rootFrame.addView(settingsScrim, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        settingsSheet = FrameLayout(this).apply {
+            background = roundedBackground(Color.rgb(17, 19, 25), 30f, Color.argb(38, 255, 255, 255), 1)
+            elevation = dp(24).toFloat()
+            visibility = View.INVISIBLE
+        }
+        val sheetParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            (resources.displayMetrics.heightPixels * 0.82f).roundToInt(),
+            Gravity.BOTTOM
+        ).apply {
+            marginStart = dp(8)
+            marginEnd = dp(8)
+        }
+        rootFrame.addView(settingsSheet, sheetParams)
+
+        settingsOverlay = ScrollView(this).apply {
+            setBackgroundColor(Color.TRANSPARENT)
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        val settingsRoot = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(18), dp(14), dp(18), dp(44))
+            setBackgroundColor(Color.TRANSPARENT)
+        }
+        settingsOverlay.addView(settingsRoot, ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        settingsSheet.addView(settingsOverlay, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        val grabber = View(this).apply {
+            background = roundedBackground(Color.argb(90, 235, 238, 245), 4f)
+        }
+        settingsSheet.addView(grabber, FrameLayout.LayoutParams(dp(42), dp(4), Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply {
+            topMargin = dp(8)
         })
 
-        val modeRow = LinearLayout(this).apply {
+        settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
+        settingsRoot.addView(label("STEP 37 — MEMORY PROFILES / PORTABLE IDENTITIES", 13f, 4).apply {
+            setTextColor(Color.rgb(53, 214, 200))
+        })
+        captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Orchestra AAC", 12f, 4).apply {
+            setTextColor(Color.rgb(214, 177, 116))
+        }
+        settingsRoot.addView(captureStatus)
+
+        val settingsNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
-        val liveTab = Button(this).apply { text = "LIVE" }
-        val hybridTab = Button(this).apply { text = "HYBRID" }
-        val memoryTab = Button(this).apply { text = "MEMORY" }
-        val labTab = Button(this).apply { text = "LAB" }
-        modeRow.addView(liveTab, weightedButtonParams())
-        modeRow.addView(hybridTab, weightedButtonParams())
-        modeRow.addView(memoryTab, weightedButtonParams())
-        modeRow.addView(labTab, weightedButtonParams())
-        root.addView(modeRow, buttonParams(14))
+        val inputSettings = productButton("INPUT")
+        val memorySettings = productButton("MEMORY")
+        val labSettings = productButton("LAB")
+        val closeSettings = productButton("✕")
+        settingsNav.addView(inputSettings, weightedButtonParams())
+        settingsNav.addView(memorySettings, weightedButtonParams())
+        settingsNav.addView(labSettings, weightedButtonParams())
+        settingsNav.addView(closeSettings, weightedButtonParams())
+        settingsRoot.addView(settingsNav, buttonParams(8))
 
         livePage = pageContainer()
         hybridPage = pageContainer()
         memoryPage = pageContainer()
         labPage = pageContainer()
-        root.addView(livePage)
-        root.addView(hybridPage)
-        root.addView(memoryPage)
-        root.addView(labPage)
-
+        settingsRoot.addView(livePage)
+        settingsRoot.addView(hybridPage)
+        settingsRoot.addView(memoryPage)
+        settingsRoot.addView(labPage)
         buildLivePage()
         buildHybridPage()
         buildMemoryPage()
         buildLabPage()
+        polishProductTree(settingsRoot)
 
-        fun selectPage(page: AppPage) {
-            showPage(page)
-            liveTab.isEnabled = page != AppPage.LIVE
-            hybridTab.isEnabled = page != AppPage.HYBRID
-            memoryTab.isEnabled = page != AppPage.MEMORY
-            labTab.isEnabled = page != AppPage.LAB
+        if (::liveVideoCanvas.isInitialized) liveVideoCanvas.visibility = View.GONE
+        if (::outputCanvas.isInitialized) outputCanvas.visibility = View.GONE
+        if (::hybridVideoCanvas.isInitialized) hybridVideoCanvas.visibility = View.GONE
+        if (::hybridCanvas.isInitialized) hybridCanvas.visibility = View.GONE
+        if (::memoryCanvas.isInitialized) memoryCanvas.visibility = View.GONE
+
+        fun showSettingsSection(page: AppPage) {
+            currentPage = page
+            livePage.visibility = if (page == AppPage.LIVE) View.VISIBLE else View.GONE
+            hybridPage.visibility = if (page == AppPage.LIVE) View.VISIBLE else View.GONE
+            memoryPage.visibility = if (page == AppPage.MEMORY) View.VISIBLE else View.GONE
+            labPage.visibility = if (page == AppPage.LAB) View.VISIBLE else View.GONE
+            if (page == AppPage.LIVE) refreshSensorUiState()
+            updateMemoryStats()
+            refreshGraph()
         }
 
-        liveTab.setOnClickListener { selectPage(AppPage.LIVE) }
-        hybridTab.setOnClickListener { selectPage(AppPage.HYBRID) }
-        memoryTab.setOnClickListener { selectPage(AppPage.MEMORY) }
-        labTab.setOnClickListener { selectPage(AppPage.LAB) }
+        fun openSettingsOverlay() {
+            if (settingsOpen) return
+            settingsOpen = true
+            showSettingsSection(currentPage)
+            settingsScrim.visibility = View.VISIBLE
+            settingsSheet.visibility = View.VISIBLE
+            settingsScrim.animate().alpha(1f).setDuration(180L).start()
+            settingsSheet.post {
+                settingsSheet.translationY = settingsSheet.height.toFloat()
+                settingsSheet.alpha = 0.96f
+                settingsSheet.animate()
+                    .translationY(0f)
+                    .alpha(1f)
+                    .setDuration(300L)
+                    .setInterpolator(android.view.animation.DecelerateInterpolator())
+                    .start()
+            }
+        }
 
-        setContentView(scroll)
-        selectPage(AppPage.LIVE)
-        updateMemoryStats()
-        refreshGraph()
+        fun closeSettingsOverlay() {
+            if (!settingsOpen) return
+            settingsOpen = false
+            settingsScrim.animate().alpha(0f).setDuration(170L).withEndAction {
+                settingsScrim.visibility = View.GONE
+            }.start()
+            settingsSheet.animate()
+                .translationY(settingsSheet.height.toFloat())
+                .alpha(0.96f)
+                .setDuration(240L)
+                .setInterpolator(android.view.animation.AccelerateInterpolator())
+                .withEndAction {
+                    settingsSheet.visibility = View.INVISIBLE
+                    settingsSheet.translationY = 0f
+                    settingsSheet.alpha = 1f
+                }.start()
+            refreshGraph()
+        }
+
+        blendSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val blend = progress.coerceIn(0, 100) / 100f
+                surfaceVideo.setMemoryBlend(blend)
+                continuousOrchestra.setMemoryBlend(blend)
+                memoryLabel.text = "MEMORY ${progress.coerceIn(0, 100)}%"
+                refreshGraph()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {
+                seekBar?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                seekBar?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
+        })
+
+        captureButton.setOnClickListener {
+            if (captureRecorder.isRecording()) {
+                stopUnifiedCapture()
+            } else {
+                val projectionManager = getSystemService(MediaProjectionManager::class.java)
+                capturePermissionLauncher.launch(projectionManager.createScreenCaptureIntent())
+            }
+        }
+        settingsButton.setOnClickListener {
+            if (settingsOpen) closeSettingsOverlay() else openSettingsOverlay()
+        }
+        settingsScrim.setOnClickListener { closeSettingsOverlay() }
+        inputSettings.setOnClickListener { showSettingsSection(AppPage.LIVE) }
+        memorySettings.setOnClickListener { showSettingsSection(AppPage.MEMORY) }
+        labSettings.setOnClickListener { showSettingsSection(AppPage.LAB) }
+        closeSettings.setOnClickListener { closeSettingsOverlay() }
+
+        setContentView(rootFrame)
+        showSettingsSection(AppPage.LIVE)
+        closeSettingsOverlay()
     }
 
     private fun buildLivePage() {
@@ -359,6 +645,35 @@ class MainActivity : ComponentActivity() {
         }
         livePage.addView(cameraButton, buttonParams(8))
         livePage.addView(cameraStopButton, buttonParams(6))
+
+        livePage.addView(label("LIVE-VERZÖGERUNG / FRAME-SYNC", 14f, 12).apply {
+            setTextColor(Color.rgb(120, 220, 205))
+        })
+        liveDelaySpinner = Spinner(this).apply {
+            val presets = LowLatencyLivePipeline.DelayPreset.entries
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_dropdown_item,
+                presets.map { it.label }
+            )
+            setSelection(presets.indexOf(livePipeline.getPreset()).coerceAtLeast(0), false)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val selected = presets.getOrElse(position) { LowLatencyLivePipeline.DelayPreset.AUTO }
+                    livePipeline.setPreset(selected)
+                    getSharedPreferences("equinox_live_latency", MODE_PRIVATE)
+                        .edit().putString("preset", selected.name).apply()
+                    updateLiveLatencyStatus()
+                    scheduleLowLatencyRender()
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+        livePage.addView(liveDelaySpinner, buttonParams(4))
+        liveLatencyStatus = label("Live-Sync: —", 12f, 6).apply {
+            setTextColor(Color.rgb(185, 205, 215))
+        }
+        livePage.addView(liveLatencyStatus)
 
         memoryStats = label(memoryText(), 13f, 16).apply { setTextColor(Color.rgb(180, 220, 215)) }
         livePage.addView(memoryStats)
@@ -595,6 +910,107 @@ class MainActivity : ComponentActivity() {
             }
         }, buttonParams(6))
 
+        memoryPage.addView(label("MEMORY PROFILES", 16f, 18).apply {
+            setTextColor(Color.rgb(233, 211, 143))
+        })
+        memoryPage.addView(label(
+            "Ein Profil enthält das indexierte Langzeitgedächtnis plus adaptive Audio- und Visual-Codebooks. UI-Einstellungen bleiben global.",
+            12f, 5
+        ).apply { setTextColor(Color.LTGRAY) })
+
+        profileStatus = label("Aktiv: ${profiles.activeProfileName()}", 13f, 6).apply {
+            setTextColor(Color.rgb(205, 220, 235))
+        }
+        memoryPage.addView(profileStatus)
+        profileSpinner = Spinner(this)
+        memoryPage.addView(profileSpinner, buttonParams(4))
+        refreshProfileControls()
+
+        val profileRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        profileRow1.addView(Button(this).apply {
+            text = "NEW"
+            setOnClickListener { askProfileName("Neues Gedächtnis", "Memory ${profiles.listProfiles().size + 1}") { name ->
+                stopAllForProfileSwitch()
+                saveLiveIdentity()
+                val created = profiles.createFresh(name)
+                if (created != null) {
+                    reloadLearnedIdentity()
+                    refreshProfileControls(selectId = created.id)
+                    profileStatus.text = "Neu und aktiv: ${created.name}"
+                } else profileStatus.text = "Neues Profil konnte nicht erstellt werden"
+            } }
+        }, weightedButtonParams())
+        profileRow1.addView(Button(this).apply {
+            text = "SAVE"
+            setOnClickListener {
+                saveLiveIdentity()
+                val ok = profiles.saveActive()
+                refreshProfileControls()
+                profileStatus.text = if (ok) "Gespeichert: ${profiles.activeProfileName()}" else "Profil konnte nicht gespeichert werden"
+            }
+        }, weightedButtonParams())
+        profileRow1.addView(Button(this).apply {
+            text = "LOAD"
+            setOnClickListener {
+                val target = selectedProfileInfo() ?: return@setOnClickListener
+                stopAllForProfileSwitch()
+                saveLiveIdentity()
+                val ok = profiles.switchTo(target.id)
+                if (ok) {
+                    reloadLearnedIdentity()
+                    refreshProfileControls(selectId = target.id)
+                    profileStatus.text = "Aktiv: ${target.name}"
+                } else profileStatus.text = "Profil konnte nicht geladen werden"
+            }
+        }, weightedButtonParams())
+        memoryPage.addView(profileRow1, buttonParams(4))
+
+        val profileRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        profileRow2.addView(Button(this).apply {
+            text = "DUP"
+            setOnClickListener {
+                val source = selectedProfileInfo() ?: return@setOnClickListener
+                askProfileName("Profil duplizieren", "${source.name} Copy") { name ->
+                    saveLiveIdentity()
+                    val copy = profiles.duplicate(source.id, name)
+                    refreshProfileControls(selectId = copy?.id)
+                    profileStatus.text = if (copy != null) "Dupliziert: ${copy.name}" else "Duplizieren fehlgeschlagen"
+                }
+            }
+        }, weightedButtonParams())
+        profileRow2.addView(Button(this).apply {
+            text = "EXPORT"
+            setOnClickListener {
+                val selected = selectedProfileInfo() ?: return@setOnClickListener
+                saveLiveIdentity()
+                profileExportLauncher.launch(selected.name.replace(Regex("[^A-Za-z0-9._-]+"), "_") + ".eqx")
+            }
+        }, weightedButtonParams())
+        profileRow2.addView(Button(this).apply {
+            text = "IMPORT"
+            setOnClickListener { profileImportLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) }
+        }, weightedButtonParams())
+        memoryPage.addView(profileRow2, buttonParams(4))
+
+        memoryPage.addView(Button(this).apply {
+            text = "PROFIL LÖSCHEN"
+            setOnClickListener {
+                val selected = selectedProfileInfo() ?: return@setOnClickListener
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Profil löschen?")
+                    .setMessage(selected.name)
+                    .setNegativeButton("Abbrechen", null)
+                    .setPositiveButton("Löschen") { _, _ ->
+                        stopAllForProfileSwitch()
+                        val wasActive = selected.active
+                        val ok = profiles.delete(selected.id)
+                        if (ok && wasActive) reloadLearnedIdentity()
+                        refreshProfileControls()
+                        profileStatus.text = if (ok) "Profil gelöscht" else "Mindestens ein Profil muss bestehen bleiben"
+                    }.show()
+            }
+        }, buttonParams(4))
+
         memoryPage.addView(Button(this).apply {
             text = "AKTIVES FELD LEEREN"
             setOnClickListener {
@@ -602,6 +1018,68 @@ class MainActivity : ComponentActivity() {
                 refreshMemoryPage()
             }
         }, buttonParams(6))
+    }
+
+    private fun refreshProfileControls(selectId: String? = null) {
+        if (!::profileSpinner.isInitialized || !::profiles.isInitialized) return
+        val items = profiles.listProfiles()
+        val labels = items.map { (if (it.active) "● " else "") + it.name + if (it.bytes > 0L) " · ${it.bytes / 1024} KB" else "" }
+        profileSpinnerSyncing = true
+        profileSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, labels)
+        val targetId = selectId ?: profiles.activeProfileId()
+        val index = items.indexOfFirst { it.id == targetId }.coerceAtLeast(0)
+        if (items.isNotEmpty()) profileSpinner.setSelection(index, false)
+        profileSpinnerSyncing = false
+    }
+
+    private fun selectedProfileInfo(): MemoryProfileManager.ProfileInfo? {
+        if (!::profileSpinner.isInitialized || !::profiles.isInitialized) return null
+        val items = profiles.listProfiles()
+        return items.getOrNull(profileSpinner.selectedItemPosition)
+    }
+
+    private fun askProfileName(title: String, initial: String, onName: (String) -> Unit) {
+        val input = EditText(this).apply {
+            setText(initial)
+            selectAll()
+            setSingleLine(true)
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(input)
+            .setNegativeButton("Abbrechen", null)
+            .setPositiveButton("OK") { _, _ -> onName(input.text.toString()) }
+            .show()
+    }
+
+    private fun saveLiveIdentity() {
+        if (::memory.isInitialized) memory.saveNow()
+        if (::adaptiveQuantizer.isInitialized) adaptiveQuantizer.saveNow()
+        if (::adaptiveVisualQuantizer.isInitialized) adaptiveVisualQuantizer.saveNow()
+    }
+
+    private fun stopAllForProfileSwitch() {
+        stopAudio()
+        stopCameraLearning()
+        stopMemoryPlayback(clear = true)
+        stopDreamPlayback(clear = true)
+        if (hybridPlaybackRunning) stopHybridPlayback(clear = true)
+        if (continuousOrchestra.isRunning()) continuousOrchestra.stop()
+    }
+
+    /** Reloads only learned identity; UI/display preferences remain untouched. */
+    private fun reloadLearnedIdentity() {
+        memory.reloadFromDisk()
+        adaptiveQuantizer = AdaptiveAudioQuantizer(this)
+        adaptiveVisualQuantizer = AdaptiveVisualQuantizer(this)
+        visualAnalyzer = null
+        visualFrameCount = 0L
+        visualObservationCount = 0L
+        refreshMemoryPage()
+        updateMemoryStats()
+        refreshGraph()
+        if (::adaptiveQuantizerStatus.isInitialized) adaptiveQuantizerStatus.text = adaptiveQuantizerText()
+        if (::adaptiveVisualQuantizerStatus.isInitialized) adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
     }
 
     private fun buildLabPage() {
@@ -1129,12 +1607,13 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshHybridPage(ok: Boolean) {
-        if (!::hybridCanvas.isInitialized) return
-        val state = outputBridge.snapshot()
-        hybridCanvas.setState(state)
-        if (::hybridVideoCanvas.isInitialized) hybridVideoCanvas.setEngineState(state)
-        val w = state.working
-        if (::hybridModeStatus.isInitialized) {
+        val w = memory.workingSetSnapshot()
+        livePipeline.offerState(w)
+        if (::surfaceVideo.isInitialized) {
+            surfaceVideo.setWorkingState(w)
+            scheduleLowLatencyRender()
+        }
+        if (settingsOpen && ::hybridModeStatus.isInitialized) {
             hybridModeStatus.text = if (!ok && w.nodes.none { it.activation > 0.12 }) {
                 "HYBRID: wartet auf Live-Makro"
             } else if (hybridPlaybackRunning) {
@@ -1143,10 +1622,11 @@ class MainActivity : ComponentActivity() {
                 "HYBRID: ${w.nodes.size} Working-Set-Knoten · ${w.predictions.size} Prediction"
             }
         }
-        refreshSensorUiState()
+        if (settingsOpen) refreshSensorUiState()
     }
 
     private fun refreshSensorUiState() {
+        if (!settingsOpen) return
         if (::hybridSensorStatus.isInitialized) {
             hybridSensorStatus.text = "Sensoren: Audio ${if (running) "AKTIV" else "AUS"} · Kamera ${if (cameraRunning) "AKTIV" else "AUS"}"
         }
@@ -1216,27 +1696,140 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshMemoryPage() {
-        if (!::memoryCanvas.isInitialized) return
         val state = outputBridge.snapshot()
-        memoryCanvas.setState(state)
+        if (::surfaceVideo.isInitialized) surfaceVideo.setWorkingState(state.working)
         val w = state.working
-        if (::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
+        if (settingsOpen && ::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
             memoryModeStatus.text = "MEMORY: RUN · ${w.nodes.size} aktiv · ${w.exchanges.size} Austausch"
         }
-        if (::dreamModeStatus.isInitialized && dreamPlaybackRunning) {
+        if (settingsOpen && ::dreamModeStatus.isInitialized && dreamPlaybackRunning) {
             val d = memory.stats()
             dreamModeStatus.text = "DREAM: RUN · ${d.dreamLastMode} · Schritt ${d.dreamSteps} · ${w.nodes.size} aktiv"
         }
     }
 
     private fun refreshGraph() {
+        // Step 30: one surface always receives the compact WorkingSet. The camera frame, if
+        // available, is synchronized separately by LowLatencyLivePipeline. Memory-only/Dream
+        // states therefore render on the same GPU canvas without requiring a second View.
+        if (::surfaceVideo.isInitialized) {
+            val working = memory.workingSetSnapshot()
+            surfaceVideo.setWorkingState(working)
+            livePipeline.offerState(working)
+            scheduleLowLatencyRender()
+        }
+
+        val labDue = settingsOpen && currentPage == AppPage.LAB &&
+            ::graphView.isInitialized && labPage.visibility == View.VISIBLE &&
+            System.currentTimeMillis() - lastLabRenderMs >= 250L
+        if (!labDue) return
+
         val state = outputBridge.snapshot()
-        if (::outputCanvas.isInitialized && livePage.visibility == View.VISIBLE) outputCanvas.setState(state)
-        if (::liveVideoCanvas.isInitialized && livePage.visibility == View.VISIBLE) liveVideoCanvas.setEngineState(state)
-        if (::hybridCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridCanvas.setState(state)
-        if (::hybridVideoCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridVideoCanvas.setEngineState(state)
-        if (::memoryCanvas.isInitialized && memoryPage.visibility == View.VISIBLE) memoryCanvas.setState(state)
-        if (::graphView.isInitialized && labPage.visibility == View.VISIBLE) graphView.setSnapshot(state.graph)
+        lastLabRenderMs = System.currentTimeMillis()
+        graphView.setSnapshot(state.graph)
+    }
+
+    private fun scheduleLowLatencyRender() {
+        if (!::surfaceVideo.isInitialized) return
+        if (!liveRenderPosted.compareAndSet(false, true)) return
+
+        uiHandler.post {
+            liveRenderPosted.set(false)
+            if (!::surfaceVideo.isInitialized || surfaceVideo.visibility != View.VISIBLE) return@post
+
+            // Feed the controller the cost of the previous draw before selecting the next frame.
+            livePipeline.reportRenderCost(surfaceVideo.lastRenderCostMs())
+            applyPerformanceGovernor()
+            val packet = livePipeline.poll() ?: return@post
+            val preset = packet.configuredPreset.label
+            val info = if (packet.configuredPreset == LowLatencyLivePipeline.DelayPreset.AUTO) {
+                "Sync AUTO ${packet.effectiveDelayMs}ms · Frame ${packet.actualFrameAgeMs}ms · drop ${packet.droppedFramesTotal}"
+            } else {
+                "Sync $preset · Frame ${packet.actualFrameAgeMs}ms · drop ${packet.droppedFramesTotal}"
+            }
+            surfaceVideo.setSynchronizedFrame(packet.frame, packet.working, info)
+            if (settingsOpen) updateLiveLatencyStatus()
+        }
+    }
+
+    private fun applyPerformanceGovernor(force: Boolean = false) {
+        if (!::surfaceVideo.isInitialized) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastGovernorUpdateMs < 500L) return
+        lastGovernorUpdateMs = now
+
+        val st = livePipeline.stats()
+        val dropRatio = if (st.offeredFrames <= 0L) 0.0 else
+            (st.droppedFrames.toDouble() / st.offeredFrames.toDouble()).coerceIn(0.0, 1.0)
+        val thermal = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getSystemService(PowerManager::class.java)?.currentThermalStatus ?: 0
+        } else 0
+        val gov = performanceGovernor.update(
+            renderMs = surfaceVideo.lastRenderCostMs(),
+            analysisMs = st.analysisCostEwmaMs,
+            dropRatio = dropRatio,
+            thermalStatus = thermal,
+            nowMs = now
+        )
+        surfaceVideo.setPerformanceProfile(gov.profile)
+        visualAnalyzer?.setPerformanceProfile(gov.profile)
+    }
+
+    private fun updateLiveLatencyStatus() {
+        if (!::liveLatencyStatus.isInitialized) return
+        val st = livePipeline.stats()
+        val g = performanceGovernor.snapshot()
+        liveLatencyStatus.text =
+            "Live-Sync: ${st.preset.label} · effektiv ${st.effectiveDelayMs} ms · Analyse Ø ${"%.1f".format(st.analysisCostEwmaMs)} ms · Render Ø ${"%.1f".format(st.renderCostEwmaMs)} ms · Frames ${st.renderedFrames}/${st.offeredFrames} · verworfen ${st.droppedFrames} · Buffer ${st.bufferedFrames} · Governor ${g.profile.label} (${g.profile.fieldBudget}F/${g.profile.linkBudget}L)"
+    }
+
+    private fun startUnifiedCapture(resultCode: Int, data: android.content.Intent) {
+        if (captureRecorder.isRecording()) return
+        val metrics = resources.displayMetrics
+        continuousOrchestra.setPcmTap { pcm -> captureRecorder.offerPcm(pcm) }
+        captureButton.text = "■"
+        captureButton.setTextColor(Color.rgb(255, 92, 92))
+        captureRecorder.start(
+            resultCode = resultCode,
+            resultData = data,
+            width = metrics.widthPixels,
+            height = metrics.heightPixels,
+            densityDpi = metrics.densityDpi,
+            onState = { text -> runOnUiThread {
+                if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: $text"
+            } },
+            onFinished = { result -> runOnUiThread {
+                continuousOrchestra.setPcmTap(null)
+                CaptureForegroundService.stop(this)
+                captureButton.text = "REC"
+                captureButton.setTextColor(Color.rgb(255, 112, 112))
+                if (::captureStatus.isInitialized) {
+                    captureStatus.text = if (result.error == null) {
+                        val where = result.uri?.toString() ?: result.path.orEmpty()
+                        "Aufnahme gespeichert · ${"%.1f".format(result.durationMs / 1000.0)} s · $where"
+                    } else "Aufnahmefehler: ${result.error}"
+                }
+            } }
+        )
+    }
+
+    private fun stopUnifiedCapture() {
+        if (!captureRecorder.isRecording()) return
+        captureButton.text = "…"
+        captureRecorder.stop(
+            onState = { text -> runOnUiThread { if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: $text" } },
+            onFinished = { result -> runOnUiThread {
+                continuousOrchestra.setPcmTap(null)
+                CaptureForegroundService.stop(this)
+                captureButton.text = "REC"
+                captureButton.setTextColor(Color.rgb(255, 112, 112))
+                if (::captureStatus.isInitialized) {
+                    captureStatus.text = if (result.error == null)
+                        "Aufnahme gespeichert · ${"%.1f".format(result.durationMs / 1000.0)} s"
+                    else "Aufnahmefehler: ${result.error}"
+                }
+            } }
+        )
     }
 
     private fun toggleContinuousOrchestra() {
@@ -1519,16 +2112,18 @@ class MainActivity : ComponentActivity() {
 
                 runOnUiThread {
                     if (running) {
-                        frequency.text = primaryText
-                        frequencyId.text = idText
-                        strength.text = strengthText
-                        frames.text = "Frames verarbeitet: $frameCount"
-                        if (frameCount % 5L == 0L) {
-                            updateMemoryStats()
-                            updateConsolidationStatus()
-                            if (::adaptiveQuantizerStatus.isInitialized) adaptiveQuantizerStatus.text = adaptiveQuantizerText()
+                        if (settingsOpen) {
+                            frequency.text = primaryText
+                            frequencyId.text = idText
+                            strength.text = strengthText
+                            frames.text = "Frames verarbeitet: $frameCount"
+                            if (frameCount % 5L == 0L) {
+                                updateMemoryStats()
+                                updateConsolidationStatus()
+                                if (::adaptiveQuantizerStatus.isInitialized) adaptiveQuantizerStatus.text = adaptiveQuantizerText()
+                            }
+                            if (parallelTest && frameCount % 24L == 0L) refreshEncoderBenchmarkStatus()
                         }
-                        if (parallelTest && frameCount % 24L == 0L) refreshEncoderBenchmarkStatus()
                         if (didConsolidate || frameCount % 12L == 0L) refreshGraph()
                     }
                 }
@@ -1557,40 +2152,42 @@ class MainActivity : ComponentActivity() {
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
-                analysis.setAnalyzer(
-                    cameraExecutor,
-                    VisualGridAnalyzer(
+                val visualAnalyzerInstance = VisualGridAnalyzer(
                         adaptiveVisualQuantizer,
                         onFrame = { result ->
                             if (!cameraRunning) return@VisualGridAnalyzer
                             // Frame-local reset prevents one spatial macro candidate from crossing
                             // the image boundary; learned identities/macros themselves remain intact.
                             memory.beginAdaptiveVisualFrame()
-                            result.observations.forEach { obs ->
-                                memory.observeAdaptiveVisual(obs.tokenId, obs.packedRgb)
+                            // Step 38: learning consumes contiguous coupled regions, not every
+                            // redundant adaptive camera patch. Raw samples remain diagnostics only.
+                            result.coupledObservations.forEach { region ->
+                                memory.observeAdaptiveVisual(region.tokenId, region.packedRgb)
                             }
                             visualFrameCount++
-                            visualObservationCount += result.observations.size
+                            visualObservationCount += result.coupledObservations.size
+                            livePipeline.reportAnalysisCost(result.analysisCostMs.toDouble() + result.videoSampleCostMs.toDouble())
 
                             runOnUiThread {
-                                cameraFrames.text =
-                                    "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · Regionen ${result.sampledRegions} · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
-                                adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
-                                if (visualFrameCount % 2L == 0L) {
-                                    updateMemoryStats()
-                                    refreshGraph()
+                                if (settingsOpen) {
+                                    cameraFrames.text =
+                                        "Visuelle Frames: $visualFrameCount · Gelernt $visualObservationCount · Samples ${result.sampledRegions} · Leaves ${result.spatialLeafRegions} → gekoppelt ${result.spatialCoupledRegions} (-${"%.0f".format(result.spatialCouplingRatio * 100.0)}%) · Tiefe ${result.maxResolutionDepth} · Bekannt ${"%.0f".format(result.meanFamiliarity * 100.0)}% · +${result.createdThisFrame} IDs · Ød ${"%.3f".format(result.meanMatchDistance)} · Analyse ${result.analysisCostMs}ms · Video ${result.videoSampleCostMs}ms/${result.videoIntervalMs}ms"
+                                    updateLiveLatencyStatus()
+                                    adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
+                                    if (visualFrameCount % 2L == 0L) updateMemoryStats()
                                 }
+                                if (visualFrameCount % 2L == 0L) refreshGraph()
                             }
                         },
                         onVideoFrame = { video ->
                             if (!cameraRunning) return@VisualGridAnalyzer
-                            runOnUiThread {
-                                if (::liveVideoCanvas.isInitialized && livePage.visibility == View.VISIBLE) liveVideoCanvas.setFrame(video)
-                                if (::hybridVideoCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridVideoCanvas.setFrame(video)
-                            }
+                            livePipeline.offerFrame(video)
+                            scheduleLowLatencyRender()
                         }
                     )
-                )
+                visualAnalyzer = visualAnalyzerInstance
+                visualAnalyzerInstance.setPerformanceProfile(performanceGovernor.snapshot().profile)
+                analysis.setAnalyzer(cameraExecutor, visualAnalyzerInstance)
 
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
@@ -1614,6 +2211,8 @@ class MainActivity : ComponentActivity() {
         cameraRunning = false
         try { cameraProvider?.unbindAll() } catch (_: Exception) { }
         cameraProvider = null
+        visualAnalyzer = null
+        livePipeline.clearFrames()
         adaptiveVisualQuantizer.saveNow()
         cameraStatus.text = "Kamera: AUS"
         if (::adaptiveVisualQuantizerStatus.isInitialized) adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
@@ -1704,9 +2303,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateMemoryStats() {
+        if (!settingsOpen) return
         val text = memoryText()
-        if (::memoryStats.isInitialized) memoryStats.text = text
-        if (::labMemoryStats.isInitialized) labMemoryStats.text = text
+        if (::memoryStats.isInitialized && livePage.visibility == View.VISIBLE) memoryStats.text = text
+        if (::labMemoryStats.isInitialized && labPage.visibility == View.VISIBLE) labMemoryStats.text = text
     }
 
     private fun memoryText(): String {
@@ -1723,11 +2323,12 @@ class MainActivity : ComponentActivity() {
             "Predictive Recall: ${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Treffer ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%)\n" +
             "Hybrid: ${s.hybridSteps} interne Schritte | letzter Seed ${if (s.hybridSeedId == 0) "—" else s.hybridSeedId}\n" +
             "Dream: ${s.dreamSteps} Schritte | P ${s.dreamPredictionHops} · R ${s.dreamRelationHops} · S ${s.dreamSubstitutionHops} · X ${s.dreamCrossModalHops} · Restart ${s.dreamRestarts} | letzter Modus ${s.dreamLastMode}\n" +
-            "Höchster aktiver Tier: ${s.highestActiveRank} · Reife-Score ${"%.2f".format(s.highestActiveRankScore)}\n" +
+            "Höchster aktiver Tier: ${s.highestActiveTier} · höchste Reife ${"%.2f".format(s.highestActiveMaturityScore)}\n" +
             "Templates: ${s.templateCodes} | aktiv: ${s.activeTemplates} | Varianten: ${s.templateVariantLinks} | max/Slot: ${s.widestTemplateVariants}\n" +
             "Substitutionsklassen: ${s.substitutionClasses} | aktiv: ${s.activeSubstitutionClasses} | Mitglieder: ${s.substitutionMembers} | stärkste Rollenstütze: ${s.strongestSubstitutionSupport}\n" +
             "Relevanz aktiv: Ø ${"%.3f".format(s.meanActiveRelevance)} | max ${"%.3f".format(s.highestActiveRelevance)} | Kontextentropie Ø ${"%.3f".format(s.meanActiveContextEntropy)} | Generalität max ${"%.3f".format(s.highestActiveGenerality)}\n" +
             "Adaptive Hierarchie: Q ${s.hierarchyBaseInputTokens} Token | Makro-Emissionen ${s.hierarchyBaseMacroEmissions} | gespart ${s.hierarchyBaseSavedTokens} (${"%.1f".format(s.hierarchyBaseCompressionGain * 100.0)}%) | ØSpan ${"%.2f".format(s.hierarchyMeanAcceptedSpan)} | Auto-Makros ${s.hierarchyAutoPromotions}\n" +
+            "Hierarchical Routing: Treffer ${s.routingHits}/${s.routingQueries} (${"%.1f".format(s.routingHitRate * 100.0)}%) | ØSpan ${"%.2f".format(s.routingMeanMatchedSpan)} | Signaturchecks ${s.routingSignatureChecks} | vermieden ${s.routingChecksAvoided} | Index ${s.routingIndexStreams} Streams/${s.routingIndexAnchors} Anker/${s.routingIndexSignatures} Makros\n" +
             "Memory Competition: Läufe ${s.competitionRuns} | entfernt gesamt ${s.competitionMacrosPruned} M/${s.competitionRelationsPruned} R/${s.competitionCandidatesPruned} K | letzter Lauf ${s.competitionLastPruned} entfernt · ${s.competitionLastProtected} geschützt · Druckgruppen ${s.competitionLastPressuredGroups}\n" +
             "Long-Term Store: ${s.storageBackend} · ${s.storageBytes} Bytes · disk-backed Makros ${s.storageDiskBackedMacros}/${s.macroCodes} · Token-Lesezugriffe ${s.storageTokenReads}\n" +
             "Sequenz-/Kandidatenraum: offen · aktuell ${s.temporaryCodes} temporäre Kandidaten"
@@ -1787,6 +2388,81 @@ class MainActivity : ComponentActivity() {
         refreshGraph()
     }
 
+    private fun polishProductTree(root: ViewGroup) {
+        for (i in 0 until root.childCount) {
+            val child = root.getChildAt(i)
+            when (child) {
+                is Button -> {
+                    child.isAllCaps = false
+                    child.textSize = 13f
+                    child.setTextColor(Color.rgb(235, 237, 244))
+                    child.background = roundedBackground(
+                        Color.argb(46, 255, 255, 255), 16f, Color.argb(28, 255, 255, 255), 1
+                    )
+                    child.minHeight = dp(48)
+                    attachPressMotion(child)
+                }
+                is CheckBox -> {
+                    child.textSize = 13f
+                    child.setTextColor(Color.rgb(218, 222, 232))
+                    child.setPadding(child.paddingLeft, dp(8), child.paddingRight, dp(8))
+                    attachPressMotion(child)
+                }
+                is EditText -> {
+                    child.setTextColor(Color.WHITE)
+                    child.setHintTextColor(Color.rgb(130, 136, 150))
+                    child.background = roundedBackground(
+                        Color.argb(34, 255, 255, 255), 14f, Color.argb(34, 255, 255, 255), 1
+                    )
+                    child.setPadding(dp(12), dp(10), dp(12), dp(10))
+                }
+            }
+            if (child is ViewGroup) polishProductTree(child)
+        }
+    }
+
+    private fun roundedBackground(color: Int, radiusDp: Float, strokeColor: Int? = null, strokeWidthDp: Int = 0): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(color)
+            cornerRadius = radiusDp * resources.displayMetrics.density
+            if (strokeColor != null && strokeWidthDp > 0) {
+                setStroke(dp(strokeWidthDp), strokeColor)
+            }
+        }
+
+    private fun attachPressMotion(view: View) {
+        view.setOnTouchListener { v, event ->
+            when (event.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    v.animate().scaleX(0.94f).scaleY(0.94f).alpha(0.82f).setDuration(70L).start()
+                }
+                android.view.MotionEvent.ACTION_UP -> {
+                    v.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                    v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(150L)
+                        .setInterpolator(android.view.animation.OvershootInterpolator(1.15f)).start()
+                }
+                android.view.MotionEvent.ACTION_CANCEL -> {
+                    v.animate().scaleX(1f).scaleY(1f).alpha(1f).setDuration(120L).start()
+                }
+            }
+            false
+        }
+    }
+
+    private fun productButton(textValue: String): TextView = TextView(this).apply {
+        text = textValue
+        textSize = 12f
+        letterSpacing = 0.08f
+        gravity = Gravity.CENTER
+        setTextColor(Color.rgb(232, 235, 242))
+        setPadding(dp(10), dp(12), dp(10), dp(12))
+        background = roundedBackground(Color.argb(38, 255, 255, 255), 16f, Color.argb(28, 255, 255, 255), 1)
+        isClickable = true
+        isFocusable = true
+        attachPressMotion(this)
+    }
+
     private fun label(textValue: String, size: Float = 18f, top: Int = 16): TextView = TextView(this).apply {
         text = textValue
         textSize = size
@@ -1814,6 +2490,16 @@ class MainActivity : ComponentActivity() {
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
+    override fun onResume() {
+        super.onResume()
+        if (::surfaceVideo.isInitialized) surfaceVideo.onResume()
+    }
+
+    override fun onPause() {
+        if (::surfaceVideo.isInitialized) surfaceVideo.onPause()
+        super.onPause()
+    }
+
     override fun onDestroy() {
         uiHandler.removeCallbacks(hardTestLoop)
         if (::adaptiveQuantizer.isInitialized) adaptiveQuantizer.saveNow()
@@ -1825,6 +2511,11 @@ class MainActivity : ComponentActivity() {
         stopAudio()
         sonifier.stop()
         orchestra.stop()
+        if (::captureRecorder.isInitialized && captureRecorder.isRecording()) {
+            continuousOrchestra.setPcmTap(null)
+            captureRecorder.stop({}, {})
+        }
+        CaptureForegroundService.stop(this)
         stopContinuousOrchestra()
         releaseEchoCanceler()
         super.onDestroy()
