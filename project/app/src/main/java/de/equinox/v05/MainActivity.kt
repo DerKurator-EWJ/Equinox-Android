@@ -3,534 +3,531 @@ package de.equinox.v05
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Color
-import android.media.AudioFormat
-import android.media.AudioRecord
-import android.media.MediaRecorder
 import android.os.Bundle
+import android.view.Gravity
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.widget.Button
+import android.widget.CheckBox
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.lifecycle.ProcessCameraProvider
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import android.view.Gravity
-import android.view.ViewGroup
-import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.EditText
-import android.widget.CheckBox
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.Spinner
-import android.widget.TextView
-import kotlin.concurrent.thread
-import kotlin.math.log2
-import kotlin.math.max
-import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
+
     companion object {
         private const val REQ_MIC = 100
         private const val REQ_CAMERA = 101
-        private const val SAMPLE_RATE = 48_000
-        private const val FFT_SIZE = 2_048
     }
 
-    @Volatile private var running = false
-    @Volatile private var cameraRunning = false
-    private var cameraProvider: ProcessCameraProvider? = null
-    private lateinit var cameraExecutor: ExecutorService
-    private var visualFrameCount = 0L
-    private var visualObservationCount = 0L
-    private var audioRecord: AudioRecord? = null
-    private var worker: Thread? = null
-
-    private lateinit var status: TextView
-    private lateinit var frequency: TextView
-    private lateinit var frequencyId: TextView
-    private lateinit var strength: TextView
-    private lateinit var frames: TextView
-    private lateinit var startButton: Button
-    private lateinit var stopButton: Button
-    private lateinit var memoryStats: TextView
-    private lateinit var intervalSpinner: Spinner
-    private lateinit var graphView: RelationGraphView
     private lateinit var memory: MemoryModel
-    private val sonifier = Sonifier()
-    private lateinit var sonificationStatus: TextView
-    private lateinit var consolidationStatus: TextView
-    private lateinit var cameraStatus: TextView
-    private lateinit var cameraFrames: TextView
-    private lateinit var cameraButton: Button
-    private lateinit var cameraStopButton: Button
+    private lateinit var sonifier: Sonifier
     private lateinit var displayPrefsStore: DisplayPrefsStore
     private lateinit var saveSlots: SaveSlotManager
     private lateinit var diagnostics: DiagnosticsManager
-    private lateinit var diagnosticsStatus: TextView
-    private var lastConsolidationSummary = "Noch keine Konsolidierung in dieser Sitzung"
-    @Volatile private var lastConsolidationMs = 0L
+
+    private lateinit var cameraExecutor: ExecutorService
+    private var cameraProvider: ProcessCameraProvider? = null
+
+    @Volatile private var running = false
+    @Volatile private var cameraRunning = false
+
+    private var selectedIntervalMs = 15_000L
+    private var nextConsolidationAt = 0L
+    private var visualFrameCount = 0L
+    private var visualObservationCount = 0L
+
+    private lateinit var rootFrame: FrameLayout
+    private lateinit var userPanel: View
+    private lateinit var labPanel: View
+    private lateinit var graphView: RelationGraphView
+
+    private lateinit var topModeTitle: TextView
+    private lateinit var statusText: TextView
+    private lateinit var statsText: TextView
+    private lateinit var consolidationText: TextView
+    private lateinit var cameraText: TextView
+    private lateinit var diagnosticsText: TextView
+
+    private var lastConsolidationSummary = "Noch keine Konsolidierung"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
         memory = MemoryModel(this)
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        sonifier = Sonifier()
         displayPrefsStore = DisplayPrefsStore(this)
         saveSlots = SaveSlotManager(this)
         diagnostics = DiagnosticsManager(this)
+        cameraExecutor = Executors.newSingleThreadExecutor()
+
+        enterFullscreen()
+
+        rootFrame = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(7, 9, 13))
+        }
+
+        userPanel = buildUserPanel()
+        labPanel = buildLabPanel().apply { visibility = View.GONE }
+
+        rootFrame.addView(userPanel)
+        rootFrame.addView(labPanel)
+        setContentView(rootFrame)
+    }
+
+    private fun enterFullscreen() {
+        window.setDecorFitsSystemWindows(false)
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            window.insetsController?.apply {
+                hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility =
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        }
+    }
+
+    private fun buildHeader(title: String, subtitle: String, onSwitch: () -> Unit): LinearLayout {
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(18), dp(16), dp(18), dp(12))
+            setBackgroundColor(Color.rgb(15, 18, 25))
+        }
+
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        topModeTitle = TextView(this).apply {
+            text = title
+            textSize = 25f
+            setTextColor(Color.WHITE)
+        }
+
+        val sub = TextView(this).apply {
+            text = subtitle
+            textSize = 12f
+            setTextColor(Color.rgb(130, 220, 210))
+        }
+
+        texts.addView(topModeTitle)
+        texts.addView(sub)
+
+        val switchButton = Button(this).apply {
+            text = if (title.contains("NUTZER")) "LAB" else "NUTZER"
+            setOnClickListener { onSwitch() }
+        }
+
+        header.addView(
+            texts,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        header.addView(switchButton)
+        return header
+    }
+
+    private fun buildUserPanel(): View {
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(7, 9, 13))
+        }
+
+        outer.addView(
+            buildHeader(
+                "EQUINOX",
+                "NUTZERANSICHT · v0.5 STEP 13",
+                onSwitch = {
+                    userPanel.visibility = View.GONE
+                    labPanel.visibility = View.VISIBLE
+                    enterFullscreen()
+                }
+            )
+        )
 
         val scroll = ScrollView(this).apply {
-            setBackgroundColor(Color.rgb(16, 18, 22))
             isFillViewport = true
         }
-        val root = LinearLayout(this).apply {
+
+        val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(36, 48, 36, 48)
-            setBackgroundColor(Color.rgb(16, 18, 22))
-        }
-        scroll.addView(root, ViewGroup.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ))
-
-        fun label(textValue: String, size: Float = 18f, top: Int = 16): TextView = TextView(this).apply {
-            text = textValue
-            textSize = size
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setPadding(0, top, 0, 0)
+            setPadding(dp(16), dp(14), dp(16), dp(28))
         }
 
-        root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 12 — LONG-TERM / PERFORMANCE", 18f, 16).apply {
-            setTextColor(Color.rgb(53, 214, 200))
-        })
+        statusText = cardText("System bereit", 18f)
+        statsText = cardText(memoryText(), 14f)
+        consolidationText = cardText("Konsolidierung: 15 Sekunden\n$lastConsolidationSummary", 14f)
+        cameraText = cardText("Kamera: AUS", 14f)
 
-        status = label("Audio: AUS", 20f, 28)
-        frequency = label("Dominante Frequenz: — Hz")
-        frequencyId = label("Frequenz-ID: —")
-        strength = label("Signalstärke: —")
-        frames = label("Frames verarbeitet: 0")
-        root.addView(status)
-        root.addView(frequency)
-        root.addView(frequencyId)
-        root.addView(strength)
-        root.addView(frames)
+        body.addView(sectionTitle("LIVE"))
+        body.addView(statusText)
+        body.addView(statsText)
 
-        cameraStatus = label("Kamera: AUS", 18f, 20).apply {
-            setTextColor(Color.rgb(235, 175, 95))
+        graphView = RelationGraphView(this).apply {
+            setDisplayPrefs(displayPrefsStore.load())
+            setSnapshot(memory.graphSnapshot())
         }
-        cameraFrames = label("Visuelle Frames: 0 · visuelle Beobachtungen: 0", 14f, 8).apply {
-            setTextColor(Color.rgb(205, 205, 205))
-        }
-        root.addView(cameraStatus)
-        root.addView(cameraFrames)
 
-        cameraButton = Button(this).apply {
-            text = "KAMERA-LERNEN STARTEN"
-            setOnClickListener { ensureCameraPermissionAndStart() }
-        }
-        cameraStopButton = Button(this).apply {
-            text = "KAMERA STOPP"
-            isEnabled = false
-            setOnClickListener { stopCameraLearning() }
-        }
-        root.addView(cameraButton, buttonParams(10))
-        root.addView(cameraStopButton, buttonParams(8))
+        body.addView(
+            graphView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(500)
+            ).apply { topMargin = dp(10) }
+        )
 
-        memoryStats = label(memoryText(), 15f, 18).apply { setTextColor(Color.rgb(180, 220, 215)) }
-        root.addView(memoryStats)
-
-        graphView = RelationGraphView(this)
-        graphView.setDisplayPrefs(displayPrefsStore.load())
-        root.addView(graphView, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            dp(420)
-        ).apply { topMargin = dp(18) })
-        refreshGraph()
-
-        val geometryMemory = GeometryGroundMemory.standard()
-        val displayModeLabel = label(
-            "Darstellung: 2D · Geometrie-Grundgedächtnis: ${geometryMemory.totalTemplates} Formregeln",
-            14f,
-            12
-        ).apply { setTextColor(Color.rgb(170, 205, 255)) }
-        root.addView(displayModeLabel)
-
-        val displayRow = LinearLayout(this).apply {
+        val viewRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
         }
 
-        val button2D = Button(this).apply {
+        val twoD = Button(this).apply {
             text = "2D"
             isEnabled = false
         }
-        val button3D = Button(this).apply {
+        val threeD = Button(this).apply {
             text = "3D"
         }
 
-        fun refreshDisplayButtons() {
+        fun updateModeButtons() {
             val is2D = graphView.getDisplayMode() == GraphDisplayMode.TWO_D
-            button2D.isEnabled = !is2D
-            button3D.isEnabled = is2D
-            displayModeLabel.text =
-                "Darstellung: ${if (is2D) "2D" else "3D"} · Geometrie-Grundgedächtnis: ${geometryMemory.totalTemplates} Formregeln"
+            twoD.isEnabled = !is2D
+            threeD.isEnabled = is2D
         }
 
-        button2D.setOnClickListener {
+        twoD.setOnClickListener {
             graphView.setDisplayMode(GraphDisplayMode.TWO_D)
-            refreshDisplayButtons()
-        }
-        button3D.setOnClickListener {
-            graphView.setDisplayMode(GraphDisplayMode.THREE_D)
-            refreshDisplayButtons()
+            updateModeButtons()
         }
 
-        displayRow.addView(
-            button2D,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(4)
+        threeD.setOnClickListener {
+            graphView.setDisplayMode(GraphDisplayMode.THREE_D)
+            updateModeButtons()
+        }
+
+        viewRow.addView(twoD, weightParams(1f, 4))
+        viewRow.addView(threeD, weightParams(1f, 4))
+        body.addView(viewRow)
+
+        body.addView(sectionTitle("STEUERUNG"))
+
+        val audioRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        audioRow.addView(Button(this).apply {
+            text = "AUDIO START"
+            setOnClickListener { ensurePermissionAndStart() }
+        }, weightParams(1f, 4))
+        audioRow.addView(Button(this).apply {
+            text = "AUDIO STOP"
+            setOnClickListener { stopAudio() }
+        }, weightParams(1f, 4))
+        body.addView(audioRow)
+
+        val cameraRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        cameraRow.addView(Button(this).apply {
+            text = "KAMERA START"
+            setOnClickListener { ensureCameraPermissionAndStart() }
+        }, weightParams(1f, 4))
+        cameraRow.addView(Button(this).apply {
+            text = "KAMERA STOP"
+            setOnClickListener { stopCameraLearning() }
+        }, weightParams(1f, 4))
+        body.addView(cameraRow)
+
+        body.addView(cameraText)
+
+        body.addView(Button(this).apply {
+            text = "GEDÄCHTNIS HÖRBAR MACHEN"
+            setOnClickListener {
+                stopAudio()
+                sonifier.play(memory.sonificationSnapshot())
             }
+        }, fullButtonParams(8))
+
+        body.addView(Button(this).apply {
+            text = "KLANG STOPP"
+            setOnClickListener { sonifier.stop() }
+        }, fullButtonParams(6))
+
+        body.addView(sectionTitle("KONSOLIDIERUNG"))
+        body.addView(consolidationText)
+
+        val intervals = listOf(
+            "5s" to 5_000L,
+            "15s" to 15_000L,
+            "30s" to 30_000L,
+            "1m" to 60_000L,
+            "5m" to 300_000L
         )
-        displayRow.addView(
-            button3D,
-            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginStart = dp(4)
-            }
-        )
-        root.addView(
-            displayRow,
+        val intervalRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        intervals.forEach { (label, ms) ->
+            intervalRow.addView(Button(this).apply {
+                text = label
+                isEnabled = ms != selectedIntervalMs
+                setOnClickListener {
+                    selectedIntervalMs = ms
+                    nextConsolidationAt = System.currentTimeMillis() + selectedIntervalMs
+                    rebuildUserMode()
+                }
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        body.addView(intervalRow)
+
+        body.addView(Button(this).apply {
+            text = "JETZT KONSOLIDIEREN"
+            setOnClickListener { doConsolidation() }
+        }, fullButtonParams(8))
+
+        body.addView(Button(this).apply {
+            text = "GRAPH AKTUALISIEREN"
+            setOnClickListener { refreshGraphAndStats() }
+        }, fullButtonParams(6))
+
+        scroll.addView(body)
+        outer.addView(
+            scroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { topMargin = dp(8) }
+                0,
+                1f
+            )
+        )
+        return outer
+    }
+
+    private fun buildLabPanel(): View {
+        val outer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.rgb(7, 9, 13))
+        }
+
+        outer.addView(
+            buildHeader(
+                "EQUINOX LAB",
+                "DIAGNOSE · SAVE · DARSTELLUNG",
+                onSwitch = {
+                    labPanel.visibility = View.GONE
+                    userPanel.visibility = View.VISIBLE
+                    refreshGraphAndStats()
+                    enterFullscreen()
+                }
+            )
         )
 
-        root.addView(label("LAB — DARSTELLUNG", 17f, 18).apply {
-            setTextColor(Color.rgb(130, 220, 210))
-        })
-
-        val currentPrefs = displayPrefsStore.load()
-
-        fun colorField(labelText: String, initial: Int): Pair<TextView, EditText> {
-            val row = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            val left = label(labelText, 14f, 0).apply {
-                setTextColor(Color.LTGRAY)
-            }
-            val input = EditText(this).apply {
-                setSingleLine(true)
-                setText(displayPrefsStore.toHex(initial))
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                setHintTextColor(Color.GRAY)
-            }
-            row.addView(
-                left,
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f)
-            )
-            row.addView(
-                input,
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            )
-            root.addView(row)
-            return left to input
+        val scroll = ScrollView(this).apply {
+            isFillViewport = true
         }
 
-        val bgInput = colorField("Hintergrund HEX", currentPrefs.backgroundColor).second
-        val edgeInput = colorField("Mikro-Kanten HEX", currentPrefs.audioEdgeColor).second
-        val l1Input = colorField("L1 HEX", currentPrefs.macroLevel1Color).second
-        val l2Input = colorField("L2 HEX", currentPrefs.macroLevel2Color).second
-        val l3Input = colorField("L3 HEX", currentPrefs.macroLevel3Color).second
-        val l4Input = colorField("L4 HEX", currentPrefs.macroLevel4Color).second
-
-        val glowCheck = CheckBox(this).apply {
-            text = "Glow aktiv"
-            isChecked = currentPrefs.glowEnabled
-            setTextColor(Color.WHITE)
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(30))
         }
-        root.addView(glowCheck)
 
-        val settingsStatus = label("Darstellung: geladen", 13f, 8).apply {
-            setTextColor(Color.rgb(185, 195, 210))
+        body.addView(sectionTitle("SYSTEMDIAGNOSE"))
+        diagnosticsText = cardText("Noch keine Diagnose-Samples", 13f)
+        body.addView(diagnosticsText)
+
+        val diagRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
         }
-        root.addView(settingsStatus)
-
-        root.addView(Button(this).apply {
-            text = "DARSTELLUNG SPEICHERN"
+        diagRow.addView(Button(this).apply {
+            text = "SAMPLE"
             setOnClickListener {
-                val bg = displayPrefsStore.parseHexOrNull(bgInput.text.toString())
-                val edge = displayPrefsStore.parseHexOrNull(edgeInput.text.toString())
-                val l1 = displayPrefsStore.parseHexOrNull(l1Input.text.toString())
-                val l2 = displayPrefsStore.parseHexOrNull(l2Input.text.toString())
-                val l3 = displayPrefsStore.parseHexOrNull(l3Input.text.toString())
-                val l4 = displayPrefsStore.parseHexOrNull(l4Input.text.toString())
-
-                if (listOf(bg, edge, l1, l2, l3, l4).any { it == null }) {
-                    settingsStatus.text = "Fehler: HEX als #RRGGBB eingeben"
-                } else {
-                    val saved = DisplayPrefs(
-                        backgroundColor = bg!!,
-                        audioEdgeColor = edge!!,
-                        macroLevel1Color = l1!!,
-                        macroLevel2Color = l2!!,
-                        macroLevel3Color = l3!!,
-                        macroLevel4Color = l4!!,
-                        glowEnabled = glowCheck.isChecked,
-                        glowStrength = 90
-                    )
-                    displayPrefsStore.save(saved)
-                    graphView.setDisplayPrefs(saved)
-                    settingsStatus.text = "Darstellung gespeichert und angewendet"
-                }
+                memory.saveNow()
+                diagnostics.capture(memory.stats())
+                refreshDiagnostics()
             }
-        }, buttonParams(8))
+        }, weightParams(1f, 3))
+        diagRow.addView(Button(this).apply {
+            text = "CSV"
+            setOnClickListener {
+                val f = diagnostics.writeCsvExport()
+                refreshDiagnostics()
+                diagnosticsText.text =
+                    diagnosticsText.text.toString() + "\nCSV: ${f.name} · ${f.length()} Bytes"
+            }
+        }, weightParams(1f, 3))
+        diagRow.addView(Button(this).apply {
+            text = "RESET"
+            setOnClickListener {
+                diagnostics.reset()
+                refreshDiagnostics()
+            }
+        }, weightParams(1f, 3))
+        body.addView(diagRow)
 
-        root.addView(label("SAVE SLOTS", 17f, 18).apply {
-            setTextColor(Color.rgb(130, 220, 210))
-        })
-
-        val slotStatus = label("3 lokale Speicherstände verfügbar", 13f, 8).apply {
-            setTextColor(Color.rgb(185, 195, 210))
-        }
-        root.addView(slotStatus)
-
+        body.addView(sectionTitle("SAVE SLOTS"))
         for (slot in 1..3) {
-            val slotLabel = label(saveSlots.exportSummary(slot), 13f, 8).apply {
-                setTextColor(Color.LTGRAY)
-            }
-            root.addView(slotLabel)
+            val slotText = cardText(saveSlots.exportSummary(slot), 12f)
+            body.addView(slotText)
 
             val row = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER
             }
 
-            val saveButton = Button(this).apply {
+            row.addView(Button(this).apply {
                 text = "S$slot SAVE"
                 setOnClickListener {
                     memory.saveNow()
-                    val ok = saveSlots.saveToSlot(slot)
-                    slotLabel.text = saveSlots.exportSummary(slot)
-                    slotStatus.text = if (ok) "Slot $slot gespeichert" else "Slot $slot konnte nicht gespeichert werden"
+                    saveSlots.saveToSlot(slot)
+                    slotText.text = saveSlots.exportSummary(slot)
                 }
-            }
+            }, weightParams(1f, 3))
 
-            val loadButton = Button(this).apply {
+            row.addView(Button(this).apply {
                 text = "S$slot LOAD"
                 setOnClickListener {
                     stopAudio()
                     stopCameraLearning()
-                    val ok = saveSlots.loadFromSlot(slot)
-                    if (ok) {
+                    if (saveSlots.loadFromSlot(slot)) {
                         memory.reloadFromDisk()
-                        memoryStats.text = memoryText()
-                        refreshGraph()
-                        slotStatus.text = "Slot $slot geladen"
-                    } else {
-                        slotStatus.text = "Slot $slot ist leer"
+                        slotText.text = saveSlots.exportSummary(slot)
+                        refreshGraphAndStats()
                     }
                 }
-            }
+            }, weightParams(1f, 3))
 
-            val deleteButton = Button(this).apply {
+            row.addView(Button(this).apply {
                 text = "S$slot DEL"
                 setOnClickListener {
-                    val ok = saveSlots.deleteSlot(slot)
-                    slotLabel.text = saveSlots.exportSummary(slot)
-                    slotStatus.text = if (ok) "Slot $slot gelöscht" else "Slot $slot konnte nicht gelöscht werden"
+                    saveSlots.deleteSlot(slot)
+                    slotText.text = saveSlots.exportSummary(slot)
+                }
+            }, weightParams(1f, 3))
+
+            body.addView(row)
+        }
+
+        body.addView(sectionTitle("DARSTELLUNG"))
+        val prefs = displayPrefsStore.load()
+
+        fun colorInput(name: String, color: Int): EditText {
+            val label = TextView(this).apply {
+                text = name
+                textSize = 13f
+                setTextColor(Color.LTGRAY)
+            }
+            body.addView(label)
+
+            return EditText(this).apply {
+                setSingleLine(true)
+                setText(displayPrefsStore.toHex(color))
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.rgb(20, 24, 32))
+                setPadding(dp(12), dp(8), dp(12), dp(8))
+            }.also { body.addView(it, fullButtonParams(4)) }
+        }
+
+        val bg = colorInput("Hintergrund", prefs.backgroundColor)
+        val edge = colorInput("Mikro-Kanten", prefs.audioEdgeColor)
+        val l1 = colorInput("L1", prefs.macroLevel1Color)
+        val l2 = colorInput("L2", prefs.macroLevel2Color)
+        val l3 = colorInput("L3", prefs.macroLevel3Color)
+        val l4 = colorInput("L4", prefs.macroLevel4Color)
+
+        val glow = CheckBox(this).apply {
+            text = "Glow aktiv"
+            isChecked = prefs.glowEnabled
+            setTextColor(Color.WHITE)
+        }
+        body.addView(glow)
+
+        val settingsInfo = cardText("Darstellung geladen", 12f)
+        body.addView(settingsInfo)
+
+        body.addView(Button(this).apply {
+            text = "DARSTELLUNG ANWENDEN"
+            setOnClickListener {
+                val values = listOf(bg, edge, l1, l2, l3, l4)
+                    .map { displayPrefsStore.parseHexOrNull(it.text.toString()) }
+
+                if (values.any { it == null }) {
+                    settingsInfo.text = "HEX-Fehler: bitte #RRGGBB"
+                } else {
+                    val next = DisplayPrefs(
+                        backgroundColor = values[0]!!,
+                        audioEdgeColor = values[1]!!,
+                        macroLevel1Color = values[2]!!,
+                        macroLevel2Color = values[3]!!,
+                        macroLevel3Color = values[4]!!,
+                        macroLevel4Color = values[5]!!,
+                        glowEnabled = glow.isChecked,
+                        glowStrength = 90
+                    )
+                    displayPrefsStore.save(next)
+                    graphView.setDisplayPrefs(next)
+                    settingsInfo.text = "Darstellung gespeichert"
                 }
             }
+        }, fullButtonParams(8))
 
-            row.addView(saveButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(loadButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(deleteButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            root.addView(row)
-        }
+        body.addView(sectionTitle("GEOMETRIE"))
+        val geometry = GeometryGroundMemory.standard()
+        body.addView(
+            cardText(
+                "${geometry.totalTemplates} Grundformen · 2D ${geometry.templates2D.size} · 3D ${geometry.templates3D.size}\n" +
+                    "Renderer-Geometrie bleibt getrennt vom relationalen Kern.",
+                12f
+            )
+        )
 
-        root.addView(label("LANGZEITDIAGNOSE", 17f, 18).apply {
-            setTextColor(Color.rgb(130, 220, 210))
-        })
+        scroll.addView(body)
+        outer.addView(
+            scroll,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
 
-        diagnosticsStatus = label("Noch keine Diagnose-Samples", 13f, 8).apply {
-            setTextColor(Color.rgb(190, 205, 220))
-        }
-        root.addView(diagnosticsStatus)
-
-        fun refreshDiagnosticsStatus() {
-            val d = diagnostics.summary()
-            diagnosticsStatus.text = if (d.samples == 0) {
-                "Noch keine Diagnose-Samples"
-            } else {
-                "Samples: ${d.samples} · ΔObs ${d.observationsSinceFirst}\n" +
-                    "ΔMikro ${d.newMicroSinceFirst} · ΔMakro ${d.newMacroSinceFirst} · ΔSeq ${d.newSequencesSinceFirst}\n" +
-                    "Neue Mikro/1000 Obs: ${"%.3f".format(d.microPer1000Observations)} · neue Seq/1000 Obs: ${"%.3f".format(d.sequencePer1000Observations)}\n" +
-                    "Memory-Datei: ${d.latestMemoryBytes / 1024} KB · Java-Heap: ${d.latestHeapBytes / (1024 * 1024)} MB"
-            }
-        }
-
-        val diagRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-        }
-
-        val sampleButton = Button(this).apply {
-            text = "DIAG SAMPLE"
-            setOnClickListener {
-                memory.saveNow()
-                diagnostics.capture(memory.stats())
-                refreshDiagnosticsStatus()
-            }
-        }
-
-        val csvButton = Button(this).apply {
-            text = "CSV SCHREIBEN"
-            setOnClickListener {
-                val f = diagnostics.writeCsvExport()
-                refreshDiagnosticsStatus()
-                diagnosticsStatus.text = diagnosticsStatus.text.toString() +
-                    "\nCSV intern: ${f.name} (${f.length()} Bytes)"
-            }
-        }
-
-        val resetDiagButton = Button(this).apply {
-            text = "DIAG RESET"
-            setOnClickListener {
-                diagnostics.reset()
-                refreshDiagnosticsStatus()
-            }
-        }
-
-        diagRow.addView(sampleButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        diagRow.addView(csvButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        diagRow.addView(resetDiagButton, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(diagRow)
-
-        root.addView(label(
-            "Härtetest-Ziel: In einer bekannten Umgebung sollten Beobachtungen weiter steigen, während die Rate neuer stabiler Mikrocodes und Sequenzen langfristig sinkt. Das wäre ein Hinweis auf Wiederverwendung/Kompression statt bloßer Struktur-Explosion.",
-            13f,
-            12
-        ).apply { setTextColor(Color.rgb(210, 190, 125)) })
-
-        refreshDiagnosticsStatus()
-
-        root.addView(label(
-            "2D und 3D zeigen exakt dasselbe relationale Gedächtnis. Die räumliche Tiefe existiert nur im Renderer. Höhere Knoten bekommen Formvorschläge aus einem kleinen mathematischen Geometrie-Grundgedächtnis; diese Formen sind Vorlagen, keine fundamentalen Raumobjekte.",
-            12f,
-            12
-        ).apply { setTextColor(Color.LTGRAY) })
-
-        intervalSpinner = Spinner(this)
-        val intervals = arrayOf("5 Sekunden", "15 Sekunden", "30 Sekunden", "1 Minute", "5 Minuten", "15 Minuten", "30 Minuten")
-        intervalSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, intervals)
-        consolidationStatus = label("Konsolidierung: 5 s · nächste: —\n$lastConsolidationSummary", 14f, 18).apply { setTextColor(Color.rgb(255, 205, 105)) }
-        root.addView(consolidationStatus)
-
-        root.addView(intervalSpinner, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply { topMargin = dp(18) })
-
-        val refreshButton = Button(this).apply {
-            text = "GRAPH AKTUALISIEREN"
-            setOnClickListener { refreshGraph() }
-        }
-        root.addView(refreshButton, buttonParams(10))
-
-        val consolidateButton = Button(this).apply {
-            text = "JETZT KONSOLIDIEREN"
-            setOnClickListener {
-                val result = memory.consolidate()
-                lastConsolidationMs = System.currentTimeMillis()
-                lastConsolidationSummary = consolidationSummary(result)
-                updateConsolidationStatus()
-                memoryStats.text = memoryText()
-                refreshGraph()
-            }
-        }
-        root.addView(consolidateButton, buttonParams(8))
-
-        val macroFreezeButton = Button(this).apply {
-            fun refreshText() { text = if (memory.isMacroFrozen()) "MAKRO-ERZEUGUNG: GEFROREN" else "MAKRO-ERZEUGUNG: AKTIV" }
-            refreshText()
-            setOnClickListener {
-                memory.setMacroFrozen(!memory.isMacroFrozen())
-                refreshText()
-                memoryStats.text = memoryText()
-                refreshGraph()
-            }
-        }
-        root.addView(macroFreezeButton, buttonParams(8))
-
-        sonificationStatus = label("Sonifikation: AUS", 14f, 18).apply {
-            setTextColor(Color.rgb(255, 190, 90))
-        }
-        root.addView(sonificationStatus)
-
-        val sonifyButton = Button(this).apply {
-            text = "GEDÄCHTNIS HÖRBAR MACHEN"
-            setOnClickListener {
-                // Deliberately stop the microphone first: otherwise Equinox would immediately
-                // hear and learn its own speaker output, creating an uncontrolled feedback loop.
-                if (running) stopAudio()
-                val snap = memory.sonificationSnapshot()
-                sonifier.play(snap) { state -> runOnUiThread { sonificationStatus.text = state } }
-            }
-        }
-        root.addView(sonifyButton, buttonParams(8))
-
-        val stopSoundButton = Button(this).apply {
-            text = "KLANG STOPP"
-            setOnClickListener {
-                sonifier.stop()
-                sonificationStatus.text = "Sonifikation: AUS"
-            }
-        }
-        root.addView(stopSoundButton, buttonParams(8))
-
-        val resetButton = Button(this).apply {
-            text = "GEDÄCHTNIS LÖSCHEN"
-            setOnClickListener {
-                memory.reset()
-                memoryStats.text = memoryText()
-                refreshGraph()
-            }
-        }
-        root.addView(resetButton, buttonParams(8))
-
-        startButton = Button(this).apply {
-            text = "AUDIO STARTEN"
-            setOnClickListener { ensurePermissionAndStart() }
-        }
-        stopButton = Button(this).apply {
-            text = "STOPP"
-            isEnabled = false
-            setOnClickListener { stopAudio() }
-        }
-
-        root.addView(startButton, buttonParams(28))
-        root.addView(stopButton, buttonParams(8))
-
-        root.addView(label(
-            "Step 12 ergänzt Langzeitdiagnose statt neuer Kernfunktionen. Diagnose-Samples messen Wachstum von Mikro-, Makro- und Sequenzcodes, Beobachtungen, Relationszahl, interne Dateigröße und Java-Heap. Ziel ist zu prüfen, ob Equinox bei vertrauten Daten zunehmend vorhandene Strukturen wiederverwendet.",
-            12f,
-            18
-        ).apply { setTextColor(Color.LTGRAY) })
-
-        setContentView(scroll)
+        refreshDiagnostics()
+        return outer
     }
 
-    private fun buttonParams(topDp: Int) = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT
-    ).apply { topMargin = dp(topDp) }
+    private fun rebuildUserMode() {
+        rootFrame.removeView(userPanel)
+        userPanel = buildUserPanel()
+        rootFrame.addView(userPanel, 0)
+        if (labPanel.visibility == View.VISIBLE) {
+            userPanel.visibility = View.GONE
+        }
+    }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
+    private fun refreshDiagnostics() {
+        if (!::diagnosticsText.isInitialized) return
+        val d = diagnostics.summary()
 
-    private fun refreshGraph() {
-        graphView.setSnapshot(memory.graphSnapshot())
+        diagnosticsText.text = if (d.samples == 0) {
+            "Noch keine Diagnose-Samples"
+        } else {
+            "Samples ${d.samples} · ΔObs ${d.observationsSinceFirst}\n" +
+                "ΔMikro ${d.newMicroSinceFirst} · ΔMakro ${d.newMacroSinceFirst} · ΔSeq ${d.newSequencesSinceFirst}\n" +
+                "Mikro/1000 Obs ${"%.3f".format(d.microPer1000Observations)} · Seq/1000 Obs ${"%.3f".format(d.sequencePer1000Observations)}\n" +
+                "Memory ${d.latestMemoryBytes / 1024} KB · Heap ${d.latestHeapBytes / (1024 * 1024)} MB"
+        }
     }
 
     private fun ensurePermissionAndStart() {
@@ -547,117 +544,60 @@ class MainActivity : ComponentActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
         if (requestCode == REQ_MIC) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 startAudio()
             } else {
-                status.text = "Audio: Mikrofon-Berechtigung fehlt"
+                statusText.text = "Mikrofon-Berechtigung fehlt"
             }
         } else if (requestCode == REQ_CAMERA) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 startCameraLearning()
             } else {
-                cameraStatus.text = "Kamera: Berechtigung fehlt"
+                cameraText.text = "Kamera-Berechtigung fehlt"
             }
         }
     }
 
     private fun startAudio() {
         if (running) return
-
-        val minBuffer = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        if (minBuffer <= 0) {
-            status.text = "Audio: Gerät meldet ungültigen Puffer"
-            return
-        }
-
-        val bufferBytes = max(minBuffer, FFT_SIZE * 2 * 4)
-        val recorder = try {
-            AudioRecord(
-                MediaRecorder.AudioSource.DEFAULT,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferBytes
-            )
-        } catch (e: SecurityException) {
-            status.text = "Audio: keine Mikrofon-Berechtigung"
-            return
-        } catch (e: Exception) {
-            status.text = "Audio: Startfehler ${e.javaClass.simpleName}"
-            return
-        }
-
-        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
-            recorder.release()
-            status.text = "Audio: AudioRecord konnte nicht initialisiert werden"
-            return
-        }
-
-        audioRecord = recorder
         running = true
-        startButton.isEnabled = false
-        stopButton.isEnabled = true
-        status.text = "Audio: AKTIV"
-        lastConsolidationMs = System.currentTimeMillis()
+        nextConsolidationAt = System.currentTimeMillis() + selectedIntervalMs
+        statusText.text = "Audio: AKTIV"
 
-        recorder.startRecording()
-        worker = thread(name = "EquinoxAudioFFT") {
-            val frame = ShortArray(FFT_SIZE)
-            var frameCount = 0L
+        Thread {
+            try {
+                val encoder = SoundEncoder()
+                encoder.run(
+                    shouldContinue = { running },
+                    onObservation = { id, hz, strength, frames ->
+                        memory.observe(id, hz)
 
-            while (running) {
-                var offset = 0
-                while (running && offset < FFT_SIZE) {
-                    val read = recorder.read(frame, offset, FFT_SIZE - offset)
-                    if (read > 0) offset += read else break
-                }
-                if (!running || offset < FFT_SIZE) continue
+                        if (System.currentTimeMillis() >= nextConsolidationAt) {
+                            doConsolidationFromWorker()
+                        }
 
-                val mags = Fft.magnitudes(frame)
-                val minBin = (40.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtLeast(1)
-                val maxBin = (18_000.0 * FFT_SIZE / SAMPLE_RATE).toInt().coerceAtMost(mags.lastIndex)
-
-                var bestBin = minBin
-                var bestMag = 0.0
-                for (bin in minBin..maxBin) {
-                    if (mags[bin] > bestMag) {
-                        bestMag = mags[bin]
-                        bestBin = bin
+                        runOnUiThread {
+                            statusText.text =
+                                "Audio AKTIV\n${"%.1f".format(hz)} Hz · ID $id · Stärke ${"%.2f".format(strength)} · Frames $frames"
+                            statsText.text = memoryText()
+                        }
                     }
-                }
-
-                val hz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
-                val id = if (hz > 0.0) (24.0 * log2(hz / 55.0)).roundToInt() else 0
-                frameCount++
-                memory.observe(id, hz)
-
-                var didConsolidate = false
-                val now = System.currentTimeMillis()
-                val interval = selectedIntervalMs()
-                if (now - lastConsolidationMs >= interval) {
-                    val result = memory.consolidate()
-                    lastConsolidationMs = now
-                    lastConsolidationSummary = consolidationSummary(result)
-                    didConsolidate = true
-                }
-
+                )
+            } catch (e: Exception) {
                 runOnUiThread {
-                    if (running) {
-                        frequency.text = "Dominante Frequenz: %.1f Hz".format(hz)
-                        frequencyId.text = "Frequenz-ID: $id"
-                        strength.text = "Signalstärke: %.5f".format(bestMag)
-                        frames.text = "Frames verarbeitet: $frameCount"
-                        if (frameCount % 5L == 0L) { memoryStats.text = memoryText(); updateConsolidationStatus() }
-                        if (didConsolidate || frameCount % 12L == 0L) refreshGraph()
-                    }
+                    statusText.text = "Audio-Fehler: ${e.javaClass.simpleName}"
                 }
+            } finally {
+                running = false
             }
-        }
+        }.start()
+    }
+
+    private fun stopAudio() {
+        running = false
+        if (::statusText.isInitialized) statusText.text = "Audio: AUS"
     }
 
     private fun ensureCameraPermissionAndStart() {
@@ -671,10 +611,10 @@ class MainActivity : ComponentActivity() {
     private fun startCameraLearning() {
         if (cameraRunning) return
 
-        val providerFuture = ProcessCameraProvider.getInstance(this)
-        providerFuture.addListener({
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
             try {
-                val provider = providerFuture.get()
+                val provider = future.get()
                 cameraProvider = provider
 
                 val analysis = ImageAnalysis.Builder()
@@ -694,12 +634,9 @@ class MainActivity : ComponentActivity() {
                         visualObservationCount += result.observations.size
 
                         runOnUiThread {
-                            cameraFrames.text =
-                                "Visuelle Frames: $visualFrameCount · visuelle Beobachtungen: $visualObservationCount"
-                            if (visualFrameCount % 2L == 0L) {
-                                memoryStats.text = memoryText()
-                                refreshGraph()
-                            }
+                            cameraText.text =
+                                "Kamera AKTIV · Frames $visualFrameCount · Beobachtungen $visualObservationCount"
+                            statsText.text = memoryText()
                         }
                     }
                 )
@@ -712,92 +649,130 @@ class MainActivity : ComponentActivity() {
                 )
 
                 cameraRunning = true
-                cameraStatus.text = "Kamera: AKTIV · 8×6 Raster"
-                cameraButton.isEnabled = false
-                cameraStopButton.isEnabled = true
+                cameraText.text = "Kamera: AKTIV · 8×6 Raster"
             } catch (e: Exception) {
                 cameraRunning = false
-                cameraStatus.text = "Kamera: Startfehler ${e.javaClass.simpleName}"
-                cameraButton.isEnabled = true
-                cameraStopButton.isEnabled = false
+                cameraText.text = "Kamera-Fehler: ${e.javaClass.simpleName}"
             }
         }, mainExecutor)
     }
 
     private fun stopCameraLearning() {
-        if (!cameraRunning && cameraProvider == null) return
         cameraRunning = false
         try { cameraProvider?.unbindAll() } catch (_: Exception) { }
         cameraProvider = null
-        cameraStatus.text = "Kamera: AUS"
-        cameraButton.isEnabled = true
-        cameraStopButton.isEnabled = false
-        memoryStats.text = memoryText()
-        refreshGraph()
+        if (::cameraText.isInitialized) cameraText.text = "Kamera: AUS"
     }
 
-    private fun selectedIntervalMs(): Long {
-        return when (intervalSpinner.selectedItemPosition) {
-            0 -> 5_000L
-            1 -> 15_000L
-            2 -> 30_000L
-            3 -> 60_000L
-            4 -> 300_000L
-            5 -> 900_000L
-            else -> 1_800_000L
+    private fun doConsolidation() {
+        val result = memory.consolidate()
+        lastConsolidationSummary = consolidationSummary(result)
+        nextConsolidationAt = System.currentTimeMillis() + selectedIntervalMs
+        refreshGraphAndStats()
+    }
+
+    private fun doConsolidationFromWorker() {
+        val result = memory.consolidate()
+        lastConsolidationSummary = consolidationSummary(result)
+        nextConsolidationAt = System.currentTimeMillis() + selectedIntervalMs
+
+        runOnUiThread {
+            consolidationText.text =
+                "Konsolidierung: ${intervalText(selectedIntervalMs)}\n$lastConsolidationSummary"
+            refreshGraphAndStats()
         }
     }
 
-    private fun updateConsolidationStatus() {
-        if (!::consolidationStatus.isInitialized) return
-        val interval = selectedIntervalMs()
-        val remaining = if (running) (interval - (System.currentTimeMillis() - lastConsolidationMs)).coerceAtLeast(0L) else interval
-        val seconds = (remaining + 999L) / 1000L
-        val label = intervalSpinner.selectedItem?.toString() ?: "—"
-        consolidationStatus.text = "Konsolidierung: $label · nächste in ${seconds}s\n$lastConsolidationSummary"
+    private fun refreshGraphAndStats() {
+        if (::statsText.isInitialized) statsText.text = memoryText()
+        if (::graphView.isInitialized) graphView.setSnapshot(memory.graphSnapshot())
+        if (::consolidationText.isInitialized) {
+            consolidationText.text =
+                "Konsolidierung: ${intervalText(selectedIntervalMs)}\n$lastConsolidationSummary"
+        }
     }
 
     private fun memoryText(): String {
         val s = memory.stats()
-        val levelText = if (s.levelCounts.isEmpty()) {
-            "noch keine"
+        val levels = if (s.levelCounts.isEmpty()) {
+            "keine"
         } else {
             s.levelCounts.entries.joinToString(" · ") { "L${it.key}:${it.value}" }
         }
-        return "Mikro: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
-            "Abstraktion: $levelText | höchste Ebene: L${s.maxAbstractionLevel} | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
-            "Makro gesamt: ${s.macroCodes} | Makrorelationen: ${s.macroRelations}\n" +
-            "Sequenzen: ${s.sequenceCodes} Codes | ${s.promotedSequences} verdichtet | max Länge ${s.longestSequenceLength} | stärkstes Gewicht ${s.strongestSequenceWeight}\n" +
-            "Vision: ${s.visualPersistentCodes} persistente Codes | Crossmodal: ${s.crossModalRelations} Relationen\n" +
-            "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}\n" +
-            "Beobachtungen gesamt: ${s.observations} | stärkstes Mikrogewicht: ${s.strongestWeight}"
+
+        return "Mikro ${s.persistentCodes} · temporär ${s.temporaryCodes} · Rel ${s.relations}\n" +
+            "Abstraktion $levels · höchste L${s.maxAbstractionLevel}\n" +
+            "Makro ${s.macroCodes} · Makrorel ${s.macroRelations}\n" +
+            "Sequenzen ${s.sequenceCodes}/${s.sequenceCapacity} · ${"%.1f".format(s.sequenceCapacityUsedPercent)}%\n" +
+            "Vision ${s.visualPersistentCodes} · Crossmodal ${s.crossModalRelations}\n" +
+            "Beobachtungen ${s.observations}"
     }
 
     private fun consolidationSummary(result: ConsolidationResult): String {
-        val levelPart = if (result.highestNewLevel > 0) {
+        val level = if (result.highestNewLevel > 0) {
             " · höchste neue Ebene L${result.highestNewLevel}"
         } else {
             ""
         }
-        return "Letzte Änderung: +${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktionsknoten · davon ${result.sequencePromoted} Sequenzen$levelPart"
+
+        return "+${result.microPromoted} Mikro · +${result.macroPromoted} Abstraktion · " +
+            "${result.sequencePromoted} Sequenzen$level"
     }
 
-    private fun stopAudio() {
-        if (!running) return
-        running = false
-        try { audioRecord?.stop() } catch (_: Exception) { }
-        try { worker?.join(500) } catch (_: InterruptedException) { }
-        try { audioRecord?.release() } catch (_: Exception) { }
-        audioRecord = null
-        worker = null
-        status.text = "Audio: AUS"
-        startButton.isEnabled = true
-        stopButton.isEnabled = false
-        val result = memory.consolidate()
-        lastConsolidationSummary = consolidationSummary(result)
-        updateConsolidationStatus()
-        memoryStats.text = memoryText()
-        refreshGraph()
+    private fun intervalText(ms: Long): String = when (ms) {
+        5_000L -> "5 Sekunden"
+        15_000L -> "15 Sekunden"
+        30_000L -> "30 Sekunden"
+        60_000L -> "1 Minute"
+        300_000L -> "5 Minuten"
+        else -> "${ms / 1000}s"
+    }
+
+    private fun sectionTitle(text: String): TextView = TextView(this).apply {
+        this.text = text
+        textSize = 13f
+        setTextColor(Color.rgb(120, 225, 210))
+        setPadding(0, dp(18), 0, dp(6))
+    }
+
+    private fun cardText(text: String, size: Float): TextView = TextView(this).apply {
+        this.text = text
+        textSize = size
+        setTextColor(Color.rgb(220, 228, 238))
+        setBackgroundColor(Color.rgb(16, 20, 28))
+        setPadding(dp(14), dp(12), dp(14), dp(12))
+    }
+
+    private fun fullButtonParams(top: Int): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = dp(top)
+        }
+
+    private fun weightParams(weight: Float, margin: Int): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(
+            0,
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            weight
+        ).apply {
+            marginStart = dp(margin)
+            marginEnd = dp(margin)
+            topMargin = dp(4)
+        }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
+    override fun onResume() {
+        super.onResume()
+        enterFullscreen()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) enterFullscreen()
     }
 
     override fun onDestroy() {
