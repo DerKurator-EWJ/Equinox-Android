@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 54
-        versionName = "0.6-step39-hierarchical-routing"
+        versionCode = 55
+        versionName = "0.6-step40-recall-prediction-hardening"
     }
 
     compileOptions {

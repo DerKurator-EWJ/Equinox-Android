@@ -46,7 +46,7 @@ private const val CROSSMODAL_WINDOW_NS = 900_000_000L
 private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
 
 /**
- * v0.6 Step 39
+ * v0.6 Step 40
  *
  * Keeps the active working set, indexed lazy retrieval, structural tiers,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -65,7 +65,10 @@ private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
  * Step 25 removes semantic ceilings: hierarchy depth, working-set breadth, candidate/template counts
  * and adaptive codebook sizes are evidence/resource-driven rather than fixed constants. Step 39
  * adds a derived sparse routing index over learned macro signatures so familiar tails can skip
- * redundant lower-tail candidate work while longer novel context remains learnable.
+ * redundant lower-tail candidate work while longer novel context remains learnable. Step 40
+ * hardens the transient frontier: recall is gated by probability/information gain/relevance,
+ * prediction breadth is controlled and measured against a context-free baseline, and weak
+ * temporary pattern evidence expires in stream-event time.
  * The coincidence clock is runtime-only and is never persisted into the learned identities.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
@@ -139,6 +142,12 @@ data class MemoryStats(
     val routingIndexStreams: Int = 0,
     val routingIndexAnchors: Int = 0,
     val routingIndexSignatures: Int = 0,
+    val recallCandidates: Int = 0,
+    val recallRetrieved: Int = 0,
+    val recallRejected: Int = 0,
+    val recallMeanInformationGain: Double = 0.0,
+    val recallFactor: Double = 0.0,
+    val weakCandidatesExpired: Long = 0L,
     val competitionRuns: Long = 0L,
     val competitionMacrosPruned: Long = 0L,
     val competitionRelationsPruned: Long = 0L,
@@ -146,11 +155,18 @@ data class MemoryStats(
     val competitionLastPruned: Int = 0,
     val competitionLastProtected: Int = 0,
     val competitionLastPressuredGroups: Int = 0,
+    val predictionRawCandidates: Int = 0,
     val predictionCandidates: Int = 0,
     val predictionTopConfidence: Double = 0.0,
     val predictionChecks: Long = 0L,
     val predictionHits: Long = 0L,
     val predictionHitRate: Double = 0.0,
+    val predictionTop1Checks: Long = 0L,
+    val predictionTop1Hits: Long = 0L,
+    val predictionTop1HitRate: Double = 0.0,
+    val predictionBaselineHits: Long = 0L,
+    val predictionBaselineHitRate: Double = 0.0,
+    val predictionLift: Double = 0.0,
     val hybridSteps: Long = 0L,
     val hybridSeedId: Int = 0,
     val crossModalMacros: Int = 0,
@@ -336,7 +352,9 @@ class MemoryModel(context: Context) {
         val streamLevel: Int,
         val modality: String,
         val tokens: List<Int>,
-        var hits: Long
+        var hits: Long,
+        var firstSeenStreamPosition: Long,
+        var lastSeenStreamPosition: Long
     )
 
     private data class MacroCode(
@@ -473,12 +491,31 @@ class MemoryModel(context: Context) {
 
     // Step 15 predictions are runtime projections of persistent directional transition counts.
     // They are never written back as relations merely because they were predicted.
+    private data class PendingPredictionEvaluation(
+        val selectedTargets: Set<Int>,
+        val topTargetId: Int?,
+        val baselineTopTargetId: Int?
+    )
+
     private val currentPredictions = mutableListOf<ActivePrediction>()
-    private val pendingPredictionsByStream = mutableMapOf<String, Set<Int>>()
+    private val pendingPredictionsByStream = mutableMapOf<String, PendingPredictionEvaluation>()
+    private val predictionPriorLeaders = mutableMapOf<String, MutableList<Int>>()
     private var predictionChecks = 0L
     private var predictionHits = 0L
+    private var predictionTop1Checks = 0L
+    private var predictionTop1Hits = 0L
+    private var predictionBaselineHits = 0L
+    private var lastPredictionRawCandidates = 0
     private var lastPredictionCandidates = 0
     private var lastTopPredictionConfidence = 0.0
+
+    // Step 40 recall/candidate hardening diagnostics are transient only.
+    private var lastRecallCandidates = 0
+    private var lastRecallSelected = 0
+    private var lastRecallRejected = 0
+    private var lastRecallMeanInformationGain = 0.0
+    private var weakCandidatesExpired = 0L
+    private var candidateSweepCounter = 0
 
     // Memory-mode traversal cursor. It is runtime-only and never learned back.
     private var memoryPlaybackCursor: Int? = null
@@ -741,13 +778,16 @@ class MemoryModel(context: Context) {
             val candidate = candidates[signature]
             val effectiveCandidate = if (candidate != null) {
                 candidate.hits++
+                candidate.lastSeenStreamPosition = streamPosition
                 candidate
             } else {
                 PatternCandidate(
                     streamLevel = streamLevel,
                     modality = modality,
                     tokens = tail,
-                    hits = 1L
+                    hits = 1L,
+                    firstSeenStreamPosition = streamPosition,
+                    lastSeenStreamPosition = streamPosition
                 ).also { candidates[signature] = it }
             }
 
@@ -827,6 +867,7 @@ class MemoryModel(context: Context) {
         )
         macros[macro.id] = macro
         macroBySignature[signature] = macro.id
+        updatePredictionPriorLeader(macro)
         hierarchyRouter.registerTokens(candidate.streamLevel, candidate.modality, candidate.tokens, macro.id)
         indexMacroComposition(macro)
         indexMacroForTemplates(macro)
@@ -847,6 +888,7 @@ class MemoryModel(context: Context) {
 
     private fun activateMacro(macro: MacroCode) {
         macro.weight++
+        updatePredictionPriorLeader(macro)
         if (macro.firstActivatedObservation <= 0L) {
             macro.firstActivatedObservation = observations
         }
@@ -896,7 +938,15 @@ class MemoryModel(context: Context) {
         currentPredictions.clear()
         val predictions = predictNextIntoWorkingSet(macro)
         currentPredictions.addAll(predictions)
-        pendingPredictionsByStream[relationStreamKey] = predictions.map { it.targetId }.toSet()
+        if (predictions.isNotEmpty()) {
+            pendingPredictionsByStream[relationStreamKey] = PendingPredictionEvaluation(
+                selectedTargets = predictions.map { it.targetId }.toSet(),
+                topTargetId = predictions.firstOrNull()?.targetId,
+                baselineTopTargetId = baselinePredictionTarget(macro)
+            )
+        } else {
+            pendingPredictionsByStream.remove(relationStreamKey)
+        }
         lastPredictionCandidates = predictions.size
         lastTopPredictionConfidence = predictions.maxOfOrNull { it.confidence } ?: 0.0
 
@@ -1036,6 +1086,7 @@ class MemoryModel(context: Context) {
             lastActivatedObservation = observations
         )
         macros[joint.id] = joint
+        updatePredictionPriorLeader(joint)
         crossModalByPair[signature] = joint.id
         crossModalMemberIndex.getOrPut(audio.id) { linkedSetOf() }.add(joint.id)
         crossModalMemberIndex.getOrPut(visual.id) { linkedSetOf() }.add(joint.id)
@@ -1055,6 +1106,7 @@ class MemoryModel(context: Context) {
      */
     private fun activateCrossModalMacro(joint: MacroCode, supportConfidence: Double) {
         joint.weight++
+        updatePredictionPriorLeader(joint)
         if (joint.firstActivatedObservation <= 0L) joint.firstActivatedObservation = observations
         joint.lastActivatedObservation = observations
 
@@ -1087,10 +1139,14 @@ class MemoryModel(context: Context) {
     }
 
     private fun evaluatePendingPrediction(streamKey: String, actualMacroId: Int) {
-        val pending = pendingPredictionsByStream.remove(streamKey).orEmpty()
-        if (pending.isEmpty()) return
+        val pending = pendingPredictionsByStream.remove(streamKey) ?: return
+        if (pending.selectedTargets.isEmpty()) return
         predictionChecks++
-        if (actualMacroId in pending) predictionHits++
+        if (actualMacroId in pending.selectedTargets) predictionHits++
+
+        predictionTop1Checks++
+        if (pending.topTargetId == actualMacroId) predictionTop1Hits++
+        if (pending.baselineTopTargetId == actualMacroId) predictionBaselineHits++
     }
 
     /**
@@ -1112,10 +1168,11 @@ class MemoryModel(context: Context) {
             }
             .toList()
 
+        lastPredictionRawCandidates = outgoing.size
         if (outgoing.isEmpty()) return emptyList()
         val total = outgoing.sumOf { it.second }.coerceAtLeast(1L).toDouble()
 
-        val ranked = outgoing.asSequence()
+        val rankedAll = outgoing.asSequence()
             .map { (targetId, support) ->
                 val share = support.toDouble() / total
                 val supportConfidence = support.toDouble() / (support.toDouble() + 4.0)
@@ -1129,14 +1186,28 @@ class MemoryModel(context: Context) {
             .filter { it.confidence >= MIN_PREDICTION_CONFIDENCE }
             .sortedWith(compareByDescending<ActivePrediction> { it.confidence }.thenByDescending { it.support })
             .toList()
-        if (ranked.isEmpty()) return emptyList()
-        val confidenceMass = ranked.sumOf { it.confidence }.coerceAtLeast(1e-9)
+        if (rankedAll.isEmpty()) return emptyList()
+
+        // Step 40: a broad flat transition fan-out no longer materializes almost everything
+        // merely to satisfy probability mass. Keep only candidates that remain meaningful
+        // relative to the strongest forecast and inside a logarithmic transient work budget.
+        val topConfidence = rankedAll.first().confidence
+        val relativeFloor = max(
+            MIN_PREDICTION_CONFIDENCE,
+            topConfidence * RecallPredictionPolicy.PREDICTION_RELATIVE_FLOOR
+        )
+        val gated = rankedAll.filter { it.confidence >= relativeFloor }
+        if (gated.isEmpty()) return emptyList()
+
+        val budget = RecallPredictionPolicy.predictionBudget(gated.size)
+        val confidenceMass = gated.sumOf { it.confidence }.coerceAtLeast(1e-9)
         val selected = ArrayList<ActivePrediction>()
         var accumulated = 0.0
-        for (prediction in ranked) {
+        for (prediction in gated) {
+            if (selected.size >= budget) break
             selected += prediction
             accumulated += prediction.confidence
-            if (accumulated / confidenceMass >= AdaptiveScalePolicy.PREDICTION_MASS_TARGET) break
+            if (accumulated / confidenceMass >= RecallPredictionPolicy.PREDICTION_SCORE_MASS_TARGET) break
         }
         selected.forEach { prediction ->
             // B-state expectation only. Prediction itself is not a learned event.
@@ -1145,10 +1216,37 @@ class MemoryModel(context: Context) {
         return selected
     }
 
-    /** Pull only indexed neighbors of one active macro into momentary context. */
+    /**
+     * Pull a bounded, ranked local context around one macro. Step 40 scores each local edge by
+     * conditional probability, relation support, structural relevance and positive local
+     * information gain. Persistent relations are untouched; only materialization is gated.
+     */
     private fun retrieveNeighborsIntoWorkingSet(sourceId: Int, modality: String): List<Int> {
-        val keys = relationIndex[sourceId] ?: return emptyList()
-        val ranked = keys.asSequence()
+        val keys = relationIndex[sourceId] ?: run {
+            lastRecallCandidates = 0
+            lastRecallSelected = 0
+            lastRecallRejected = 0
+            lastRecallMeanInformationGain = 0.0
+            return emptyList()
+        }
+
+        data class LocalEdge(
+            val macro: MacroCode,
+            val weight: Long,
+            val supportConfidence: Double,
+            val conditionalShare: Double,
+            val localPrior: Double
+        )
+
+        data class RecallCandidate(
+            val id: Int,
+            val weight: Long,
+            val expectation: Double,
+            val informationGain: Double,
+            val score: Double
+        )
+
+        val raw = keys.asSequence()
             .mapNotNull { key ->
                 val from = keyFrom(key)
                 val to = keyTo(key)
@@ -1156,21 +1254,77 @@ class MemoryModel(context: Context) {
                 val otherMacro = macros[other] ?: return@mapNotNull null
                 if (otherMacro.modality != modality) return@mapNotNull null
                 val weight = macroRelations[key] ?: return@mapNotNull null
-                Triple(other, weight, relationConfidenceByWeight(weight))
+                Triple(otherMacro, weight, relationConfidenceByWeight(weight))
             }
-            .sortedByDescending { it.second }
             .toList()
-        if (ranked.isEmpty()) return emptyList()
-        val totalWeight = ranked.sumOf { it.second.toDouble() }.coerceAtLeast(1e-9)
-        val selected = ArrayList<Int>()
-        var mass = 0.0
-        for ((id, weight, expectation) in ranked) {
-            touchAsContext(id, expectation)
-            selected += id
-            mass += weight.toDouble()
-            if (mass / totalWeight >= AdaptiveScalePolicy.RETRIEVAL_MASS_TARGET) break
+
+        lastRecallCandidates = raw.size
+        if (raw.isEmpty()) {
+            lastRecallSelected = 0
+            lastRecallRejected = 0
+            lastRecallMeanInformationGain = 0.0
+            return emptyList()
         }
-        return selected
+
+        val relationMass = raw.sumOf { it.second.toDouble() }.coerceAtLeast(1e-9)
+        val targetPriorMass = raw.sumOf { it.first.weight.coerceAtLeast(1L).toDouble() }.coerceAtLeast(1e-9)
+        val local = raw.map { (macro, weight, supportConfidence) ->
+            LocalEdge(
+                macro = macro,
+                weight = weight,
+                supportConfidence = supportConfidence,
+                conditionalShare = weight.toDouble() / relationMass,
+                localPrior = macro.weight.coerceAtLeast(1L).toDouble() / targetPriorMass
+            )
+        }
+
+        // Structural relevance is richer but more expensive than reading the local relation
+        // weight itself. First pre-rank by direct evidence, then evaluate relevance only on a
+        // small logarithmic shortlist. This prevents the hardening layer from reintroducing
+        // an O(neighborhood²) hot path through structuralProfileFor().
+        val materializationBudget = RecallPredictionPolicy.retrievalBudget(local.size, activeWorking.size)
+        val evaluationBudget = (materializationBudget * 2).coerceAtLeast(materializationBudget).coerceAtMost(local.size)
+        val shortlist = local
+            .sortedByDescending { edge -> 0.62 * edge.conditionalShare + 0.38 * edge.supportConfidence }
+            .take(evaluationBudget)
+
+        val ranked = shortlist.map { edge ->
+            val gain = RecallPredictionPolicy.informationGain(edge.conditionalShare, edge.localPrior)
+            val profile = structuralProfileFor(edge.macro)
+            val score = RecallPredictionPolicy.recallScore(
+                conditionalShare = edge.conditionalShare,
+                supportConfidence = edge.supportConfidence,
+                structuralRelevance = profile.relevance,
+                localPrior = edge.localPrior
+            )
+            RecallCandidate(
+                id = edge.macro.id,
+                weight = edge.weight,
+                expectation = (0.68 * edge.supportConfidence + 0.32 * score).coerceIn(0.0, 1.0),
+                informationGain = gain,
+                score = score
+            )
+        }.sortedWith(compareByDescending<RecallCandidate> { it.score }.thenByDescending { it.weight })
+
+        val topScore = ranked.firstOrNull()?.score ?: 0.0
+        val floor = max(RecallPredictionPolicy.MIN_RECALL_SCORE, topScore * RecallPredictionPolicy.RECALL_RELATIVE_FLOOR)
+        val gated = ranked.filter { it.score >= floor }
+        val budget = materializationBudget.coerceAtMost(gated.size)
+        val scoreMass = gated.sumOf { it.score }.coerceAtLeast(1e-9)
+        val selected = ArrayList<RecallCandidate>()
+        var accumulated = 0.0
+        for (candidate in gated) {
+            if (selected.size >= budget) break
+            selected += candidate
+            accumulated += candidate.score
+            if (accumulated / scoreMass >= RecallPredictionPolicy.RECALL_SCORE_MASS_TARGET) break
+        }
+
+        selected.forEach { touchAsContext(it.id, it.expectation) }
+        lastRecallSelected = selected.size
+        lastRecallRejected = (raw.size - selected.size).coerceAtLeast(0)
+        lastRecallMeanInformationGain = if (selected.isEmpty()) 0.0 else selected.map { it.informationGain }.average()
+        return selected.map { it.id }
     }
 
     private fun touchAsContext(id: Int, expected: Double) {
@@ -1189,6 +1343,28 @@ class MemoryModel(context: Context) {
 
         // Retrieval is read-only: do not recursively activate or rewrite macro history.
     }
+
+    private fun updatePredictionPriorLeader(macro: MacroCode) {
+        val key = streamKey(macro.level, macro.modality)
+        val leaders = predictionPriorLeaders.getOrPut(key) { mutableListOf() }
+        if (macro.id !in leaders) leaders += macro.id
+        leaders.removeAll { !macros.containsKey(it) }
+        leaders.sortWith(
+            compareByDescending<Int> { macros[it]?.weight ?: Long.MIN_VALUE }
+                .thenBy { it }
+        )
+        while (leaders.size > 2) leaders.removeAt(leaders.lastIndex)
+    }
+
+    private fun rebuildPredictionPriorLeaders() {
+        predictionPriorLeaders.clear()
+        macros.values.forEach { updatePredictionPriorLeader(it) }
+    }
+
+    /** Context-free baseline: strongest recurrent macro in the same stream, excluding source. */
+    private fun baselinePredictionTarget(source: MacroCode): Int? =
+        predictionPriorLeaders[streamKey(source.level, source.modality)]
+            ?.firstOrNull { it != source.id && macros.containsKey(it) }
 
     private fun relationConfidence(fromId: Int, toId: Int): Double {
         val direct = macroRelations[pairKey(fromId, toId)] ?: 0L
@@ -1334,11 +1510,43 @@ class MemoryModel(context: Context) {
     }
 
     private fun pruneTransientCandidatePressureIfNeeded() {
+        // Age sweeps are deliberately periodic rather than per-token O(candidateCount).
+        candidateSweepCounter++
+        if (candidateSweepCounter >= 128) {
+            candidateSweepCounter = 0
+            val iterator = candidates.iterator()
+            while (iterator.hasNext()) {
+                val (_, candidate) = iterator.next()
+                if (candidate.hits > 3L) continue
+                val currentPosition = hierarchyStreamPositions[streamKey(candidate.streamLevel, candidate.modality)] ?: continue
+                val idle = (currentPosition - candidate.lastSeenStreamPosition).coerceAtLeast(0L)
+                val limit = RecallPredictionPolicy.weakCandidateIdleLimit(
+                    hits = candidate.hits,
+                    patternLength = candidate.tokens.size,
+                    sourceLevel = candidate.streamLevel
+                )
+                if (idle > limit) {
+                    iterator.remove()
+                    weakCandidatesExpired++
+                }
+            }
+        }
+
         val target = AdaptiveScalePolicy.candidateSoftTarget(quants.size, macros.size)
-        if (candidates.size <= target * 2) return
+        // Step 40 starts pressure cleanup before the temporary pool reaches 2x its soft target.
+        // This is still a transient evidence budget, never a persistent-memory ceiling.
+        val pressureTrigger = target + target / 2
+        if (candidates.size <= pressureTrigger) return
         val keep = candidates.entries
-            .sortedWith(compareByDescending<Map.Entry<String, PatternCandidate>> { it.value.hits }
-                .thenByDescending { it.value.tokens.size })
+            .sortedWith(
+                compareByDescending<Map.Entry<String, PatternCandidate>> { it.value.hits }
+                    .thenBy { entry ->
+                        val c = entry.value
+                        val pos = hierarchyStreamPositions[streamKey(c.streamLevel, c.modality)] ?: c.lastSeenStreamPosition
+                        (pos - c.lastSeenStreamPosition).coerceAtLeast(0L)
+                    }
+                    .thenByDescending { it.value.tokens.size }
+            )
             .take(target)
             .associate { it.key to it.value }
         candidates.clear()
@@ -1723,6 +1931,13 @@ class MemoryModel(context: Context) {
         pendingPredictionsByStream.clear()
         previousActiveMacro.clear()
         lastRetrievedCount = 0
+        lastRecallCandidates = 0
+        lastRecallSelected = 0
+        lastRecallRejected = 0
+        lastRecallMeanInformationGain = 0.0
+        lastPredictionRawCandidates = 0
+        lastPredictionCandidates = 0
+        lastTopPredictionConfidence = 0.0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
         memoryPlaybackCursor = null
@@ -2057,6 +2272,9 @@ class MemoryModel(context: Context) {
             .asSequence()
             .mapNotNull { macros[it] }
             .toList()
+        val directActiveCount = activeWorking.values.count { it.actual >= 0.50 && !it.retrieved }
+        val recallFactor = if (directActiveCount <= 0) 0.0 else
+            activeWorking.values.count { it.retrieved }.toDouble() / directActiveCount.toDouble()
         val activeProfiles = activeMacrosNow.map { structuralProfileFor(it) }
         val highestActiveDepth = activeMacrosNow.maxOfOrNull { it.level } ?: 0
         val highestActiveTier = if (highestActiveDepth > 0) AbstractionTier.labelForMacroDepth(highestActiveDepth) else "—"
@@ -2152,6 +2370,12 @@ class MemoryModel(context: Context) {
             routingIndexStreams = routingIndexStats.streams,
             routingIndexAnchors = routingIndexStats.anchors,
             routingIndexSignatures = routingIndexStats.signatures,
+            recallCandidates = lastRecallCandidates,
+            recallRetrieved = lastRecallSelected,
+            recallRejected = lastRecallRejected,
+            recallMeanInformationGain = lastRecallMeanInformationGain,
+            recallFactor = recallFactor,
+            weakCandidatesExpired = weakCandidatesExpired,
             competitionRuns = competitionRuns,
             competitionMacrosPruned = competitionMacrosPruned,
             competitionRelationsPruned = competitionRelationsPruned,
@@ -2159,11 +2383,19 @@ class MemoryModel(context: Context) {
             competitionLastPruned = competitionLastPruned,
             competitionLastProtected = competitionLastProtected,
             competitionLastPressuredGroups = competitionLastPressuredGroups,
+            predictionRawCandidates = lastPredictionRawCandidates,
             predictionCandidates = lastPredictionCandidates,
             predictionTopConfidence = lastTopPredictionConfidence,
             predictionChecks = predictionChecks,
             predictionHits = predictionHits,
             predictionHitRate = if (predictionChecks <= 0L) 0.0 else predictionHits.toDouble() / predictionChecks.toDouble(),
+            predictionTop1Checks = predictionTop1Checks,
+            predictionTop1Hits = predictionTop1Hits,
+            predictionTop1HitRate = if (predictionTop1Checks <= 0L) 0.0 else predictionTop1Hits.toDouble() / predictionTop1Checks.toDouble(),
+            predictionBaselineHits = predictionBaselineHits,
+            predictionBaselineHitRate = if (predictionTop1Checks <= 0L) 0.0 else predictionBaselineHits.toDouble() / predictionTop1Checks.toDouble(),
+            predictionLift = if (predictionTop1Checks <= 0L) 0.0 else
+                (predictionTop1Hits - predictionBaselineHits).toDouble() / predictionTop1Checks.toDouble(),
             hybridSteps = hybridPlaybackSteps,
             hybridSeedId = lastHybridSeedId,
             crossModalMacros = macros.values.count { it.modality == "crossmodal" },
@@ -2192,6 +2424,7 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         hierarchyRouter.clear()
+        predictionPriorLeaders.clear()
         routingQueries = 0L
         routingHits = 0L
         routingSignatureChecks = 0L
@@ -2251,8 +2484,18 @@ class MemoryModel(context: Context) {
         competitionLastPressuredGroups = 0
         predictionChecks = 0L
         predictionHits = 0L
+        predictionTop1Checks = 0L
+        predictionTop1Hits = 0L
+        predictionBaselineHits = 0L
+        lastPredictionRawCandidates = 0
         lastPredictionCandidates = 0
         lastTopPredictionConfidence = 0.0
+        lastRecallCandidates = 0
+        lastRecallSelected = 0
+        lastRecallRejected = 0
+        lastRecallMeanInformationGain = 0.0
+        weakCandidatesExpired = 0L
+        candidateSweepCounter = 0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -2272,6 +2515,7 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         hierarchyRouter.clear()
+        predictionPriorLeaders.clear()
         routingQueries = 0L
         routingHits = 0L
         routingSignatureChecks = 0L
@@ -2331,8 +2575,18 @@ class MemoryModel(context: Context) {
         competitionLastPressuredGroups = 0
         predictionChecks = 0L
         predictionHits = 0L
+        predictionTop1Checks = 0L
+        predictionTop1Hits = 0L
+        predictionBaselineHits = 0L
+        lastPredictionRawCandidates = 0
         lastPredictionCandidates = 0
         lastTopPredictionConfidence = 0.0
+        lastRecallCandidates = 0
+        lastRecallSelected = 0
+        lastRecallRejected = 0
+        lastRecallMeanInformationGain = 0.0
+        weakCandidatesExpired = 0L
+        candidateSweepCounter = 0
         lastRetrievedCount = 0
         lastExchangePairs = 0
         lastMeanAbsExchange = 0.0
@@ -2457,6 +2711,7 @@ class MemoryModel(context: Context) {
             rebuildCrossModalIndex()
             rebuildMacroCompositionIndex()
             rebuildTemplateIndex()
+            rebuildPredictionPriorLeaders()
 
             longTermStore.readRelations().forEach { r ->
                 macroRelations[r.key] = r.weight
@@ -2522,6 +2777,7 @@ class MemoryModel(context: Context) {
             rebuildCrossModalIndex()
             rebuildMacroCompositionIndex()
             rebuildTemplateIndex()
+            rebuildPredictionPriorLeaders()
 
             val relationArray = root.optJSONArray("macroRelations") ?: JSONArray()
             for (i in 0 until relationArray.length()) {
@@ -3015,6 +3271,7 @@ class MemoryModel(context: Context) {
         rebuildMacroCompositionIndex()
         rebuildHierarchyRouteIndex()
         rebuildTemplateIndex()
+        rebuildPredictionPriorLeaders()
         relationIndex.clear()
         macroRelations.keys.forEach { indexRelation(it) }
 
