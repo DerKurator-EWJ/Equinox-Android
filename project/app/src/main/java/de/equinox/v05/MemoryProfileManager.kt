@@ -39,7 +39,8 @@ class MemoryProfileManager(private val context: Context) {
         private const val FORMAT = 1
         private val COMPANION_FILES = listOf(
             "equinox_v06_adaptive_quantizer.json",
-            "equinox_v06_adaptive_visual_quantizer.json"
+            "equinox_v06_adaptive_visual_quantizer.json",
+            KnowledgeLayerStore.FILE_NAME
         )
     }
 

@@ -1,11 +1,9 @@
-# Equinox v0.6 — Step 44
+# Equinox v0.6 — Step 45
 
-Current milestone: **Hypno Audio / Visual Synchronisation**.
+Current milestone: **Base / Personal / Derived Knowledge Architecture**.
 
-HYPNO and Unified Audio now derive their behaviour from one shared, normalized, read-only `UnifiedPresentationState`. Activity, prediction, signed exchange, novelty, crossmodality, tier depth, retrieval share and relation energy therefore have one canonical output interpretation before being expressed visually or acoustically.
+The learned hierarchy now has an independent provenance axis: immutable global `BASE`, profile-owned `PERSONAL`, and mixed `DERIVED` knowledge. BASE lives outside memory profiles, so future base-pack updates cannot overwrite personal histories. Existing Step 23–44 profiles remain readable and default to PERSONAL when no provenance sidecar exists.
 
-With live camera presentation, the same delayed `WorkingSetSnapshot` selected by the Step-27 render packet is sent to both GPU and audio, removing independent audiovisual state sampling.
+Settings -> MEMORY also has a BASE toggle. `BASE AUS + NEW` gives a genuine blank start.
 
-LEARN / PLAY / DREAM semantics, the persistent memory format, Step-37 profiles and the Step-41 reconstructed macro voices remain compatible.
-
-See `README_STEP44.md` for architecture and verification notes.
+See `README_STEP45.md` for the architecture, compatibility rules and verification notes.

@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicLong
  * This is intentionally a storage concern only: it does not alter learning, rank, recall,
  * prediction, DREAM, cross-modal semantics or overexchange math.
  */
-class IndexedLongTermStore(context: Context) {
+class IndexedLongTermStore(context: Context, storeDirName: String = STORE_DIR) {
     data class Meta(
         val observations: Long,
         val nextMacroId: Int,
@@ -72,7 +72,7 @@ class IndexedLongTermStore(context: Context) {
         val tokenReads: Long
     )
 
-    private val root = File(context.filesDir, STORE_DIR)
+    private val root = File(context.filesDir, storeDirName)
     private val metaFile get() = File(root, META_FILE)
     private val quantFile get() = File(root, QUANT_FILE)
     private val macroFile get() = File(root, MACRO_FILE)

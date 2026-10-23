@@ -184,6 +184,13 @@ data class MemoryStats(
     val dreamRestarts: Long = 0L,
     val dreamLastMode: String = "—",
     val dreamCursorId: Int = 0,
+    val baseKnowledgeMacros: Int = 0,
+    val personalKnowledgeMacros: Int = 0,
+    val derivedKnowledgeMacros: Int = 0,
+    val basePackId: String = "",
+    val basePackVersion: Int = 0,
+    val baseKnowledgeEnabled: Boolean = true,
+    val baseCompatibilityOk: Boolean = true,
     val storageBackend: String = "indexed-binary",
     val storageBytes: Long = 0L,
     val storageDiskBackedMacros: Int = 0,
@@ -382,7 +389,9 @@ class MemoryModel(context: Context) {
         var weight: Long,
         var representativeHz: Double,
         var firstActivatedObservation: Long = 0L,
-        var lastActivatedObservation: Long = 0L
+        var lastActivatedObservation: Long = 0L,
+        val origin: KnowledgeOrigin = KnowledgeOrigin.PERSONAL,
+        val provenanceSources: List<Int> = emptyList()
     )
 
     private data class CrossModalCandidate(
@@ -441,7 +450,16 @@ class MemoryModel(context: Context) {
     // Step 23: indexed binary store is primary. The old JSON file is retained only as
     // a one-time migration source for users upgrading from Step 22 or earlier.
     private val legacyFile = File(context.filesDir, "equinox_v06_memory.json")
+    // Step 45: the existing indexed store remains the profile-owned PERSONAL/DERIVED layer.
     private val longTermStore = IndexedLongTermStore(context)
+    private val baseKnowledge = BaseKnowledgeRepository(context)
+    private val knowledgeLayerStore = KnowledgeLayerStore(context)
+    private val baseRelationWeights = mutableMapOf<Long, Long>()
+    private var installedBaseManifest = BaseKnowledgeRepository.Manifest()
+    private var requiredBasePackId = ""
+    private var requiredBaseVersion = 0
+    private var baseCompatibilityOk = true
+    private var mountedBaseMacroCount = 0
 
     // Level 0: observed members of the fixed encoder alphabet. These counters are
     // diagnostics / lookup metadata only. No persistent level-0 relations exist.
@@ -604,8 +622,9 @@ class MemoryModel(context: Context) {
 
     @Synchronized
     fun setCognitiveMode(mode: CognitiveMode) {
-        if (cognitiveMode == mode) return
-        cognitiveMode = mode
+        val resolvedMode = if (mode == CognitiveMode.LEARN && !baseCompatibilityOk) CognitiveMode.PLAY else mode
+        if (cognitiveMode == resolvedMode) return
+        cognitiveMode = resolvedMode
         readOnlyRolling.clear()
         pendingPredictionsByStream.clear()
         previousActiveMacro.clear()
@@ -621,7 +640,25 @@ class MemoryModel(context: Context) {
     @Synchronized
     fun cognitiveMode(): CognitiveMode = cognitiveMode
 
+    @Synchronized
+    fun baseKnowledgeEnabled(): Boolean = baseKnowledge.isEnabled()
+
+    /**
+     * Disabling BASE is the genuine blank-mode switch. Personal memory stays mounted; BASE and
+     * base-dependent DERIVED identities disappear from the live graph until BASE is enabled again.
+     */
+    @Synchronized
+    fun setBaseKnowledgeEnabled(enabled: Boolean): Boolean {
+        if (baseKnowledge.isEnabled() == enabled) return true
+        if (baseCompatibilityOk) save()
+        if (!baseKnowledge.setEnabled(enabled)) return false
+        reloadFromDisk()
+        return true
+    }
+
     private fun workingClock(): Long = observations + readOnlyEvents
+
+    private fun profileOwnedMacroCount(): Int = (macros.size - mountedBaseMacroCount).coerceAtLeast(0)
 
     @Synchronized
     fun observe(id: Int, hz: Double) {
@@ -766,7 +803,7 @@ class MemoryModel(context: Context) {
     private fun feedTokenReadOnly(streamLevel: Int, modality: String, tokenId: Int) {
         if (cognitiveMode != CognitiveMode.PLAY) return
         val key = streamKey(streamLevel, modality)
-        val horizon = AdaptiveScalePolicy.patternHorizon(macros.size, workingClock())
+        val horizon = AdaptiveScalePolicy.patternHorizon(profileOwnedMacroCount(), workingClock())
         val buffer = readOnlyRolling.getOrPut(key) { ArrayDeque() }
         buffer.addLast(tokenId)
         while (buffer.size > horizon) buffer.removeFirst()
@@ -855,7 +892,7 @@ class MemoryModel(context: Context) {
         if (streamLevel == 0) hierarchyBaseInputTokens++
 
         val horizon = AdaptiveScalePolicy.patternHorizon(
-            macrosAtDepth = macros.size,
+            macrosAtDepth = profileOwnedMacroCount(),
             observationsAtDepth = streamPosition
         )
         val buffer = rolling.getOrPut(streamKey) { ArrayDeque() }
@@ -1002,6 +1039,40 @@ class MemoryModel(context: Context) {
         }
     }
 
+    /**
+     * Step 45 provenance rule: locally created knowledge is PERSONAL unless its actual
+     * composition bridges immutable BASE knowledge with profile-owned knowledge. Only then
+     * is it DERIVED. Tier/depth never participates in this decision.
+     */
+    private fun provenanceForLocalComposition(tokens: List<Int>): KnowledgeProvenance {
+        val childMacros = tokens.mapNotNull { macros[it] }
+        val hasBase = childMacros.any { it.origin == KnowledgeOrigin.BASE }
+        val hasProfileOwned = childMacros.any { it.origin != KnowledgeOrigin.BASE }
+        if (hasBase && installedBaseManifest.installed) {
+            requiredBasePackId = installedBaseManifest.packId
+            requiredBaseVersion = max(requiredBaseVersion, installedBaseManifest.version)
+        }
+        return if (hasBase && hasProfileOwned) {
+            KnowledgeProvenance(
+                origin = KnowledgeOrigin.DERIVED,
+                sourceMacroIds = childMacros.map { it.id }.distinct()
+            )
+        } else {
+            KnowledgeProvenance(
+                origin = KnowledgeOrigin.PERSONAL,
+                sourceMacroIds = childMacros.map { it.id }.distinct()
+            )
+        }
+    }
+
+    @Synchronized
+    fun knowledgeOriginOf(macroId: Int): KnowledgeOrigin? = macros[macroId]?.origin
+
+    @Synchronized
+    fun knowledgeProvenanceOf(macroId: Int): KnowledgeProvenance? = macros[macroId]?.let {
+        KnowledgeProvenance(it.origin, it.provenanceSources)
+    }
+
     private fun promoteCandidate(
         signature: String,
         candidate: PatternCandidate,
@@ -1010,6 +1081,8 @@ class MemoryModel(context: Context) {
         if (macroFrozen || macroBySignature.containsKey(signature)) return null
         if (candidate.streamLevel < 0) return null
 
+        if (nextMacroId >= KnowledgeIdSpace.BASE_MACRO_MIN) return null
+        val provenance = provenanceForLocalComposition(candidate.tokens)
         val macro = MacroCode(
             id = nextMacroId++,
             level = candidate.streamLevel + 1,
@@ -1018,7 +1091,9 @@ class MemoryModel(context: Context) {
             weight = candidate.hits,
             representativeHz = representativeHzForTokens(candidate.tokens),
             firstActivatedObservation = observations,
-            lastActivatedObservation = observations
+            lastActivatedObservation = observations,
+            origin = provenance.origin,
+            provenanceSources = provenance.sourceMacroIds
         )
         macros[macro.id] = macro
         macroBySignature[signature] = macro.id
@@ -1042,12 +1117,16 @@ class MemoryModel(context: Context) {
     }
 
     private fun activateMacro(macro: MacroCode) {
-        macro.weight++
-        updatePredictionPriorLeader(macro)
-        if (macro.firstActivatedObservation <= 0L) {
-            macro.firstActivatedObservation = observations
+        // BASE identity is immutable. Runtime activation still enters the working set, while
+        // local experience is recorded only in profile-owned relations/derived structures.
+        if (macro.origin != KnowledgeOrigin.BASE) {
+            macro.weight++
+            if (macro.firstActivatedObservation <= 0L) {
+                macro.firstActivatedObservation = observations
+            }
+            macro.lastActivatedObservation = observations
         }
-        macro.lastActivatedObservation = observations
+        updatePredictionPriorLeader(macro)
 
         decayAndPruneWorkingSet()
         currentExchanges.clear()
@@ -1230,15 +1309,20 @@ class MemoryModel(context: Context) {
     ): MacroCode? {
         crossModalByPair[signature]?.let { return macros[it] }
         val level = max(audio.level, visual.level) + 1
+        if (nextMacroId >= KnowledgeIdSpace.BASE_MACRO_MIN) return null
+        val jointTokens = listOf(audio.id, visual.id)
+        val provenance = provenanceForLocalComposition(jointTokens)
         val joint = MacroCode(
             id = nextMacroId++,
             level = level,
             modality = "crossmodal",
-            tokens = listOf(audio.id, visual.id),
+            tokens = jointTokens,
             weight = candidate.hits,
             representativeHz = audio.representativeHz,
             firstActivatedObservation = observations,
-            lastActivatedObservation = observations
+            lastActivatedObservation = observations,
+            origin = provenance.origin,
+            provenanceSources = provenance.sourceMacroIds
         )
         macros[joint.id] = joint
         updatePredictionPriorLeader(joint)
@@ -1260,10 +1344,12 @@ class MemoryModel(context: Context) {
      * stream, so repeated joint events can still form higher cross-modal temporal structure.
      */
     private fun activateCrossModalMacro(joint: MacroCode, supportConfidence: Double) {
-        joint.weight++
+        if (joint.origin != KnowledgeOrigin.BASE) {
+            joint.weight++
+            if (joint.firstActivatedObservation <= 0L) joint.firstActivatedObservation = observations
+            joint.lastActivatedObservation = observations
+        }
         updatePredictionPriorLeader(joint)
-        if (joint.firstActivatedObservation <= 0L) joint.firstActivatedObservation = observations
-        joint.lastActivatedObservation = observations
 
         val state = activeWorking.getOrPut(joint.id) {
             WorkingMacro(
@@ -1688,7 +1774,7 @@ class MemoryModel(context: Context) {
             }
         }
 
-        val target = AdaptiveScalePolicy.candidateSoftTarget(quants.size, macros.size)
+        val target = AdaptiveScalePolicy.candidateSoftTarget(quants.size, profileOwnedMacroCount())
         // Step 40 starts pressure cleanup before the temporary pool reaches 2x its soft target.
         // This is still a transient evidence budget, never a persistent-memory ceiling.
         val pressureTrigger = target + target / 2
@@ -2465,6 +2551,7 @@ class MemoryModel(context: Context) {
         val strongestSubstitutionSupport =
             substitutionClassesNow.maxOfOrNull { it.strongestPairSupport } ?: 0
         val storageStats = longTermStore.stats()
+        val baseStorageStats = baseKnowledge.store.stats()
         val routingIndexStats = hierarchyRouter.stats()
 
         return MemoryStats(
@@ -2570,10 +2657,17 @@ class MemoryModel(context: Context) {
             dreamRestarts = dreamRestarts,
             dreamLastMode = dreamLastMode,
             dreamCursorId = dreamPlaybackCursor ?: 0,
-            storageBackend = "indexed-binary",
-            storageBytes = storageStats.bytes,
+            baseKnowledgeMacros = macros.values.count { it.origin == KnowledgeOrigin.BASE },
+            personalKnowledgeMacros = macros.values.count { it.origin == KnowledgeOrigin.PERSONAL },
+            derivedKnowledgeMacros = macros.values.count { it.origin == KnowledgeOrigin.DERIVED },
+            basePackId = installedBaseManifest.packId,
+            basePackVersion = installedBaseManifest.version,
+            baseKnowledgeEnabled = baseKnowledge.isEnabled(),
+            baseCompatibilityOk = baseCompatibilityOk,
+            storageBackend = "layered-indexed-binary",
+            storageBytes = storageStats.bytes + baseStorageStats.bytes,
             storageDiskBackedMacros = macros.values.count { it.tokens.javaClass.name.contains("DiskTokenList") },
-            storageTokenReads = storageStats.tokenReads
+            storageTokenReads = storageStats.tokenReads + baseStorageStats.tokenReads
         )
     }
 
@@ -2603,6 +2697,12 @@ class MemoryModel(context: Context) {
         substitutionClassesCache = emptyList()
         substitutionClassesDirty = true
         macroRelations.clear()
+        baseRelationWeights.clear()
+        installedBaseManifest = BaseKnowledgeRepository.Manifest()
+        requiredBasePackId = ""
+        requiredBaseVersion = 0
+        baseCompatibilityOk = true
+        mountedBaseMacroCount = 0
         relationIndex.clear()
         activeWorking.clear()
         exchangeMemory.clear()
@@ -2695,6 +2795,12 @@ class MemoryModel(context: Context) {
         substitutionClassesCache = emptyList()
         substitutionClassesDirty = true
         macroRelations.clear()
+        baseRelationWeights.clear()
+        installedBaseManifest = BaseKnowledgeRepository.Manifest()
+        requiredBasePackId = ""
+        requiredBaseVersion = 0
+        baseCompatibilityOk = true
+        mountedBaseMacroCount = 0
         relationIndex.clear()
         activeWorking.clear()
         exchangeMemory.clear()
@@ -2756,12 +2862,20 @@ class MemoryModel(context: Context) {
         macroFrozen = false
         observations = 0L
         longTermStore.deleteAll()
+        knowledgeLayerStore.delete()
         if (legacyFile.exists()) legacyFile.delete()
+        // Reset means "blank personal layer", not "remove the installed app base".
+        load()
     }
 
     private fun save() {
+        // Never rewrite a profile through an incompatible base mount: quarantined macros are
+        // intentionally absent from the live graph but must remain byte-for-byte recoverable.
+        if (!baseCompatibilityOk && requiredBasePackId.isNotBlank()) return
         try {
-            val macroSnapshot = macros.values.map { m ->
+            // BASE is global/immutable and never copied into a profile checkpoint.
+            val personalMacros = macros.values.filter { it.origin != KnowledgeOrigin.BASE }
+            val macroSnapshot = personalMacros.map { m ->
                 IndexedLongTermStore.StoredMacro(
                     id = m.id,
                     level = m.level,
@@ -2779,10 +2893,18 @@ class MemoryModel(context: Context) {
                 )
             }
 
+            // A BASE relation is an immutable prior. If local experience reinforces it, only
+            // the positive PERSONAL delta is checkpointed in the profile store.
+            val personalRelations = macroRelations.mapNotNull { (key, weight) ->
+                val base = baseRelationWeights[key] ?: 0L
+                val delta = (weight - base).coerceAtLeast(0L)
+                if (delta > 0L) IndexedLongTermStore.StoredRelation(key, delta) else null
+            }
+
             val result = longTermStore.writeSnapshot(
                 meta = IndexedLongTermStore.Meta(
                     observations = observations,
-                    nextMacroId = nextMacroId,
+                    nextMacroId = nextMacroId.coerceIn(MACRO_ID_BASE, KnowledgeIdSpace.BASE_MACRO_MIN - 1),
                     macroFrozen = macroFrozen
                 ),
                 quants = quants.map { (id, q) ->
@@ -2795,17 +2917,24 @@ class MemoryModel(context: Context) {
                     )
                 },
                 macros = macroSnapshot,
-                relations = macroRelations.map { (key, weight) ->
-                    IndexedLongTermStore.StoredRelation(key, weight)
-                },
+                relations = personalRelations,
                 exchanges = exchangeMemory.map { (key, memory) ->
                     IndexedLongTermStore.StoredExchange(key, memory.ema, memory.samples)
                 }
             )
 
-            // Rebind every persistent macro to the just-written token index. The token arrays
-            // no longer need to remain resident after a checkpoint; reads become on-demand.
-            macros.values.forEach { macro ->
+            knowledgeLayerStore.write(
+                KnowledgeLayerStore.Snapshot(
+                    requiredBasePackId = requiredBasePackId,
+                    requiredBaseVersion = requiredBaseVersion,
+                    entries = personalMacros.associate { macro ->
+                        macro.id to KnowledgeProvenance(macro.origin, macro.provenanceSources)
+                    }
+                )
+            )
+
+            // Rebind profile-owned macros only. BASE token payload stays in the immutable base store.
+            personalMacros.forEach { macro ->
                 val location = result.macroLocations[macro.id] ?: return@forEach
                 macro.tokens = longTermStore.tokenList(location.offsetBytes, location.tokenCount)
             }
@@ -2814,26 +2943,83 @@ class MemoryModel(context: Context) {
     }
 
     private fun load() {
-        if (longTermStore.exists()) {
-            loadIndexedStore()
-            return
-        }
+        installedBaseManifest = baseKnowledge.manifest()
+        val layerSnapshot = knowledgeLayerStore.read()
+        requiredBasePackId = layerSnapshot.requiredBasePackId
+        requiredBaseVersion = layerSnapshot.requiredBaseVersion
 
-        // One-time compatibility path for Step 22 and earlier. After a successful parse the
-        // legacy JSON is immediately checkpointed into the indexed store and renamed.
-        if (legacyFile.exists() && loadLegacyJson()) {
+        if (baseKnowledge.isEnabled()) loadBaseLayer()
+
+        if (longTermStore.exists()) {
+            loadIndexedStore(layerSnapshot)
+        } else if (legacyFile.exists() && loadLegacyJson()) {
+            // Step 22-and-earlier profiles have no provenance sidecar; their learned macros
+            // are intentionally interpreted as PERSONAL and checkpointed in the new overlay.
             save()
             runCatching {
                 legacyFile.renameTo(File(legacyFile.parentFile, "equinox_v06_memory.migrated.json"))
             }
         }
+
+        baseCompatibilityOk = requiredBasePackId.isBlank() || (
+            baseKnowledge.isEnabled() &&
+                installedBaseManifest.installed &&
+                installedBaseManifest.packId == requiredBasePackId &&
+                installedBaseManifest.version >= requiredBaseVersion &&
+                installedBaseManifest.stableIds
+            )
+
+        if (!baseCompatibilityOk) quarantineBaseDependentProfileMacros()
+
+        // Build all derived indexes once after both layers have been mounted.
+        rebuildCrossModalIndex()
+        rebuildMacroCompositionIndex()
+        rebuildTemplateIndex()
+        rebuildPredictionPriorLeaders()
     }
 
-    private fun loadIndexedStore() {
+    private fun loadBaseLayer() {
+        if (!installedBaseManifest.installed || !baseKnowledge.store.exists()) return
+        try {
+            baseKnowledge.store.readMacroHeaders().forEach { h ->
+                if (!KnowledgeIdSpace.isBaseMacroId(h.id)) return@forEach
+                val macro = MacroCode(
+                    id = h.id,
+                    level = h.level.coerceAtLeast(1),
+                    modality = h.modality,
+                    tokens = baseKnowledge.store.tokenList(h.tokenOffsetBytes, h.tokenCount),
+                    weight = h.weight,
+                    representativeHz = h.hz,
+                    firstActivatedObservation = h.firstObs,
+                    lastActivatedObservation = h.lastObs,
+                    origin = KnowledgeOrigin.BASE
+                )
+                macros[macro.id] = macro
+                mountedBaseMacroCount++
+                macroBySignature[h.signature] = macro.id
+                hierarchyRouter.registerPersisted(
+                    sourceLevel = (macro.level - 1).coerceAtLeast(0),
+                    modality = macro.modality,
+                    signature = h.signature,
+                    macroId = macro.id,
+                    tokenCount = h.tokenCount
+                )
+            }
+            baseKnowledge.store.readRelations().forEach { r ->
+                baseRelationWeights[r.key] = r.weight
+                macroRelations[r.key] = r.weight
+                indexRelation(r.key)
+            }
+        } catch (_: Exception) {
+            // A broken base pack must not make a personal profile unreadable.
+        }
+    }
+
+    private fun loadIndexedStore(layerSnapshot: KnowledgeLayerStore.Snapshot) {
         try {
             val meta = longTermStore.readMeta() ?: return
             observations = meta.observations
-            nextMacroId = meta.nextMacroId
+            nextMacroId = meta.nextMacroId.coerceIn(MACRO_ID_BASE, KnowledgeIdSpace.BASE_MACRO_MIN - 1)
             macroFrozen = meta.macroFrozen
 
             longTermStore.readQuants().forEach { q ->
@@ -2846,6 +3032,10 @@ class MemoryModel(context: Context) {
             }
 
             longTermStore.readMacroHeaders().forEach { h ->
+                // Profile files never own the reserved BASE ID range.
+                if (KnowledgeIdSpace.isBaseMacroId(h.id)) return@forEach
+                val provenance = layerSnapshot.entries[h.id] ?: KnowledgeProvenance(KnowledgeOrigin.PERSONAL)
+                val origin = if (provenance.origin == KnowledgeOrigin.BASE) KnowledgeOrigin.PERSONAL else provenance.origin
                 val macro = MacroCode(
                     id = h.id,
                     level = h.level.coerceAtLeast(1),
@@ -2854,9 +3044,12 @@ class MemoryModel(context: Context) {
                     weight = h.weight,
                     representativeHz = h.hz,
                     firstActivatedObservation = h.firstObs,
-                    lastActivatedObservation = h.lastObs
+                    lastActivatedObservation = h.lastObs,
+                    origin = origin,
+                    provenanceSources = provenance.sourceMacroIds
                 )
                 macros[macro.id] = macro
+                // Profile-owned knowledge intentionally wins if the same signature exists in BASE.
                 macroBySignature[h.signature] = macro.id
                 hierarchyRouter.registerPersisted(
                     sourceLevel = (macro.level - 1).coerceAtLeast(0),
@@ -2865,18 +3058,11 @@ class MemoryModel(context: Context) {
                     macroId = macro.id,
                     tokenCount = h.tokenCount
                 )
-                nextMacroId = max(nextMacroId, macro.id + 1)
+                nextMacroId = max(nextMacroId, macro.id + 1).coerceAtMost(KnowledgeIdSpace.BASE_MACRO_MIN - 1)
             }
 
-            // These are compact runtime indexes. Rebuilding them scans token payload from disk
-            // but does not retain every token list in RAM.
-            rebuildCrossModalIndex()
-            rebuildMacroCompositionIndex()
-            rebuildTemplateIndex()
-            rebuildPredictionPriorLeaders()
-
             longTermStore.readRelations().forEach { r ->
-                macroRelations[r.key] = r.weight
+                macroRelations[r.key] = (macroRelations[r.key] ?: 0L) + r.weight
                 indexRelation(r.key)
             }
 
@@ -2884,6 +3070,30 @@ class MemoryModel(context: Context) {
                 exchangeMemory[e.key] = ExchangeMemory(e.ema, e.samples)
             }
         } catch (_: Exception) {
+        }
+    }
+
+    /**
+     * Keep incompatible DERIVED/base-dependent profile knowledge on disk, but do not mount it
+     * into the live graph until the matching stable-ID base pack is available again.
+     */
+    private fun quarantineBaseDependentProfileMacros() {
+        val remove = macros.values
+            .filter { it.origin != KnowledgeOrigin.BASE }
+            .filter { macro -> macro.provenanceSources.any(KnowledgeIdSpace::isBaseMacroId) }
+            .mapTo(linkedSetOf()) { it.id }
+        if (remove.isEmpty()) return
+        remove.forEach { id ->
+            val macro = macros.remove(id) ?: return@forEach
+            val signature = patternSignature((macro.level - 1).coerceAtLeast(0), macro.modality, macro.tokens)
+            if (macroBySignature[signature] == id) macroBySignature.remove(signature)
+        }
+        macroRelations.entries.removeIf { (key, _) -> keyFrom(key) in remove || keyTo(key) in remove }
+        relationIndex.clear()
+        macroRelations.keys.forEach(::indexRelation)
+        hierarchyRouter.clear()
+        macros.values.forEach { macro ->
+            hierarchyRouter.registerTokens((macro.level - 1).coerceAtLeast(0), macro.modality, macro.tokens, macro.id)
         }
     }
 
@@ -3328,12 +3538,17 @@ class MemoryModel(context: Context) {
             val groupLevel = group.maxOfOrNull { it.level } ?: 1
             val targetForGroup = MemoryCompetitionPolicy.targetMacrosForStream(observations, groupLevel)
             val pressureLimit = MemoryCompetitionPolicy.pressureMacrosForStream(observations, groupLevel)
-            val pressure = group.size > pressureLimit
+            val profileGroupSize = group.count { it.origin != KnowledgeOrigin.BASE }
+            val pressure = profileGroupSize > pressureLimit
             if (pressure) pressuredGroups++
 
             val candidatesForGroup = ArrayList<Candidate>()
             for (macro in group) {
                 examined++
+                if (macro.origin == KnowledgeOrigin.BASE) {
+                    protectedCount++
+                    continue
+                }
                 val relationKeys = relationIndex[macro.id].orEmpty()
                 val relationWeights = relationKeys.mapNotNull { macroRelations[it] }
                 val relationMass = relationWeights.sum()
@@ -3357,7 +3572,7 @@ class MemoryModel(context: Context) {
             }
 
             if (candidatesForGroup.isEmpty()) continue
-            val pressureNeed = (group.size - targetForGroup).coerceAtLeast(0)
+            val pressureNeed = (profileGroupSize - targetForGroup).coerceAtLeast(0)
             val budget = if (pressure) {
                 pressureNeed
             } else if (force) {
@@ -3473,10 +3688,21 @@ class MemoryModel(context: Context) {
         // pressure policy, not a semantic relation-count ceiling.
         val relationTarget = max(1_024, macros.size * 8 + activeWorking.size * 12)
         if (macroRelations.size > relationTarget * 2) {
-            val keep = macroRelations.entries.sortedByDescending { it.value }.take(relationTarget)
+            val baseKeys = baseRelationWeights.keys
+            val personalBudget = (relationTarget - baseKeys.size).coerceAtLeast(0)
+            val keepPersonal = macroRelations.entries
+                .asSequence()
+                .filter { it.key !in baseKeys }
+                .sortedByDescending { it.value }
+                .take(personalBudget)
+                .toList()
             macroRelations.clear()
             relationIndex.clear()
-            keep.forEach {
+            baseRelationWeights.forEach { (key, weight) ->
+                macroRelations[key] = weight
+                indexRelation(key)
+            }
+            keepPersonal.forEach {
                 macroRelations[it.key] = it.value
                 indexRelation(it.key)
             }

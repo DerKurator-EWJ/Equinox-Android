@@ -79,6 +79,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-v06-step42-learnplaydream` | `Equinox_v06_Step42_LearnPlayDream.zip` | 65 | 0 | `f21c5702bc2b8de073d92ba016d6c036c75d0d809d7b1e6757cea9bbcc928678` |
 | `android-v06-step43-hypnomode` | `Equinox_v06_Step43_HypnoMode.zip` | 66 | 0 | `34b544f5b79de5f4bf7d6e2cd40ff17af29951b340d7ee7c010cdcdd47833c89` |
 | `android-v06-step44-hypnoavsync` | `Equinox_v06_Step44_HypnoAVSync.zip` | 68 | 0 | `f45d72dc705c7cb08c12277b9c41c52ed537cc54b23f3dfdf1382e2933f2cd2d` |
+| `android-v06-step45-knowledgelayers` | `Equinox_v06_Step45_KnowledgeLayers.zip` | 72 | 0 | `0eae9a3275899616d45659dd9f54533a9148a9868d252099dba754773c0c5bb2` |
 
 ## Security, licensing, and limitations
 

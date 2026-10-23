@@ -965,6 +965,34 @@ class MainActivity : ComponentActivity() {
             }
         }, buttonParams(6))
 
+        memoryPage.addView(label("KNOWLEDGE BASE", 16f, 18).apply {
+            setTextColor(Color.rgb(233, 211, 143))
+        })
+        memoryPage.addView(label(
+            "BASE ist global und unveränderlich; PERSONAL/DERIVED liegen im Profil. BASE AUS + NEW ergibt einen echten Start von Null.",
+            12f, 5
+        ).apply { setTextColor(Color.LTGRAY) })
+        memoryPage.addView(CheckBox(this).apply {
+            text = "BASE KNOWLEDGE aktiv"
+            setTextColor(Color.WHITE)
+            isChecked = memory.baseKnowledgeEnabled()
+            setOnCheckedChangeListener { _, enabled ->
+                stopMemoryPlayback(clear = false)
+                stopAudio()
+                stopCameraLearning()
+                stopHybridPlayback(clear = false)
+                memory.setCognitiveMode(CognitiveMode.PLAY)
+                val ok = memory.setBaseKnowledgeEnabled(enabled)
+                if (!ok) {
+                    setOnCheckedChangeListener(null)
+                    isChecked = memory.baseKnowledgeEnabled()
+                }
+                syncCognitiveModeUi()
+                refreshMemoryPage()
+                updateMemoryStats()
+            }
+        })
+
         memoryPage.addView(label("MEMORY PROFILES", 16f, 18).apply {
             setTextColor(Color.rgb(233, 211, 143))
         })
@@ -2481,6 +2509,7 @@ class MainActivity : ComponentActivity() {
             "Vision: adaptive ${s.adaptiveVisualCodes} Q/${s.adaptiveVisualMacros} M · visuell gesamt ${s.visualPersistentCodes} Q\n" +
             "Crossmodal: ${s.crossModalMacros} Makros · ${s.crossModalCandidates} Kandidaten · Aktivierungen ${s.crossModalActivations} · stärkster Kandidat ${s.strongestCrossModalSupport}/4\n" +
             "Makros: ${s.macroCodes} | $levelText | Relationen: ${s.macroRelations}\n" +
+            "Knowledge Layers: BASE ${s.baseKnowledgeMacros} · PERSONAL ${s.personalKnowledgeMacros} · DERIVED ${s.derivedKnowledgeMacros} | Base ${if (s.basePackId.isBlank()) "—" else s.basePackId + " v" + s.basePackVersion} · ${if (s.baseKnowledgeEnabled) "AN" else "AUS/BLANK"} | kompatibel ${if (s.baseCompatibilityOk) "ja" else "NEIN"}\n" +
             "Working Set: ${s.activeMacros} | erinnert: ${s.retrievedMacros} | Austausch: ${s.overexchangePairs} | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
             "Recall Hardening: ${s.recallRetrieved}/${s.recallCandidates} materialisiert · verworfen ${s.recallRejected} · InfoGain Ø ${"%.3f".format(s.recallMeanInformationGain)} · Recall-Faktor ${"%.2f".format(s.recallFactor)} · schwach verfallen ${s.weakCandidatesExpired}\n" +
             "Predictive Recall: ${s.predictionRawCandidates}→${s.predictionCandidates} Kandidaten | Top ${"%.3f".format(s.predictionTopConfidence)} | Coverage ${s.predictionHits}/${s.predictionChecks} (${"%.1f".format(s.predictionHitRate * 100.0)}%) | Top-1 ${s.predictionTop1Hits}/${s.predictionTop1Checks} (${"%.1f".format(s.predictionTop1HitRate * 100.0)}%) vs Baseline ${"%.1f".format(s.predictionBaselineHitRate * 100.0)}% | Lift ${if (s.predictionLift >= 0.0) "+" else ""}${"%.1f".format(s.predictionLift * 100.0)} pp\n" +
