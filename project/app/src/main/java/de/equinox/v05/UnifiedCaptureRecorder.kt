@@ -25,7 +25,7 @@ import kotlin.math.max
 /**
  * Step 36 — one capture path for the same Unified Canvas and the same generated orchestra.
  *
- * Video is captured from Android's MediaProjection into H.264. Orchestra PCM is tapped
+ * Video is captured from Android's MediaProjection into H.264. Unified Audio PCM is tapped
  * before AudioTrack, encoded to AAC, and muxed into the same MP4. No camera/raw-memory
  * data is exported separately and recording never writes back into MemoryModel.
  */

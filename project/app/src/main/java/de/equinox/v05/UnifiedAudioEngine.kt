@@ -7,19 +7,22 @@ import kotlin.concurrent.thread
 import kotlin.math.max
 
 /**
- * Step 21: continuous generative orchestra.
+ * Step 41: the single hardware-audio owner for Equinox.
  *
- * The output is synthesized directly from the active Equinox state. It is not a sample
- * player and it never writes back into MemoryModel. The same WorkingSetSnapshot can
- * therefore be rendered, muted or replaced without changing learning.
+ * LIVE, MEMORY preview, LAB preview and recording all use this engine. Other audio
+ * helpers may construct read-only scenes/PCM descriptions, but no second class is
+ * allowed to own an AudioTrack. The engine never writes into MemoryModel.
  */
-class ContinuousOrchestraEngine {
+class UnifiedAudioEngine {
     companion object {
         const val SAMPLE_RATE = 48_000
-        private const val CHUNK_SAMPLES = 960 // 20 ms @ 48 kHz
+        private const val CHUNK_SAMPLES = 960 // 20 ms
     }
 
+    private enum class PlaybackMode { CONTINUOUS, FINITE }
+
     @Volatile private var running = false
+    @Volatile private var mode = PlaybackMode.CONTINUOUS
     @Volatile private var latestSound = SonificationSnapshot(emptyList(), emptyList())
     @Volatile private var latestWorking = WorkingSetSnapshot(emptyList(), emptyList())
     @Volatile private var suppressionHz = DoubleArray(0)
@@ -32,17 +35,13 @@ class ContinuousOrchestraEngine {
     private var track: AudioTrack? = null
 
     fun isRunning(): Boolean = running
+    fun isContinuous(): Boolean = running && mode == PlaybackMode.CONTINUOUS
     fun voiceCount(): Int = activeVoiceCount
     fun sceneSummary(): String = latestSummary
 
-    /** Same continuous Reality ↔ Memory state as the unified GPU canvas. */
     fun setMemoryBlend(value: Float) { memoryBlend = value.coerceIn(0f, 1f).toDouble() }
     fun memoryBlend(): Double = memoryBlend
-
-    /** Read-only PCM tap used by the export recorder. The recorder must copy the array immediately. */
     fun setPcmTap(tap: ((ShortArray) -> Unit)?) { pcmTap = tap }
-
-    /** Frequencies currently synthesized, including important members/harmonics. */
     fun suppressionFrequencies(): DoubleArray = suppressionHz.copyOf()
 
     fun updateState(sound: SonificationSnapshot, working: WorkingSetSnapshot) {
@@ -50,10 +49,36 @@ class ContinuousOrchestraEngine {
         latestWorking = working
     }
 
+    /** Continuous product audio: follows the same changing state as the GPU surface. */
     fun start(onState: (String) -> Unit) {
-        if (running) return
+        if (running && mode == PlaybackMode.CONTINUOUS) return
+        stop()
+        mode = PlaybackMode.CONTINUOUS
+        launch(onState, finiteSamples = null)
+    }
+
+    /** Finite read-only preview for MEMORY/LAB, through the exact same synth + AudioTrack. */
+    fun playFinite(
+        sound: SonificationSnapshot,
+        working: WorkingSetSnapshot = WorkingSetSnapshot(emptyList(), emptyList()),
+        durationSeconds: Double = 8.0,
+        previewBlend: Double = 1.0,
+        onState: (String) -> Unit
+    ) {
+        stop()
+        latestSound = sound
+        latestWorking = working
+        mode = PlaybackMode.FINITE
+        val samples = (SAMPLE_RATE * durationSeconds.coerceIn(0.5, 30.0)).toLong()
+        launch(onState, finiteSamples = samples, fixedBlend = previewBlend.coerceIn(0.0, 1.0))
+    }
+
+    fun playFinite(state: EngineOutputState, onState: (String) -> Unit) =
+        playFinite(state.sound, state.working, onState = onState)
+
+    private fun launch(onState: (String) -> Unit, finiteSamples: Long?, fixedBlend: Double? = null) {
         running = true
-        worker = thread(name = "EquinoxGenerativeOrchestra") {
+        worker = thread(name = "EquinoxUnifiedAudio") {
             val synth = GenerativeOrchestraSynth(SAMPLE_RATE)
             try {
                 val minBuffer = AudioTrack.getMinBufferSize(
@@ -82,28 +107,36 @@ class ContinuousOrchestraEngine {
 
                 track = audioTrack
                 audioTrack.play()
-                onState("Generative Orchestra: AKTIV")
+                onState(if (mode == PlaybackMode.CONTINUOUS) "Unified Audio: AKTIV" else "Unified Audio: PREVIEW")
 
+                var rendered = 0L
                 var lastStatusAt = 0L
-                while (running) {
-                    val scene = GenerativeOrchestraSceneBuilder.build(latestSound, latestWorking, memoryBlend = memoryBlend)
+                while (running && (finiteSamples == null || rendered < finiteSamples)) {
+                    val count = if (finiteSamples == null) CHUNK_SAMPLES
+                    else minOf(CHUNK_SAMPLES.toLong(), finiteSamples - rendered).toInt()
+                    if (count <= 0) break
+                    val scene = GenerativeOrchestraSceneBuilder.build(
+                        latestSound,
+                        latestWorking,
+                        memoryBlend = fixedBlend ?: memoryBlend
+                    )
                     activeVoiceCount = scene.voices.size
                     latestSummary = scene.compactSummary()
                     suppressionHz = synth.suppressionFrequencies(scene)
-
-                    val pcm = synth.render(scene, CHUNK_SAMPLES)
+                    val pcm = synth.render(scene, count)
                     if (!running) break
                     try { pcmTap?.invoke(pcm) } catch (_: Exception) { }
                     audioTrack.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+                    rendered += pcm.size
 
                     val now = System.currentTimeMillis()
                     if (now - lastStatusAt > 900L) {
                         lastStatusAt = now
-                        onState("Generative Orchestra: ${scene.compactSummary()}")
+                        onState("Unified Audio: ${scene.compactSummary()}")
                     }
                 }
             } catch (e: Exception) {
-                if (running) onState("Generative Orchestra: Fehler ${e.javaClass.simpleName}")
+                if (running) onState("Unified Audio: Fehler ${e.javaClass.simpleName}")
             } finally {
                 running = false
                 activeVoiceCount = 0
@@ -114,7 +147,7 @@ class ContinuousOrchestraEngine {
                 try { track?.stop() } catch (_: Exception) { }
                 try { track?.release() } catch (_: Exception) { }
                 track = null
-                onState("Generative Orchestra: AUS")
+                onState("Unified Audio: AUS")
             }
         }
     }

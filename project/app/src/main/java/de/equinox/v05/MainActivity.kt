@@ -81,6 +81,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var settingsSheet: FrameLayout
     private lateinit var captureRecorder: UnifiedCaptureRecorder
     private lateinit var captureButton: TextView
+    private lateinit var productAudioButton: TextView
     private lateinit var captureStatus: TextView
     private val capturePermissionLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
@@ -151,9 +152,8 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var memory: MemoryModel
     private lateinit var outputBridge: EngineOutputBridge
-    private val sonifier = Sonifier()
-    private val orchestra = OrchestraSonifier()
-    private val continuousOrchestra = ContinuousOrchestraEngine()
+    // Step 41: exactly one engine owns AudioTrack for every Equinox output mode.
+    private val unifiedAudio = UnifiedAudioEngine()
     private val selfOutputSuppressor = AudioSelfOutputSuppressor(SAMPLE_RATE)
     private var echoCanceler: AcousticEchoCanceler? = null
     @Volatile private var feedbackProtectionEnabled = true
@@ -214,9 +214,9 @@ class MainActivity : ComponentActivity() {
             refreshMemoryPage()
             updateMemoryStats()
 
-            if (::memoryAutoOrchestra.isInitialized && memoryAutoOrchestra.isChecked && !orchestra.isPlaying()) {
+            if (::memoryAutoOrchestra.isInitialized && memoryAutoOrchestra.isChecked && !unifiedAudio.isRunning()) {
                 val state = outputBridge.snapshot()
-                orchestra.play(state) { text ->
+                unifiedAudio.playFinite(state) { text ->
                     runOnUiThread { if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = text }
                 }
             }
@@ -239,9 +239,9 @@ class MainActivity : ComponentActivity() {
             refreshMemoryPage()
             updateMemoryStats()
 
-            if (::memoryAutoOrchestra.isInitialized && memoryAutoOrchestra.isChecked && !orchestra.isPlaying()) {
+            if (::memoryAutoOrchestra.isInitialized && memoryAutoOrchestra.isChecked && !unifiedAudio.isRunning()) {
                 val state = outputBridge.snapshot()
-                orchestra.play(state) { text ->
+                unifiedAudio.playFinite(state) { text ->
                     runOnUiThread { if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = text }
                 }
             }
@@ -257,7 +257,7 @@ class MainActivity : ComponentActivity() {
             val ok = memory.hybridPlaybackStep()
             refreshHybridPage(ok)
             updateMemoryStats()
-            if (continuousOrchestra.isRunning()) pushContinuousOrchestraState()
+            if (unifiedAudio.isRunning()) pushContinuousOrchestraState()
             uiHandler.postDelayed(this, HYBRID_STEP_MS)
         }
     }
@@ -301,7 +301,7 @@ class MainActivity : ComponentActivity() {
         surfaceVideo = GpuMemoryVideoView(this).apply {
             setModeLabel("UNIFIED")
             setMemoryBlend(0.35f)
-            continuousOrchestra.setMemoryBlend(0.35f)
+            unifiedAudio.setMemoryBlend(0.35f)
             visibility = View.VISIBLE
         }
         rootFrame.addView(surfaceVideo, FrameLayout.LayoutParams(
@@ -336,6 +336,17 @@ class MainActivity : ComponentActivity() {
             setTextColor(Color.rgb(233, 211, 143))
             gravity = Gravity.CENTER
         }
+        productAudioButton = TextView(this).apply {
+            text = "♪"
+            textSize = 21f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = roundedBackground(Color.argb(64, 255, 255, 255), 18f)
+            isClickable = true
+            isFocusable = true
+            contentDescription = "Unified Audio an oder aus"
+            attachPressMotion(this)
+        }
         captureButton = TextView(this).apply {
             text = "REC"
             textSize = 11f
@@ -360,6 +371,7 @@ class MainActivity : ComponentActivity() {
         controlBar.addView(realityLabel, LinearLayout.LayoutParams(dp(58), dp(48)))
         controlBar.addView(blendSlider, LinearLayout.LayoutParams(0, dp(48), 1f))
         controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(78), dp(48)))
+        controlBar.addView(productAudioButton, LinearLayout.LayoutParams(dp(54), dp(48)))
         controlBar.addView(captureButton, LinearLayout.LayoutParams(dp(54), dp(48)))
         controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(54), dp(48)))
         val controlBarParams = FrameLayout.LayoutParams(
@@ -444,10 +456,10 @@ class MainActivity : ComponentActivity() {
         })
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 37 — MEMORY PROFILES / PORTABLE IDENTITIES", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 41 — UNIFIED AUDIO / MACRO VOICES", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
-        captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Orchestra AAC", 12f, 4).apply {
+        captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Unified Audio AAC", 12f, 4).apply {
             setTextColor(Color.rgb(214, 177, 116))
         }
         settingsRoot.addView(captureStatus)
@@ -539,7 +551,7 @@ class MainActivity : ComponentActivity() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 val blend = progress.coerceIn(0, 100) / 100f
                 surfaceVideo.setMemoryBlend(blend)
-                continuousOrchestra.setMemoryBlend(blend)
+                unifiedAudio.setMemoryBlend(blend)
                 memoryLabel.text = "MEMORY ${progress.coerceIn(0, 100)}%"
                 refreshGraph()
             }
@@ -551,6 +563,7 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+        productAudioButton.setOnClickListener { toggleContinuousOrchestra() }
         captureButton.setOnClickListener {
             if (captureRecorder.isRecording()) {
                 stopUnifiedCapture()
@@ -695,7 +708,7 @@ class MainActivity : ComponentActivity() {
             LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(300)).apply { topMargin = dp(12) }
         )
 
-        liveOrchestraStatus = label("Generative Orchestra: AUS", 13f, 10).apply {
+        liveOrchestraStatus = label("Unified Audio: AUS", 13f, 10).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         livePage.addView(liveOrchestraStatus)
@@ -707,7 +720,7 @@ class MainActivity : ComponentActivity() {
         }
         livePage.addView(liveFeedbackProtectionToggle)
         liveContinuousButton = Button(this).apply {
-            text = "GENERATIVE ORCHESTRA START"
+            text = "AUDIO START"
             setOnClickListener { toggleContinuousOrchestra() }
         }
         livePage.addView(liveContinuousButton, buttonParams(6))
@@ -791,7 +804,7 @@ class MainActivity : ComponentActivity() {
         }, weightedButtonParams())
         hybridPage.addView(row, buttonParams(10))
 
-        hybridOrchestraStatus = label("Generative Orchestra: AUS", 13f, 10).apply {
+        hybridOrchestraStatus = label("Unified Audio: AUS", 13f, 10).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         hybridPage.addView(hybridOrchestraStatus)
@@ -803,7 +816,7 @@ class MainActivity : ComponentActivity() {
         }
         hybridPage.addView(hybridFeedbackProtectionToggle)
         hybridContinuousButton = Button(this).apply {
-            text = "GENERATIVE ORCHESTRA START"
+            text = "AUDIO START"
             setOnClickListener { toggleContinuousOrchestra() }
         }
         hybridPage.addView(hybridContinuousButton, buttonParams(6))
@@ -896,17 +909,17 @@ class MainActivity : ComponentActivity() {
         }
         memoryPage.addView(memoryAutoOrchestra)
 
-        memoryOrchestraStatus = label("Generative Orchestra: AUS", 13f, 8).apply {
+        memoryOrchestraStatus = label("Unified Audio: AUS", 13f, 8).apply {
             setTextColor(Color.rgb(125, 220, 255))
         }
         memoryPage.addView(memoryOrchestraStatus)
 
         memoryPage.addView(Button(this).apply {
-            text = "MEMORY ALS ORCHESTER SPIELEN"
+            text = "MEMORY AUDIO PREVIEW"
             setOnClickListener {
-                sonifier.stop()
+                unifiedAudio.stop()
                 val state = outputBridge.snapshot()
-                orchestra.play(state) { text -> runOnUiThread { memoryOrchestraStatus.text = text } }
+                unifiedAudio.playFinite(state) { text -> runOnUiThread { memoryOrchestraStatus.text = text } }
             }
         }, buttonParams(6))
 
@@ -1064,7 +1077,7 @@ class MainActivity : ComponentActivity() {
         stopMemoryPlayback(clear = true)
         stopDreamPlayback(clear = true)
         if (hybridPlaybackRunning) stopHybridPlayback(clear = true)
-        if (continuousOrchestra.isRunning()) continuousOrchestra.stop()
+        if (unifiedAudio.isRunning()) unifiedAudio.stop()
     }
 
     /** Reloads only learned identity; UI/display preferences remain untouched. */
@@ -1479,32 +1492,32 @@ class MainActivity : ComponentActivity() {
             text = "GEDÄCHTNIS HÖRBAR MACHEN"
             setOnClickListener {
                 if (running) stopAudio()
-                val snap = outputBridge.snapshot().sound
-                sonifier.play(snap) { text -> runOnUiThread { sonificationStatus.text = text } }
+                val state = outputBridge.snapshot()
+                unifiedAudio.playFinite(state) { text -> runOnUiThread { sonificationStatus.text = text } }
             }
         }, buttonParams(6))
         labPage.addView(Button(this).apply {
             text = "KLANG STOPP"
-            setOnClickListener { sonifier.stop(); sonificationStatus.text = "Sonifikation: AUS" }
+            setOnClickListener { unifiedAudio.stop(); sonificationStatus.text = "Sonifikation: AUS" }
         }, buttonParams(6))
 
         labOrchestraStatus = label("Orchester: AUS", 13f, 10).apply { setTextColor(Color.rgb(125, 220, 255)) }
         labPage.addView(labOrchestraStatus)
         labPage.addView(Button(this).apply {
-            text = "AKTIVEN STATE ALS ORCHESTER"
+            text = "STATE AUDIO PREVIEW"
             setOnClickListener {
                 if (running) stopAudio()
-                sonifier.stop()
+                unifiedAudio.stop()
                 val state = outputBridge.snapshot()
-                orchestra.play(state) { text -> runOnUiThread { labOrchestraStatus.text = text } }
+                unifiedAudio.playFinite(state) { text -> runOnUiThread { labOrchestraStatus.text = text } }
             }
         }, buttonParams(6))
         labPage.addView(Button(this).apply {
-            text = "ORCHESTER STOPP"
+            text = "AUDIO PREVIEW STOPP"
             setOnClickListener {
-                orchestra.stop()
+                unifiedAudio.stop()
                 labOrchestraStatus.text = "Orchester: AUS"
-                if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = "Generative Orchestra: AUS"
+                if (::memoryOrchestraStatus.isInitialized) memoryOrchestraStatus.text = "Unified Audio: AUS"
                 if (::liveOrchestraStatus.isInitialized) liveOrchestraStatus.text = "Live-Orchester: AUS"
             }
         }, buttonParams(6))
@@ -1539,7 +1552,7 @@ class MainActivity : ComponentActivity() {
             AppPage.LIVE -> {
                 stopMemoryPlayback(clear = true)
                 stopHybridPlayback(clear = false)
-                orchestra.stop()
+                unifiedAudio.stop()
                 hybridPage.visibility = View.GONE
                 memoryPage.visibility = View.GONE
                 labPage.visibility = View.GONE
@@ -1547,7 +1560,7 @@ class MainActivity : ComponentActivity() {
             }
             AppPage.HYBRID -> {
                 stopMemoryPlayback(clear = false)
-                orchestra.stop()
+                unifiedAudio.stop()
                 livePage.visibility = View.GONE
                 memoryPage.visibility = View.GONE
                 labPage.visibility = View.GONE
@@ -1559,8 +1572,7 @@ class MainActivity : ComponentActivity() {
                 stopHybridPlayback(clear = true)
                 stopAudio()
                 stopCameraLearning()
-                sonifier.stop()
-                orchestra.stop()
+                unifiedAudio.stop()
                 stopContinuousOrchestra()
                 memory.clearMomentaryState()
                 livePage.visibility = View.GONE
@@ -1645,7 +1657,7 @@ class MainActivity : ComponentActivity() {
         }
         stopAudio()
         stopCameraLearning()
-        sonifier.stop()
+        unifiedAudio.stop()
         stopContinuousOrchestra()
         stopDreamPlayback(clear = false)
         if (!memoryPlaybackRunning) {
@@ -1677,7 +1689,7 @@ class MainActivity : ComponentActivity() {
         }
         stopAudio()
         stopCameraLearning()
-        sonifier.stop()
+        unifiedAudio.stop()
         stopContinuousOrchestra()
         stopMemoryPlayback(clear = false)
         dreamPlaybackRunning = true
@@ -1786,7 +1798,7 @@ class MainActivity : ComponentActivity() {
     private fun startUnifiedCapture(resultCode: Int, data: android.content.Intent) {
         if (captureRecorder.isRecording()) return
         val metrics = resources.displayMetrics
-        continuousOrchestra.setPcmTap { pcm -> captureRecorder.offerPcm(pcm) }
+        unifiedAudio.setPcmTap { pcm -> captureRecorder.offerPcm(pcm) }
         captureButton.text = "■"
         captureButton.setTextColor(Color.rgb(255, 92, 92))
         captureRecorder.start(
@@ -1799,7 +1811,7 @@ class MainActivity : ComponentActivity() {
                 if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: $text"
             } },
             onFinished = { result -> runOnUiThread {
-                continuousOrchestra.setPcmTap(null)
+                unifiedAudio.setPcmTap(null)
                 CaptureForegroundService.stop(this)
                 captureButton.text = "REC"
                 captureButton.setTextColor(Color.rgb(255, 112, 112))
@@ -1819,7 +1831,7 @@ class MainActivity : ComponentActivity() {
         captureRecorder.stop(
             onState = { text -> runOnUiThread { if (::captureStatus.isInitialized) captureStatus.text = "Aufnahme: $text" } },
             onFinished = { result -> runOnUiThread {
-                continuousOrchestra.setPcmTap(null)
+                unifiedAudio.setPcmTap(null)
                 CaptureForegroundService.stop(this)
                 captureButton.text = "REC"
                 captureButton.setTextColor(Color.rgb(255, 112, 112))
@@ -1833,12 +1845,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleContinuousOrchestra() {
-        if (continuousOrchestra.isRunning()) {
+        if (unifiedAudio.isRunning()) {
             stopContinuousOrchestra()
         } else {
-            sonifier.stop()
-            orchestra.stop()
-            continuousOrchestra.start { text ->
+            unifiedAudio.stop()
+            unifiedAudio.start { text ->
                 runOnUiThread {
                     updateContinuousOrchestraUi(text)
                     updateEchoCancelerState()
@@ -1846,21 +1857,21 @@ class MainActivity : ComponentActivity() {
             }
             pushContinuousOrchestraState()
             updateEchoCancelerState()
-            updateContinuousOrchestraUi("Generative Orchestra: STARTET …")
+            updateContinuousOrchestraUi("Unified Audio: STARTET …")
         }
     }
 
     private fun stopContinuousOrchestra() {
-        if (continuousOrchestra.isRunning()) continuousOrchestra.stop()
+        if (unifiedAudio.isRunning()) unifiedAudio.stop()
         updateEchoCancelerState()
-        updateContinuousOrchestraUi("Generative Orchestra: AUS")
+        updateContinuousOrchestraUi("Unified Audio: AUS")
     }
 
     private fun pushContinuousOrchestraState() {
-        if (!continuousOrchestra.isRunning()) return
+        if (!unifiedAudio.isRunning()) return
         val sound = memory.sonificationSnapshot(maxMicro = 0, maxMacros = 12)
         val working = memory.workingSetSnapshot()
-        continuousOrchestra.updateState(sound, working)
+        unifiedAudio.updateState(sound, working)
     }
 
     private fun updateContinuousOrchestraUi(text: String) {
@@ -1871,8 +1882,12 @@ class MainActivity : ComponentActivity() {
         val full = text + guard
         if (::liveOrchestraStatus.isInitialized) liveOrchestraStatus.text = full
         if (::hybridOrchestraStatus.isInitialized) hybridOrchestraStatus.text = full
-        if (::liveContinuousButton.isInitialized) liveContinuousButton.text = if (continuousOrchestra.isRunning()) "GENERATIVE ORCHESTRA STOP" else "GENERATIVE ORCHESTRA START"
-        if (::hybridContinuousButton.isInitialized) hybridContinuousButton.text = if (continuousOrchestra.isRunning()) "GENERATIVE ORCHESTRA STOP" else "GENERATIVE ORCHESTRA START"
+        if (::productAudioButton.isInitialized) {
+            productAudioButton.text = if (unifiedAudio.isRunning()) "■" else "♪"
+            productAudioButton.setTextColor(if (unifiedAudio.isRunning()) Color.rgb(125, 220, 255) else Color.WHITE)
+        }
+        if (::liveContinuousButton.isInitialized) liveContinuousButton.text = if (unifiedAudio.isRunning()) "AUDIO STOP" else "AUDIO START"
+        if (::hybridContinuousButton.isInitialized) hybridContinuousButton.text = if (unifiedAudio.isRunning()) "AUDIO STOP" else "AUDIO START"
     }
 
     private fun setFeedbackProtection(enabled: Boolean) {
@@ -1886,7 +1901,7 @@ class MainActivity : ComponentActivity() {
             feedbackUiSyncing = false
         }
         updateEchoCancelerState()
-        updateContinuousOrchestraUi(if (continuousOrchestra.isRunning()) "Generative Orchestra: ${continuousOrchestra.sceneSummary()}" else "Generative Orchestra: AUS")
+        updateContinuousOrchestraUi(if (unifiedAudio.isRunning()) "Unified Audio: ${unifiedAudio.sceneSummary()}" else "Unified Audio: AUS")
     }
 
     private fun setupEchoCanceler(recorder: AudioRecord) {
@@ -1897,7 +1912,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun updateEchoCancelerState() {
-        val shouldEnable = feedbackProtectionEnabled && continuousOrchestra.isRunning()
+        val shouldEnable = feedbackProtectionEnabled && unifiedAudio.isRunning()
         try { echoCanceler?.enabled = shouldEnable } catch (_: Exception) { }
     }
 
@@ -1991,8 +2006,8 @@ class MainActivity : ComponentActivity() {
                 if (!running || offset < FFT_SIZE) continue
 
                 frameCount++
-                val selfGuard = if (feedbackProtectionEnabled && continuousOrchestra.isRunning()) {
-                    selfOutputSuppressor.suppress(frame, continuousOrchestra.suppressionFrequencies())
+                val selfGuard = if (feedbackProtectionEnabled && unifiedAudio.isRunning()) {
+                    selfOutputSuppressor.suppress(frame, unifiedAudio.suppressionFrequencies())
                 } else null
                 val analysisFrame = selfGuard?.samples ?: frame
                 if (selfGuard != null) {
@@ -2096,7 +2111,7 @@ class MainActivity : ComponentActivity() {
                     strengthText += " · SelfGuard ${selfGuard.removedComponents} Komp. / ${"%.1f".format(selfGuard.removedRmsRatio * 100.0)}% RMS"
                 }
 
-                if (continuousOrchestra.isRunning() && frameCount % 2L == 0L) {
+                if (unifiedAudio.isRunning() && frameCount % 2L == 0L) {
                     pushContinuousOrchestraState()
                 }
 
@@ -2510,10 +2525,9 @@ class MainActivity : ComponentActivity() {
         stopCameraLearning()
         try { cameraExecutor.shutdownNow() } catch (_: Exception) { }
         stopAudio()
-        sonifier.stop()
-        orchestra.stop()
+        unifiedAudio.stop()
         if (::captureRecorder.isInitialized && captureRecorder.isRecording()) {
-            continuousOrchestra.setPcmTap(null)
+            unifiedAudio.setPcmTap(null)
             captureRecorder.stop({}, {})
         }
         CaptureForegroundService.stop(this)

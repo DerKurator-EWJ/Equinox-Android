@@ -1,7 +1,9 @@
-# Equinox v0.6 Step 40 — Recall / Prediction Hardening
+# Equinox v0.6 Step 41 — Unified Audio + Audio Macro Voices
 
-Current project state through Step 40.
+Current project state through Step 41.
 
-Step 38 spatial compression and Step 39 hierarchical routing remain intact. Step 40 hardens the transient memory frontier: recall is ranked and bounded, prediction fan-out is controlled and measured against a context-free baseline, and weak temporary pattern evidence expires when it stops recurring.
+Step 38 spatial compression, Step 39 hierarchical routing and Step 40 recall/prediction hardening remain intact. Step 41 collapses all hardware audio output into one `UnifiedAudioEngine` and reconstructs each audio macro's acoustic voice recursively from its actual learned constituents instead of using abstraction tier as a pitch rule.
 
-See `README_STEP38.md`, `README_STEP39.md` and `README_STEP40.md` for the implementation history.
+The product surface now exposes one primary audio control. Memory/LAB previews and recording use the same engine and synthesis model.
+
+See `README_STEP38.md` through `README_STEP41.md` for the implementation history.

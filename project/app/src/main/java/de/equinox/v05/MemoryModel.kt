@@ -46,7 +46,7 @@ private const val CROSSMODAL_WINDOW_NS = 900_000_000L
 private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
 
 /**
- * v0.6 Step 40
+ * v0.6 Step 41
  *
  * Keeps the active working set, indexed lazy retrieval, structural tiers,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -68,7 +68,9 @@ private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
  * redundant lower-tail candidate work while longer novel context remains learnable. Step 40
  * hardens the transient frontier: recall is gated by probability/information gain/relevance,
  * prediction breadth is controlled and measured against a context-free baseline, and weak
- * temporary pattern evidence expires in stream-event time.
+ * temporary pattern evidence expires in stream-event time. Step 41 keeps the learned memory
+ * format unchanged but exposes deterministic acoustic macro-voice signatures reconstructed
+ * recursively from the actual audio children for the single unified output engine.
  * The coincidence clock is runtime-only and is never persisted into the learned identities.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
@@ -231,6 +233,19 @@ data class SonificationNode(
     val weight: Long
 )
 
+/**
+ * Read-only acoustic identity reconstructed from the actual learned composition.
+ * It is never persisted: old profiles can rebuild it deterministically after load.
+ */
+data class AudioMacroVoiceSignature(
+    val rootHz: Double,
+    val partialHz: List<Double>,
+    val partialWeights: List<Double>,
+    val contourRatios: List<Double>,
+    val spectralSpread: Double,
+    val compositionHash: Int
+)
+
 data class SonificationMacro(
     val id: Int,
     val hz: Double,
@@ -243,7 +258,8 @@ data class SonificationMacro(
     val structuralRelevance: Double = 0.0,
     val contextEntropy: Double = 0.0,
     val persistence: Double = 0.0,
-    val generality: Double = 0.0
+    val generality: Double = 0.0,
+    val voice: AudioMacroVoiceSignature
 )
 
 data class SonificationSnapshot(
@@ -2154,6 +2170,7 @@ class MemoryModel(context: Context) {
                 SonificationNode(id, outputHz, q.weight)
             }
 
+        val voiceMemo = HashMap<Int, AudioMacroVoiceSignature>()
         val macro = macros.values
             .filter { isAudioModality(it.modality) }
             .sortedWith(
@@ -2180,7 +2197,9 @@ class MemoryModel(context: Context) {
                     structuralRelevance = profile.relevance,
                     contextEntropy = profile.contextEntropy,
                     persistence = profile.persistence,
-                    generality = profile.generality
+                    generality = profile.generality,
+                    voice = audioVoiceSignatureFor(m.id, voiceMemo)
+                        ?: fallbackAudioVoiceSignature(m)
                 )
             }
 
@@ -3361,6 +3380,93 @@ class MemoryModel(context: Context) {
                     crossModalMemberIndex.getOrPut(visualId) { linkedSetOf() }.add(joint.id)
                 }
             }
+    }
+
+    /**
+     * Step 41: compose an audio macro voice from its children instead of mapping
+     * abstraction tier to an arbitrary note. A higher macro therefore inherits
+     * the acoustic identity of the structures that actually formed it.
+     */
+    private fun audioVoiceSignatureFor(
+        id: Int,
+        memo: MutableMap<Int, AudioMacroVoiceSignature>
+    ): AudioMacroVoiceSignature? {
+        memo[id]?.let { return it }
+
+        quants[id]?.let { q ->
+            if (!isAudioModality(q.modality)) return null
+            val hz = when {
+                q.representativeHz > 0.0 -> q.representativeHz
+                q.modality == "audio_adaptive" -> AdaptiveAudioQuantizer.projectionHzForId(id)
+                else -> DirectAudioQuantizer.projectionHzForId(id)
+            }.coerceAtLeast(1.0)
+            return AudioMacroVoiceSignature(
+                rootHz = hz,
+                partialHz = listOf(hz),
+                partialWeights = listOf(1.0),
+                contourRatios = listOf(1.0),
+                spectralSpread = 0.0,
+                compositionHash = id
+            ).also { memo[id] = it }
+        }
+
+        val macro = macros[id] ?: return null
+        if (!isAudioModality(macro.modality)) return null
+        val children = macro.tokens.mapNotNull { audioVoiceSignatureFor(it, memo) }
+        if (children.isEmpty()) return fallbackAudioVoiceSignature(macro).also { memo[id] = it }
+
+        // Geometric centre preserves ratios better than a plain arithmetic average.
+        val logRoot = children.map { kotlin.math.ln(it.rootHz.coerceAtLeast(1.0)) }.average()
+        val root = kotlin.math.exp(logRoot).coerceAtLeast(1.0)
+
+        val partialMap = linkedMapOf<Int, Pair<Double, Double>>()
+        children.forEachIndexed { childIndex, child ->
+            val childWeight = 1.0 / children.size.toDouble()
+            child.partialHz.zip(child.partialWeights.ifEmpty { List(child.partialHz.size) { 1.0 } })
+                .take(6)
+                .forEach { (hz, w) ->
+                    val bucket = (kotlin.math.ln((hz / root).coerceAtLeast(1e-6)) / kotlin.math.ln(2.0) * 48.0).toInt()
+                    val previous = partialMap[bucket]
+                    val add = (w.coerceAtLeast(0.0) * childWeight) / (1.0 + childIndex * 0.06)
+                    partialMap[bucket] = if (previous == null) hz to add
+                    else ((previous.first * previous.second + hz * add) / (previous.second + add)) to (previous.second + add)
+                }
+        }
+        val strongest = partialMap.values.sortedByDescending { it.second }.take(8)
+        val weightSum = strongest.sumOf { it.second }.coerceAtLeast(1e-9)
+        val partialHz = strongest.map { it.first }
+        val partialWeights = strongest.map { it.second / weightSum }
+        val contour = children.take(12).map { (it.rootHz / root).coerceIn(0.25, 4.0) }
+        val spread = children.map {
+            kotlin.math.abs(kotlin.math.ln((it.rootHz / root).coerceAtLeast(1e-6)) / kotlin.math.ln(2.0))
+        }.average().coerceIn(0.0, 4.0)
+        var hash = 17
+        macro.tokens.forEach { token -> hash = hash * 31 + token }
+
+        return AudioMacroVoiceSignature(
+            rootHz = root,
+            partialHz = partialHz.ifEmpty { listOf(root) },
+            partialWeights = partialWeights.ifEmpty { listOf(1.0) },
+            contourRatios = contour.ifEmpty { listOf(1.0) },
+            spectralSpread = spread,
+            compositionHash = hash
+        ).also { memo[id] = it }
+    }
+
+    private fun fallbackAudioVoiceSignature(macro: MacroCode): AudioMacroVoiceSignature {
+        val root = if (macro.representativeHz > 0.0) macro.representativeHz else projectionHzForMacro(macro)
+        val leaves = leafHzOf(macro.id).distinct().take(8).ifEmpty { listOf(root) }
+        val weights = List(leaves.size) { 1.0 / leaves.size.toDouble() }
+        return AudioMacroVoiceSignature(
+            rootHz = root,
+            partialHz = leaves,
+            partialWeights = weights,
+            contourRatios = leaves.take(8).map { (it / root.coerceAtLeast(1.0)).coerceIn(0.25, 4.0) },
+            spectralSpread = leaves.map {
+                kotlin.math.abs(kotlin.math.ln((it / root.coerceAtLeast(1.0)).coerceAtLeast(1e-6)) / kotlin.math.ln(2.0))
+            }.average(),
+            compositionHash = macro.tokens.fold(17) { acc, token -> acc * 31 + token }
+        )
     }
 
     /**

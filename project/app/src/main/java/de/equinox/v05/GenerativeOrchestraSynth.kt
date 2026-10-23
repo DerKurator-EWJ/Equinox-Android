@@ -9,7 +9,7 @@ import kotlin.math.sin
 import kotlin.math.tanh
 
 /**
- * Step 21: shared, library-free orchestra model + synthesizer.
+ * Step 41: shared, library-free unified audio scene + synthesizer.
  *
  * This layer is deliberately read-only with respect to MemoryModel. It translates the
  * current Equinox output state into an ephemeral musical scene. No sample library and
@@ -30,6 +30,10 @@ data class OrchestraVoiceSpec(
     val id: Int,
     val baseHz: Double,
     val memberHz: List<Double>,
+    val memberWeights: List<Double>,
+    val contourRatios: List<Double>,
+    val spectralSpread: Double,
+    val voiceHash: Int,
     val level: Int,
     val amplitude: Double,
     val activation: Double,
@@ -102,7 +106,7 @@ object GenerativeOrchestraSceneBuilder {
             .take(maxVoices)
             .map { node ->
                 val macro = macroById.getValue(node.id)
-                val levelScale = 1.0 / (1.0 + 0.22 * (node.abstractionLevel - 1).coerceAtLeast(0))
+                val voice = macro.voice
                 val prediction = (predictionsByTarget[node.id] ?: 0.0).coerceIn(0.0, 1.0)
                 val cross = (crossmodalByAudio[node.id] ?: 0.0).coerceIn(0.0, 1.0)
                 val amp = (
@@ -115,8 +119,12 @@ object GenerativeOrchestraSceneBuilder {
 
                 OrchestraVoiceSpec(
                     id = node.id,
-                    baseHz = fold(macro.hz * levelScale),
-                    memberHz = macro.memberHz.map { fold(it * levelScale) }.distinctBy { (it * 4.0).toInt() }.take(5),
+                    baseHz = fold(voice.rootHz),
+                    memberHz = voice.partialHz.map(::fold).distinctBy { (it * 4.0).toInt() }.take(8),
+                    memberWeights = voice.partialWeights.take(8),
+                    contourRatios = voice.contourRatios.take(12),
+                    spectralSpread = voice.spectralSpread,
+                    voiceHash = voice.compositionHash,
                     level = node.abstractionLevel,
                     amplitude = amp,
                     activation = node.activation.coerceIn(0.0, 1.0),
@@ -134,11 +142,15 @@ object GenerativeOrchestraSceneBuilder {
         val voices = if (active.isNotEmpty()) active else {
             // Quiet read-only memory bed until the active frontier contains audio.
             sound.macros.take(min(4, maxVoices)).mapIndexed { index, macro ->
-                val scale = 0.82 / (1.0 + 0.20 * (macro.abstractionLevel - 1).coerceAtLeast(0))
+                val voice = macro.voice
                 OrchestraVoiceSpec(
                     id = macro.id,
-                    baseHz = fold(macro.hz * scale),
-                    memberHz = macro.memberHz.map { fold(it * scale) }.distinctBy { (it * 4.0).toInt() }.take(4),
+                    baseHz = fold(voice.rootHz),
+                    memberHz = voice.partialHz.map(::fold).distinctBy { (it * 4.0).toInt() }.take(8),
+                    memberWeights = voice.partialWeights.take(8),
+                    contourRatios = voice.contourRatios.take(12),
+                    spectralSpread = voice.spectralSpread,
+                    voiceHash = voice.compositionHash,
                     level = macro.abstractionLevel,
                     amplitude = ((0.008 + macro.structuralRelevance * 0.032) * blend).coerceAtMost(0.048),
                     activation = if (index == 0) 0.20 else 0.10,
@@ -258,7 +270,7 @@ class GenerativeOrchestraSynth(private val sampleRate: Int = 48_000) {
                 val fmDepth = (
                     0.015 + abs(exchange) * 0.030 + tension * 0.022 + spec.predictionConfidence * 0.010
                     ).coerceIn(0.01, 0.15)
-                val slowMod = sin(2.0 * PI * (0.045 + (id and 7) * 0.006) * t)
+                val slowMod = sin(2.0 * PI * (0.045 + (spec.voiceHash and 7) * 0.006) * t)
                 val freq = rt.currentHz * (1.0 + slowMod * fmDepth * 0.12)
 
                 rt.phaseA = advance(rt.phaseA, freq)
@@ -270,12 +282,12 @@ class GenerativeOrchestraSynth(private val sampleRate: Int = 48_000) {
                 val brightness = (
                     0.08 + spec.level * 0.035 + spec.generality * 0.09 +
                         scene.crossmodalDrive * 0.08 + spec.crossmodalConfidence * 0.11 +
-                        min(0.08, spec.tierIndex * 0.005)
+                        spec.spectralSpread.coerceIn(0.0, 1.5) * 0.045
                     ).coerceIn(0.06, 0.52)
 
                 val fmCarrier = sin(rt.phaseA + sin(rt.phaseB * 0.5) * fmDepth * 2.6)
                 val second = sin(rt.phaseB + exchange * 0.13) * brightness
-                val third = sin(rt.phaseC + (id and 31) * 0.037) * brightness * 0.34
+                val third = sin(rt.phaseC + (spec.voiceHash and 31) * 0.037) * brightness * 0.34
                 val sub = if (spec.level >= 3) sin(rt.phaseA * 0.5) * (0.10 + spec.relevance * 0.10) else 0.0
                 val chord = chordLayer(spec, rt.phaseA, t) * when {
                     spec.level >= 3 -> 0.24 + spec.relevance * 0.20
@@ -321,16 +333,21 @@ class GenerativeOrchestraSynth(private val sampleRate: Int = 48_000) {
     }
 
     private fun chooseMotifHz(spec: OrchestraVoiceSpec, beat: Double): Double {
-        if (spec.memberHz.isEmpty()) return spec.baseHz
-        return when (spec.level) {
-            1 -> spec.baseHz
-            2 -> {
-                val step = (kotlin.math.floor(beat * 2.0).toLong() + (spec.id and 3)).toInt()
-                spec.memberHz[Math.floorMod(step, spec.memberHz.size)]
+        // Step 41: movement follows the learned child-voice contour. Tier selects only
+        // the temporal/timbral role; it no longer shifts the macro to a different pitch.
+        if (spec.contourRatios.isNotEmpty()) {
+            val speed = when (spec.level) {
+                1 -> 4.0
+                2, 3 -> 2.0
+                else -> 1.0
             }
-            3 -> spec.baseHz
-            else -> GenerativeOrchestraSceneBuilder.fold(spec.baseHz * 0.5)
+            val step = (kotlin.math.floor(beat * speed).toLong() + (spec.voiceHash and 3)).toInt()
+            val ratio = spec.contourRatios[Math.floorMod(step, spec.contourRatios.size)]
+            return GenerativeOrchestraSceneBuilder.fold(spec.baseHz * ratio)
         }
+        if (spec.memberHz.isEmpty()) return spec.baseHz
+        val step = (kotlin.math.floor(beat * 2.0).toLong() + (spec.voiceHash and 3)).toInt()
+        return spec.memberHz[Math.floorMod(step, spec.memberHz.size)]
     }
 
     private fun sectionEnvelope(spec: OrchestraVoiceSpec, beatPhase: Double, halfBeatPhase: Double, t: Double): Double {
@@ -368,16 +385,17 @@ class GenerativeOrchestraSynth(private val sampleRate: Int = 48_000) {
     private fun chordLayer(spec: OrchestraVoiceSpec, basePhase: Double, t: Double): Double {
         if (spec.memberHz.isEmpty()) return 0.0
         var sum = 0.0
-        var count = 0
-        spec.memberHz.take(3).forEachIndexed { index, hz ->
+        var weightSum = 0.0
+        spec.memberHz.take(5).forEachIndexed { index, hz ->
             if (hz <= 0.0) return@forEachIndexed
-            // We use an absolute phase for members so changing macro membership stays smooth enough for output.
-            val phase = 2.0 * PI * hz * t + (spec.id and 15) * 0.05 + index * 0.17
-            sum += sin(phase)
-            count++
+            val weight = spec.memberWeights.getOrNull(index)?.coerceAtLeast(0.02) ?: (1.0 / (index + 1.0))
+            // Phase seed belongs to the learned composition, not the arbitrary macro id alone.
+            val phase = 2.0 * PI * hz * t + (spec.voiceHash and 15) * 0.05 + index * 0.17
+            sum += sin(phase) * weight
+            weightSum += weight
         }
-        if (count == 0) return sin(basePhase)
-        return sum / count.toDouble()
+        if (weightSum <= 0.0) return sin(basePhase)
+        return sum / weightSum
     }
 
     private fun advance(phase: Double, hz: Double): Double {
