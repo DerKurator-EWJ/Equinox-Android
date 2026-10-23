@@ -1,7 +1,6 @@
-# Equinox v0.6 Step 18
+# Equinox v0.6 Step 19
 
-**Adaptive Visual Encoder**
+Crossmodal Macros: repeated near-simultaneous learned audio + visual macros can now form one sparse joint macro.
 
-Open this folder itself in Android Studio and use **Build > Build APK(s)**.
-
-The camera now learns a persistent adaptive visual codebook instead of relying on the old fixed 64-color-per-cell alphabet. See `README_V06.md` for architecture, compatibility and test notes.
+Open this folder directly in Android Studio and build the APK from this project.
+See `README_V06.md` for details.

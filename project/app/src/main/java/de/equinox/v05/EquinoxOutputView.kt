@@ -15,7 +15,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Step 16 output-only canvas with structural rank, relevance, predictive recall and Hybrid working-set projection.
+ * Step 19 output-only canvas with structural rank, relevance, predictive recall and Hybrid working-set projection.
  *
  * This view never mutates MemoryModel. It renders a read-only EngineOutputState.
  * Positions are projection coordinates derived from IDs and the active working set;
@@ -80,6 +80,15 @@ class EquinoxOutputView(context: Context) : View(context) {
 
         val positions = active.associate { node ->
             node.id to positionFor(node, pad, w, h)
+        }
+
+        // Cross-modal joints are rendered as a two-arm bridge between the currently active
+        // audio macro, visual macro and their learned joint identity. This is output-only.
+        s.working.crossModalLinks.forEach { link ->
+            val joint = positions[link.jointId] ?: return@forEach
+            val audio = positions[link.audioId] ?: return@forEach
+            val visual = positions[link.visualId] ?: return@forEach
+            drawCrossModalBridge(canvas, audio, visual, joint, link.confidence)
         }
 
         // Predicted next states are shown as thin directional expectation arcs. They are
@@ -166,6 +175,27 @@ class EquinoxOutputView(context: Context) : View(context) {
         )
     }
 
+    private fun drawCrossModalBridge(
+        canvas: Canvas,
+        audio: Pair<Float, Float>,
+        visual: Pair<Float, Float>,
+        joint: Pair<Float, Float>,
+        confidence: Double
+    ) {
+        val c = confidence.coerceIn(0.0, 1.0).toFloat()
+        linePaint.strokeWidth = 1.4f + 3.4f * c
+
+        linePaint.color = Color.argb((55 + 150 * c).toInt().coerceIn(55, 205), 90, 220, 255)
+        canvas.drawLine(audio.first, audio.second, joint.first, joint.second, linePaint)
+
+        linePaint.color = Color.argb((55 + 150 * c).toInt().coerceIn(55, 205), 255, 100, 200)
+        canvas.drawLine(visual.first, visual.second, joint.first, joint.second, linePaint)
+
+        haloPaint.strokeWidth = 1.2f + 2.2f * c
+        haloPaint.color = Color.argb((50 + 135 * c).toInt().coerceIn(50, 185), 245, 225, 118)
+        canvas.drawCircle(joint.first, joint.second, 11f + 8f * c, haloPaint)
+    }
+
     private fun drawPrediction(
         canvas: Canvas,
         ax: Float,
@@ -241,7 +271,7 @@ class EquinoxOutputView(context: Context) : View(context) {
         val rankBoost = min(0.55f, node.structuralRankIndex * 0.045f)
         val relevanceBoost = (node.structuralRelevance.coerceIn(0.0, 1.0) * 0.32).toFloat()
         val radius = base * (1f + 0.70f * a + rankBoost + relevanceBoost)
-        val color = levelColor(node.abstractionLevel)
+        val color = if (node.modality == "crossmodal") Color.rgb(245, 225, 118) else levelColor(node.abstractionLevel)
 
         if (e > 0.01f) {
             haloPaint.color = withAlpha(color, (45 + 110 * min(1f, e)).toInt())

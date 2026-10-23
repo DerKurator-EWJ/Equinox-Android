@@ -1,54 +1,41 @@
-# Equinox v0.6 — Step 18: Adaptive Visual Encoder
+# Equinox v0.6 — Step 19: Crossmodal Macros
 
-Step 18 brings the camera path onto the same architectural level as the adaptive audio path. The old fixed `(cell position × 64 RGB classes)` camera alphabet remains readable in existing memory, but new camera observations now use a persistent learned visual codebook.
+Step 19 joins the previously separate learned audio and visual hierarchies **above** their sensor alphabets. Raw FFT/DIRECT/ADAPTIVE audio quants and adaptive visual quants are still learned independently. A cross-modal identity can appear only after already-learned audio and visual **macros** repeatedly occur close together in live sensor time.
 
-## New in Step 18
+## New in Step 19
 
-- **AdaptiveVisualQuantizer** starts with an empty visual codebook and learns up to 1,024 stable appearance prototypes online.
-- Each sampled camera cell is represented by seven normalized features: luminance, two opponent-chroma axes, saturation, local contrast, signed horizontal gradient and signed vertical gradient.
-- Prototype IDs are negative and live in a separate range (`vision_adaptive`), so they cannot collide with FFT/DIRECT/ADAPTIVE audio IDs or the positive macro-ID range.
-- A learned visual ID contains **no x/y coordinate**. The 8×6 grid is the sensor sampling order only; repeated appearance identities can therefore be reused at different positions.
-- At the start of each image, the transient visual sequence buffers are cleared so a spatial macro candidate cannot accidentally bridge from the last cells of one frame into the first cells of the next. Persistent macros and temporal macro relations remain available.
-- The same adaptive hierarchy, lazy working set, prediction, overexchange, ranking, relevance, templates and memory competition used by the rest of v0.6 now receive the `vision_adaptive` stream.
-- Graph rendering treats legacy `vision` and new `vision_adaptive` nodes as visual nodes and keeps their learned representative color.
-- The LIVE page reports visual-codebook size, recent novelty and mean prototype-match distance.
-- Memory stats now separately show adaptive visual quants and adaptive visual macros.
+- Runtime-only coincidence window: approximately 900 ms. The clock is used only to align asynchronous microphone/camera events; timestamps are not stored in nodes.
+- Only real sensor macro activations provide cross-modal evidence. Memory recall, predictions and retrieved context cannot manufacture cross-modal memories.
+- Repeated pair evidence creates a sparse candidate `(audioMacro, visualMacro)`. Four separated confirmations are required before promotion.
+- Repeated evidence from the same burst is rate-limited, preventing a fast audio loop from counting one camera frame hundreds of times.
+- A promoted pair becomes one persistent `crossmodal` macro whose children are the learned audio macro and visual macro. Raw quants are never directly cross-linked.
+- Joint macros enter the bounded working set and can themselves form a temporal cross-modal sequence stream.
+- The normal memory-competition system can later forget weak/stale joint macros; their child macros are protected while the joint macro depends on them.
+- LIVE/HYBRID output draws an active joint as a gold node with a cyan arm to audio and magenta arm to vision.
+- Memory stats report learned cross-modal macros, temporary candidates, activations and strongest unpromoted support.
 
-## Small core hardening
+## Why this is still sparse
 
-Step 18 also removes an old numeric shortcut that treated every raw token ID above the macro base as if it were a macro. Macro composition / substitution indexing now checks whether an ID actually exists in the macro table. This fixes the legacy high positive camera-ID edge case without changing saved macro IDs.
+There is no `audioCount × visualCount` matrix. A pair is considered only when two already-learned sensor macros are both observed within the transient coincidence window. The learned memory therefore scales with **experienced joint events**, not every mathematically possible audio/visual combination.
 
-## Data files
+## Data / compatibility
 
-- Main relational memory: `equinox_v06_memory.json`
-- Adaptive audio codebook: `equinox_v06_adaptive_quantizer.json`
-- **Adaptive visual codebook:** `equinox_v06_adaptive_visual_quantizer.json`
-
-The visual codebook and the `vision_adaptive` IDs stored in main memory belong together. Do not delete only the visual codebook if you intend to preserve those learned visual identities.
-
-## Compatibility
-
-- Application ID stays `de.equinox.v05`.
-- Existing v0.6 main memory remains readable.
-- Existing legacy `vision` quants/macros are not rewritten; new camera learning goes into the separate `vision_adaptive` modality.
-- Version: `0.6-step18-adaptive-visual-encoder`, versionCode 32.
-
-## Build verification done here
-
-This environment still has no Android SDK, so a full Gradle APK build was not possible. The following were compile-checked separately with API-shaped stubs:
-
-- `AdaptiveVisualQuantizer.kt`
-- `VisualGridAnalyzer.kt`
-- current `MemoryModel.kt` and its core dependencies
-- modified `MainActivity.kt`
-
-A small quantizer test also verified that two nearby visual feature vectors reuse one learned ID while a strongly different vector creates a different ID.
+- Main memory remains `equinox_v06_memory.json`.
+- Existing Step-18 memories load normally.
+- New cross-modal macros are stored in the existing macro array using modality `crossmodal`; no migration of old audio/vision identities is required.
+- Adaptive audio and adaptive visual codebooks stay separate and unchanged.
+- Application ID remains `de.equinox.v05`.
+- Version: `0.6-step19-crossmodal-macros`, versionCode 33.
 
 ## Suggested phone test
 
-1. Install/update and open LIVE.
-2. Start camera learning and point the phone at one fairly static scene for 30–60 seconds.
-3. Watch `Visual-Codebook`: after the first burst, reuse should increasingly dominate new IDs.
-4. Move to a clearly different scene and confirm some new prototypes appear.
-5. Return to the first scene and check whether novelty is lower than on the first exposure.
-6. Let the camera run longer and inspect whether `vision_adaptive` macros begin to appear while the codebook growth rate slows.
+1. Let audio and camera each learn enough structure that both have macros.
+2. Run microphone + camera together on one repeatable event (for example the same visible object while making the same sound).
+3. Repeat it several times, separated by a short pause.
+4. Watch `Crossmodal`: candidates should first gain support; after four separated confirmations a joint macro can appear.
+5. Change either the sound or visual scene. The previous joint should not automatically absorb every new combination.
+6. Repeat the original pairing and check that the existing joint macro is reused instead of creating another one.
+
+## Build note
+
+The assistant environment still has no Android SDK, so the full Gradle APK build cannot be performed here. Core/UI sources are compile-checked separately with JVM/API-shaped stubs before packaging.

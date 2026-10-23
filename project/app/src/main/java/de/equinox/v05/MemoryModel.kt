@@ -48,8 +48,18 @@ private const val MIN_PREDICTION_CONFIDENCE = 0.06
 // Internal propagation never masquerades as a new sensor observation.
 private const val HYBRID_CONTEXT_FLOOR = 0.22
 
+// Step 19: cross-modal coincidence lives above the independent sensor alphabets.
+// Wall-clock time is used only as a transient sensor-coincidence window; it is never
+// persisted as a property of a node or interpreted as fundamental time.
+private const val MIN_CROSSMODAL_SUPPORT = 4L
+private const val CROSSMODAL_WINDOW_NS = 900_000_000L
+private const val CROSSMODAL_EVIDENCE_COOLDOWN_NS = 220_000_000L
+private const val MAX_RECENT_SENSOR_MACROS = 12
+private const val MAX_CROSSMODAL_PARTNERS_PER_EVENT = 3
+private const val MAX_CROSSMODAL_CANDIDATES = 4_000
+
 /**
- * v0.6 Step 16
+ * v0.6 Step 19
  *
  * Keeps the bounded active working set, indexed lazy retrieval, structural ranks,
  * templates and substitution classes. Step 09 added a read-only multidimensional
@@ -58,9 +68,10 @@ private const val HYBRID_CONTEXT_FLOOR = 0.22
  * adaptive vector-quantizer IDs ("audio_adaptive"). They never mix sequence streams.
  * Step 13 added adaptive hierarchy promotion and non-overlapping macro emission.
  * Step 14 added dependency-safe memory competition. Step 15 added sparse directional
- * predictive recall. Step 16 adds HYBRID mode: real sensor activation re-anchors a runtime
- * cursor, while read-only memory propagation can follow learned predictions/relations between
- * live events. The internal walk writes no artificial observations or learned transitions.
+ * predictive recall. Step 16 added HYBRID mode. Step 19 adds a sparse cross-modal layer above the independent
+ * audio/vision streams: only already-learned sensor macros can become joint audio+visual macros,
+ * and only after repeated near-simultaneous evidence. Raw quants remain modality-local.
+ * The coincidence clock is runtime-only and is never persisted into the learned identities.
  * External observations can still update long-term memory; Memory mode only
  * activates already learned macros and relations.
  *
@@ -137,7 +148,11 @@ data class MemoryStats(
     val predictionHits: Long = 0L,
     val predictionHitRate: Double = 0.0,
     val hybridSteps: Long = 0L,
-    val hybridSeedId: Int = 0
+    val hybridSeedId: Int = 0,
+    val crossModalMacros: Int = 0,
+    val crossModalCandidates: Int = 0,
+    val crossModalActivations: Long = 0L,
+    val strongestCrossModalSupport: Long = 0L
 )
 
 data class GraphNode(
@@ -239,10 +254,19 @@ data class ActivePrediction(
     val support: Long
 )
 
+/** Runtime projection showing which audio + visual macro compose one active joint macro. */
+data class ActiveCrossModalLink(
+    val jointId: Int,
+    val audioId: Int,
+    val visualId: Int,
+    val confidence: Double
+)
+
 data class WorkingSetSnapshot(
     val nodes: List<ActiveMacroNode>,
     val exchanges: List<ActiveExchange>,
-    val predictions: List<ActivePrediction> = emptyList()
+    val predictions: List<ActivePrediction> = emptyList(),
+    val crossModalLinks: List<ActiveCrossModalLink> = emptyList()
 )
 
 /**
@@ -310,6 +334,18 @@ class MemoryModel(context: Context) {
         var lastActivatedObservation: Long = 0L
     )
 
+    private data class CrossModalCandidate(
+        val audioMacroId: Int,
+        val visualMacroId: Int,
+        var hits: Long,
+        var lastEvidenceNs: Long
+    )
+
+    private data class RecentSensorMacro(
+        val macroId: Int,
+        val seenNs: Long
+    )
+
     /**
      * A template bucket is not a second relation graph. It is a compact structural index:
      * macros with the same fixed positions and different values at one slot share one bucket.
@@ -367,6 +403,16 @@ class MemoryModel(context: Context) {
     // Number of higher macros that reuse a macro as a component. This is an index, not
     // another learned relation graph, and lets rank calculation stay local/on-demand.
     private val macroParentUseCount = mutableMapOf<Int, Int>()
+
+    // Step 19 cross-modal layer. Candidate evidence is runtime-only; learned joint macros
+    // persist in the normal macro table with modality="crossmodal". Pair lookup is sparse.
+    private val crossModalCandidates = linkedMapOf<String, CrossModalCandidate>()
+    private val crossModalByPair = mutableMapOf<String, Int>()
+    private val recentSensorMacros = mutableMapOf(
+        "audio" to ArrayDeque<RecentSensorMacro>(),
+        "vision" to ArrayDeque<RecentSensorMacro>()
+    )
+    private var crossModalActivations = 0L
 
     // Step 07/08 structural generalization index. Each stable macro contributes at most
     // MAX_PATTERN_LENGTH masked signatures; no pairwise macro comparison is required.
@@ -782,6 +828,11 @@ class MemoryModel(context: Context) {
         lastExchangePairs = exchangeValues.size
         lastMeanAbsExchange = if (exchangeValues.isEmpty()) 0.0 else exchangeValues.average()
 
+        // Cross-modal learning is triggered only by real sensor macro activations. Retrieved
+        // context/predictions never create joint memories. This may materialize one already
+        // supported audio+visual joint macro into the same bounded working set.
+        observeCrossModalEvidence(macro)
+
         enforceWorkingSetLimit()
 
         // The activated macro becomes one token for the next abstraction stream.
@@ -790,6 +841,145 @@ class MemoryModel(context: Context) {
             modality = macro.modality,
             tokenId = macro.id
         )
+    }
+
+    private fun observeCrossModalEvidence(source: MacroCode) {
+        val family = sensorFamily(source.modality) ?: return
+        val opposite = if (family == "audio") "vision" else "audio"
+        val now = System.nanoTime()
+
+        val ownQueue = recentSensorMacros.getValue(family)
+        pruneRecentSensorQueue(ownQueue, now)
+        ownQueue.removeAll { it.macroId == source.id }
+        ownQueue.addLast(RecentSensorMacro(source.id, now))
+        while (ownQueue.size > MAX_RECENT_SENSOR_MACROS) ownQueue.removeFirst()
+
+        val otherQueue = recentSensorMacros.getValue(opposite)
+        pruneRecentSensorQueue(otherQueue, now)
+        if (otherQueue.isEmpty()) return
+
+        otherQueue.asSequence()
+            .mapNotNull { recent -> macros[recent.macroId] }
+            .filter { it.id != source.id }
+            .distinctBy { it.id }
+            .sortedByDescending { it.lastActivatedObservation }
+            .take(MAX_CROSSMODAL_PARTNERS_PER_EVENT)
+            .forEach { other ->
+                val audio = if (family == "audio") source else other
+                val visual = if (family == "vision") source else other
+                registerCrossModalPair(audio, visual, now)
+            }
+    }
+
+    private fun pruneRecentSensorQueue(queue: ArrayDeque<RecentSensorMacro>, now: Long) {
+        while (queue.isNotEmpty() && now - queue.first().seenNs > CROSSMODAL_WINDOW_NS) {
+            queue.removeFirst()
+        }
+    }
+
+    private fun registerCrossModalPair(audio: MacroCode, visual: MacroCode, now: Long) {
+        if (sensorFamily(audio.modality) != "audio" || sensorFamily(visual.modality) != "vision") return
+        val signature = crossModalPairSignature(audio.id, visual.id)
+
+        val existingId = crossModalByPair[signature]
+        if (existingId != null) {
+            val joint = macros[existingId] ?: run {
+                crossModalByPair.remove(signature)
+                return
+            }
+            activateCrossModalMacro(joint, supportConfidence = 1.0)
+            return
+        }
+
+        val candidate = crossModalCandidates[signature]
+        if (candidate == null) {
+            if (crossModalCandidates.size >= MAX_CROSSMODAL_CANDIDATES) return
+            crossModalCandidates[signature] = CrossModalCandidate(
+                audioMacroId = audio.id,
+                visualMacroId = visual.id,
+                hits = 1L,
+                lastEvidenceNs = now
+            )
+            return
+        }
+
+        // Many audio frames can overlap one camera frame. Count repeated evidence, but not
+        // hundreds of copies of the same physical coincidence burst.
+        if (now - candidate.lastEvidenceNs < CROSSMODAL_EVIDENCE_COOLDOWN_NS) return
+        candidate.lastEvidenceNs = now
+        candidate.hits++
+
+        if (!macroFrozen && candidate.hits >= MIN_CROSSMODAL_SUPPORT) {
+            val joint = promoteCrossModalCandidate(signature, candidate, audio, visual) ?: return
+            activateCrossModalMacro(
+                joint,
+                supportConfidence = (candidate.hits.toDouble() / (candidate.hits + 3.0)).coerceIn(0.0, 1.0)
+            )
+        }
+    }
+
+    private fun promoteCrossModalCandidate(
+        signature: String,
+        candidate: CrossModalCandidate,
+        audio: MacroCode,
+        visual: MacroCode
+    ): MacroCode? {
+        crossModalByPair[signature]?.let { return macros[it] }
+        val level = (max(audio.level, visual.level) + 1).coerceAtMost(MAX_ABSTRACTION_LEVEL)
+        val joint = MacroCode(
+            id = nextMacroId++,
+            level = level,
+            modality = "crossmodal",
+            tokens = listOf(audio.id, visual.id),
+            weight = candidate.hits,
+            representativeHz = audio.representativeHz,
+            firstActivatedObservation = observations,
+            lastActivatedObservation = observations
+        )
+        macros[joint.id] = joint
+        crossModalByPair[signature] = joint.id
+        macroBySignature[patternSignature((joint.level - 1).coerceAtLeast(0), joint.modality, joint.tokens)] = joint.id
+        indexMacroComposition(joint)
+        crossModalCandidates.remove(signature)
+        return joint
+    }
+
+    /**
+     * A joint macro is a live derived event, but it does not recursively manufacture sensor
+     * evidence. It enters the same bounded working set and a dedicated cross-modal sequence
+     * stream, so repeated joint events can still form higher cross-modal temporal structure.
+     */
+    private fun activateCrossModalMacro(joint: MacroCode, supportConfidence: Double) {
+        joint.weight++
+        if (joint.firstActivatedObservation <= 0L) joint.firstActivatedObservation = observations
+        joint.lastActivatedObservation = observations
+
+        val state = activeWorking.getOrPut(joint.id) {
+            WorkingMacro(
+                actual = 0.0,
+                expected = 0.0,
+                lastTouchedObservation = observations,
+                retrieved = false
+            )
+        }
+        state.actual = max(state.actual, 0.92)
+        state.expected = max(state.expected, supportConfidence * 0.25)
+        state.lastTouchedObservation = observations
+        state.retrieved = false
+        crossModalActivations++
+
+        // Cross-modal joint events have their own temporal stream; no audio↔vision raw relation
+        // is added. Only joint macro -> joint macro transitions persist.
+        val stream = streamKey(joint.level, joint.modality)
+        val previous = previousActiveMacro[stream]
+        if (previous != null && previous != joint.id) {
+            val key = pairKey(previous, joint.id)
+            macroRelations[key] = (macroRelations[key] ?: 0L) + 1L
+            indexRelation(key)
+        }
+        previousActiveMacro[stream] = joint.id
+
+        feedToken(streamLevel = joint.level, modality = joint.modality, tokenId = joint.id)
     }
 
     private fun evaluatePendingPrediction(streamKey: String, actualMacroId: Int) {
@@ -1469,7 +1659,26 @@ class MemoryModel(context: Context) {
             .take(MAX_PREDICTIONS_PER_EVENT)
             .toList()
 
-        return WorkingSetSnapshot(nodes, exchanges, predictions)
+        val crossModalLinks = selected.asSequence()
+            .mapNotNull { (id, state) ->
+                val joint = macros[id] ?: return@mapNotNull null
+                if (joint.modality != "crossmodal" || joint.tokens.size != 2) return@mapNotNull null
+                val audioId = joint.tokens.firstOrNull { child -> macros[child]?.let { sensorFamily(it.modality) == "audio" } == true }
+                    ?: return@mapNotNull null
+                val visualId = joint.tokens.firstOrNull { child -> macros[child]?.let { sensorFamily(it.modality) == "vision" } == true }
+                    ?: return@mapNotNull null
+                if (audioId !in selectedIds || visualId !in selectedIds) return@mapNotNull null
+                ActiveCrossModalLink(
+                    jointId = id,
+                    audioId = audioId,
+                    visualId = visualId,
+                    confidence = (state.actual * 0.7 + state.expected * 0.3).coerceIn(0.0, 1.0)
+                )
+            }
+            .take(12)
+            .toList()
+
+        return WorkingSetSnapshot(nodes, exchanges, predictions, crossModalLinks)
     }
 
     @Synchronized
@@ -1529,7 +1738,7 @@ class MemoryModel(context: Context) {
             strongestSequenceWeight = max(strongestCandidate, strongestMacro),
             longestSequenceLength = longest,
             visualPersistentCodes = quants.values.count { it.modality.startsWith("vision") },
-            crossModalRelations = 0,
+            crossModalRelations = macros.values.count { it.modality == "crossmodal" },
             sequenceCapacity = MAX_PATTERN_CANDIDATES,
             sequenceCapacityUsedPercent = candidates.size * 100.0 / MAX_PATTERN_CANDIDATES.toDouble(),
             activeMacros = activeWorking.size,
@@ -1580,7 +1789,11 @@ class MemoryModel(context: Context) {
             predictionHits = predictionHits,
             predictionHitRate = if (predictionChecks <= 0L) 0.0 else predictionHits.toDouble() / predictionChecks.toDouble(),
             hybridSteps = hybridPlaybackSteps,
-            hybridSeedId = lastHybridSeedId
+            hybridSeedId = lastHybridSeedId,
+            crossModalMacros = macros.values.count { it.modality == "crossmodal" },
+            crossModalCandidates = crossModalCandidates.size,
+            crossModalActivations = crossModalActivations,
+            strongestCrossModalSupport = crossModalCandidates.values.maxOfOrNull { it.hits } ?: 0L
         )
     }
 
@@ -1591,6 +1804,10 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         macroParentUseCount.clear()
+        crossModalCandidates.clear()
+        crossModalByPair.clear()
+        recentSensorMacros.values.forEach { it.clear() }
+        crossModalActivations = 0L
         templateBuckets.clear()
         templateSignaturesByMacro.clear()
         substitutionPairSupport.clear()
@@ -1704,7 +1921,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_16)
+                .put("formatVersion", 60_19)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
@@ -1810,6 +2027,7 @@ class MemoryModel(context: Context) {
                 nextMacroId = max(nextMacroId, macro.id + 1)
             }
 
+            rebuildCrossModalIndex()
             rebuildMacroCompositionIndex()
             rebuildTemplateIndex()
 
@@ -1872,6 +2090,8 @@ class MemoryModel(context: Context) {
      * the same [A,B,C,□] bucket without an O(N²) comparison.
      */
     private fun indexMacroForTemplates(macro: MacroCode) {
+        // Cross-modal pair identity is intentionally not treated as a same-modality slot grammar.
+        if (macro.modality == "crossmodal") return
         if (macro.tokens.size < MIN_TEMPLATE_LENGTH) return
 
         for (slot in macro.tokens.indices) {
@@ -2267,6 +2487,11 @@ class MemoryModel(context: Context) {
             val macro = macros.remove(id) ?: return@forEach
             val signature = patternSignature(macro.level - 1, macro.modality, macro.tokens)
             if (macroBySignature[signature] == id) macroBySignature.remove(signature)
+            if (macro.modality == "crossmodal" && macro.tokens.size == 2) {
+                val audioId = macro.tokens.firstOrNull { child -> macros[child]?.let { sensorFamily(it.modality) == "audio" } == true }
+                val visualId = macro.tokens.firstOrNull { child -> macros[child]?.let { sensorFamily(it.modality) == "vision" } == true }
+                if (audioId != null && visualId != null) crossModalByPair.remove(crossModalPairSignature(audioId, visualId))
+            }
             activeWorking.remove(id)
         }
 
@@ -2285,6 +2510,7 @@ class MemoryModel(context: Context) {
         // Rebuild bounded derived indexes from surviving identities. This is maintenance-time
         // work only and never runs per audio frame.
         macroParentUseCount.clear()
+        rebuildCrossModalIndex()
         rebuildMacroCompositionIndex()
         rebuildTemplateIndex()
         relationIndex.clear()
@@ -2348,6 +2574,28 @@ class MemoryModel(context: Context) {
 
     private fun isAudioModality(modality: String): Boolean =
         modality == "audio" || modality == "audio_direct" || modality == "audio_adaptive"
+
+    private fun sensorFamily(modality: String): String? = when {
+        isAudioModality(modality) -> "audio"
+        modality == "vision" || modality == "vision_adaptive" -> "vision"
+        else -> null
+    }
+
+    private fun crossModalPairSignature(audioMacroId: Int, visualMacroId: Int): String =
+        "xm|$audioMacroId|$visualMacroId"
+
+    private fun rebuildCrossModalIndex() {
+        crossModalByPair.clear()
+        macros.values.asSequence()
+            .filter { it.modality == "crossmodal" && it.tokens.size == 2 }
+            .forEach { joint ->
+                val audioId = joint.tokens.firstOrNull { child -> macros[child]?.let { sensorFamily(it.modality) == "audio" } == true }
+                val visualId = joint.tokens.firstOrNull { child -> macros[child]?.let { sensorFamily(it.modality) == "vision" } == true }
+                if (audioId != null && visualId != null) {
+                    crossModalByPair[crossModalPairSignature(audioId, visualId)] = joint.id
+                }
+            }
+    }
 
     /**
      * Direct-ID audio deliberately stores no pseudo-frequency in memory. For the
