@@ -100,3 +100,6 @@ A synthetic repeated Direct-ID stream was run against the Step-25 core after com
 ## Step 28 — GPU LIVE renderer
 
 The visible LIVE surface now uses OpenGL ES 2.0. Camera pigment is uploaded as a texture and Equinox state deforms/colors it in a fragment shader. The learning core remains independent of output coordinates and the renderer never writes back into memory. Step 27's delayed/latest-frame policy remains the synchronization layer.
+
+## Step 30 — Unified Canvas
+CANVAS and LIVE are no longer separate hot render surfaces. One persistent OpenGL canvas continuously blends Reality and Memory, while the generative orchestra reads the same active working state.

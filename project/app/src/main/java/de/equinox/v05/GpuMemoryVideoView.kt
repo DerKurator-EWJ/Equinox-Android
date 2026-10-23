@@ -14,14 +14,16 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Step 28 GPU live-video renderer.
+ * Step 30 — Unified Canvas.
  *
- * The Equinox core remains coordinate-free. This view receives only a transient camera pigment
- * frame plus a read-only WorkingSetSnapshot. The renderer uploads the pigment as an OpenGL ES
- * texture and performs deformation/color projection in one fragment shader pass.
+ * There is only one physical OpenGL surface. Camera pigment and the read-only Equinox
+ * working set are two ingredients of the same renderer. memoryBlend is continuous:
  *
- * No rendered pixel is written back into MemoryModel. There are no per-cell Android Canvas draw
- * calls on the live hot path anymore.
+ *   0.0 -> Reality dominated
+ *   0.5 -> Hybrid
+ *   1.0 -> Memory tissue only
+ *
+ * The renderer never writes pixels, positions or blend state back into MemoryModel.
  */
 class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
     private val gpuRenderer = GpuRenderer()
@@ -47,29 +49,46 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         requestRender()
     }
 
+    /** Update memory without requiring a new camera frame (Memory / Dream). */
+    fun setWorkingState(working: WorkingSetSnapshot?) {
+        gpuRenderer.submit(null, working, "")
+        requestRender()
+    }
+
+    fun setMemoryBlend(value: Float) {
+        gpuRenderer.memoryBlend = value.coerceIn(0f, 1f)
+        requestRender()
+    }
+
+    fun memoryBlend(): Float = gpuRenderer.memoryBlend
+
     fun setModeLabel(label: String) {
-        gpuRenderer.modeLabel = label.trim().uppercase().ifEmpty { "LIVE" }
+        gpuRenderer.modeLabel = label.trim().uppercase().ifEmpty { "UNIFIED" }
     }
 
     fun lastRenderCostMs(): Double = gpuRenderer.lastRenderCostMs
 
     private class GpuRenderer : GLSurfaceView.Renderer {
         private data class Packet(
-            val frame: VideoFrameSnapshot,
+            val frame: VideoFrameSnapshot?,
             val memoryEnergy: Float,
             val signedExchange: Float,
             val expectation: Float,
             val prediction: Float,
             val fields: FloatArray,
             val fieldCount: Int,
+            val links: FloatArray,
+            val linkCount: Int,
             val info: String
         )
 
         @Volatile var lastRenderCostMs: Double = 0.0
-        @Volatile var modeLabel: String = "LIVE"
+        @Volatile var modeLabel: String = "UNIFIED"
+        @Volatile var memoryBlend: Float = 0.35f
+
         private val pending = AtomicReference<Packet?>(null)
         private var current: Packet? = null
-        private var phase = 0f
+        private var currentFrame: VideoFrameSnapshot? = null
 
         private var program = 0
         private var textureId = 0
@@ -80,15 +99,17 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         private var aPosition = -1
         private var aTexCoord = -1
         private var uTexture = -1
-        private var uPhase = -1
         private var uSummary = -1
+        private var uBlend = -1
+        private var uTexel = -1
         private var uFieldCount = -1
         private var uFields = -1
+        private var uLinkCount = -1
+        private var uLinks = -1
 
         private val quad: FloatBuffer = ByteBuffer.allocateDirect(4 * 4 * 4)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer().apply {
-                // x, y, u, v. V is flipped because VideoFrameSnapshot row 0 is the top row.
                 put(floatArrayOf(
                     -1f, -1f, 0f, 1f,
                      1f, -1f, 1f, 1f,
@@ -98,7 +119,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 position(0)
             }
 
-        fun submit(frame: VideoFrameSnapshot, working: WorkingSetSnapshot?, info: String) {
+        fun submit(frame: VideoFrameSnapshot?, working: WorkingSetSnapshot?, info: String) {
             val nodes = working?.nodes.orEmpty()
             val exchanges = working?.exchanges.orEmpty()
             val predictions = working?.predictions.orEmpty()
@@ -126,17 +147,56 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 .take(MAX_FIELDS)
                 .toList()
 
+            val positionById = HashMap<Int, Pair<Float, Float>>(strongest.size)
             val fieldData = FloatArray(MAX_FIELDS * 4)
             strongest.forEachIndexed { index, node ->
                 val p = fieldPosition(node.id)
+                positionById[node.id] = p
                 val activity = max(node.activation, node.expectation).coerceIn(0.0, 1.0).toFloat()
                 val relevance = node.structuralRelevance.coerceIn(0.0, 1.0).toFloat()
                 val exchange = node.exchangeBias.coerceIn(-1.5, 1.5).toFloat()
                 val base = index * 4
                 fieldData[base] = p.first
                 fieldData[base + 1] = p.second
-                fieldData[base + 2] = activity * (0.35f + 0.65f * relevance)
+                fieldData[base + 2] = activity * (0.30f + 0.70f * relevance)
                 fieldData[base + 3] = exchange
+            }
+
+            // A very small, GPU-friendly tissue skeleton. Links are chosen only from the
+            // strongest currently materialized nodes, never from the whole long-term graph.
+            val linkPairs = ArrayList<Pair<Int, Int>>(MAX_LINKS)
+            fun addLink(a: Int, b: Int) {
+                if (linkPairs.size >= MAX_LINKS || a == b) return
+                if (!positionById.containsKey(a) || !positionById.containsKey(b)) return
+                val key = if (a < b) Pair(a, b) else Pair(b, a)
+                if (linkPairs.none { (if (it.first < it.second) it else Pair(it.second, it.first)) == key }) {
+                    linkPairs.add(Pair(a, b))
+                }
+            }
+
+            exchanges.asSequence()
+                .sortedByDescending { abs(it.value) }
+                .forEach { addLink(it.fromId, it.toId) }
+            predictions.asSequence()
+                .sortedByDescending { it.confidence }
+                .forEach { addLink(it.sourceId, it.targetId) }
+            working?.crossModalLinks.orEmpty()
+                .asSequence()
+                .sortedByDescending { it.confidence }
+                .forEach {
+                    addLink(it.jointId, it.audioId)
+                    addLink(it.jointId, it.visualId)
+                }
+
+            val linkData = FloatArray(MAX_LINKS * 4)
+            linkPairs.take(MAX_LINKS).forEachIndexed { index, pair ->
+                val a = positionById[pair.first] ?: return@forEachIndexed
+                val b = positionById[pair.second] ?: return@forEachIndexed
+                val base = index * 4
+                linkData[base] = a.first
+                linkData[base + 1] = a.second
+                linkData[base + 2] = b.first
+                linkData[base + 3] = b.second
             }
 
             pending.set(
@@ -148,21 +208,26 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     prediction = predictionEnergy.coerceIn(0.0, 1.0).toFloat(),
                     fields = fieldData,
                     fieldCount = strongest.size,
+                    links = linkData,
+                    linkCount = linkPairs.size.coerceAtMost(MAX_LINKS),
                     info = info
                 )
             )
         }
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-            GLES20.glClearColor(0.01f, 0.015f, 0.025f, 1f)
+            GLES20.glClearColor(0.002f, 0.004f, 0.008f, 1f)
             program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
             aPosition = GLES20.glGetAttribLocation(program, "aPosition")
             aTexCoord = GLES20.glGetAttribLocation(program, "aTexCoord")
             uTexture = GLES20.glGetUniformLocation(program, "uTexture")
-            uPhase = GLES20.glGetUniformLocation(program, "uPhase")
             uSummary = GLES20.glGetUniformLocation(program, "uSummary")
+            uBlend = GLES20.glGetUniformLocation(program, "uBlend")
+            uTexel = GLES20.glGetUniformLocation(program, "uTexel")
             uFieldCount = GLES20.glGetUniformLocation(program, "uFieldCount")
             uFields = GLES20.glGetUniformLocation(program, "uFields[0]")
+            uLinkCount = GLES20.glGetUniformLocation(program, "uLinkCount")
+            uLinks = GLES20.glGetUniformLocation(program, "uLinks[0]")
 
             val ids = IntArray(1)
             GLES20.glGenTextures(1, ids, 0)
@@ -172,6 +237,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE)
             GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE)
+            uploadFallbackTexture()
         }
 
         override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -180,7 +246,10 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
 
         override fun onDrawFrame(gl: GL10?) {
             val start = System.nanoTime()
-            pending.getAndSet(null)?.let { current = it }
+            pending.getAndSet(null)?.let { packet ->
+                current = packet
+                if (packet.frame != null) currentFrame = packet.frame
+            }
             val packet = current
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
             if (packet == null || program == 0 || textureId == 0) {
@@ -188,14 +257,12 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 return
             }
 
-            uploadTexture(packet.frame)
-            phase = (phase + 0.013f) % 1f
+            currentFrame?.let { uploadTexture(it) }
 
             GLES20.glUseProgram(program)
             GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
             GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
             GLES20.glUniform1i(uTexture, 0)
-            GLES20.glUniform1f(uPhase, phase)
             GLES20.glUniform4f(
                 uSummary,
                 packet.memoryEnergy,
@@ -203,8 +270,16 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 packet.expectation,
                 packet.prediction
             )
+            GLES20.glUniform1f(uBlend, memoryBlend)
+            GLES20.glUniform2f(
+                uTexel,
+                1f / textureW.coerceAtLeast(1).toFloat(),
+                1f / textureH.coerceAtLeast(1).toFloat()
+            )
             GLES20.glUniform1i(uFieldCount, packet.fieldCount)
             GLES20.glUniform4fv(uFields, MAX_FIELDS, packet.fields, 0)
+            GLES20.glUniform1i(uLinkCount, packet.linkCount)
+            GLES20.glUniform4fv(uLinks, MAX_LINKS, packet.links, 0)
 
             quad.position(0)
             GLES20.glEnableVertexAttribArray(aPosition)
@@ -218,6 +293,24 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             GLES20.glDisableVertexAttribArray(aTexCoord)
 
             lastRenderCostMs = (System.nanoTime() - start) / 1_000_000.0
+        }
+
+        private fun uploadFallbackTexture() {
+            val buffer = ByteBuffer.allocateDirect(16).order(ByteOrder.nativeOrder())
+            repeat(4) {
+                buffer.put(0)
+                buffer.put(0)
+                buffer.put(0)
+                buffer.put(0xff.toByte())
+            }
+            buffer.flip()
+            textureW = 2
+            textureH = 2
+            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textureId)
+            GLES20.glTexImage2D(
+                GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA, 2, 2, 0,
+                GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
+            )
         }
 
         private fun uploadTexture(frame: VideoFrameSnapshot) {
@@ -245,27 +338,15 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 textureW = frame.width
                 textureH = frame.height
                 GLES20.glTexImage2D(
-                    GLES20.GL_TEXTURE_2D,
-                    0,
-                    GLES20.GL_RGBA,
-                    frame.width,
-                    frame.height,
-                    0,
-                    GLES20.GL_RGBA,
-                    GLES20.GL_UNSIGNED_BYTE,
-                    buffer
+                    GLES20.GL_TEXTURE_2D, 0, GLES20.GL_RGBA,
+                    frame.width, frame.height, 0,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
                 )
             } else {
                 GLES20.glTexSubImage2D(
-                    GLES20.GL_TEXTURE_2D,
-                    0,
-                    0,
-                    0,
-                    frame.width,
-                    frame.height,
-                    GLES20.GL_RGBA,
-                    GLES20.GL_UNSIGNED_BYTE,
-                    buffer
+                    GLES20.GL_TEXTURE_2D, 0, 0, 0,
+                    frame.width, frame.height,
+                    GLES20.GL_RGBA, GLES20.GL_UNSIGNED_BYTE, buffer
                 )
             }
         }
@@ -318,7 +399,9 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         }
 
         companion object {
-            private const val MAX_FIELDS = 8
+            // Keep fragment-uniform pressure inside conservative OpenGL ES 2.0 limits.
+            private const val MAX_FIELDS = 7
+            private const val MAX_LINKS = 5
 
             private const val VERTEX_SHADER = """
                 attribute vec2 aPosition;
@@ -333,68 +416,108 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             private const val FRAGMENT_SHADER = """
                 precision mediump float;
                 uniform sampler2D uTexture;
-                uniform float uPhase;
                 // x=memory energy, y=signed exchange, z=expectation, w=prediction
                 uniform vec4 uSummary;
+                uniform float uBlend;
+                uniform vec2 uTexel;
                 uniform int uFieldCount;
-                // x/y=renderer-only focus position, z=strength, w=exchange bias
-                uniform vec4 uFields[8];
+                // x/y=renderer-only position, z=strength, w=exchange bias
+                uniform vec4 uFields[7];
+                uniform int uLinkCount;
+                // x/y=start, z/w=end
+                uniform vec4 uLinks[5];
                 varying vec2 vTex;
 
+                float sdSegment(vec2 p, vec2 a, vec2 b) {
+                    vec2 pa = p - a;
+                    vec2 ba = b - a;
+                    float h = clamp(dot(pa, ba) / max(0.0001, dot(ba, ba)), 0.0, 1.0);
+                    return length(pa - ba * h);
+                }
+
                 void main() {
+                    float blend = clamp(uBlend, 0.0, 1.0);
+                    float reality = 1.0 - blend;
                     float memory = clamp(uSummary.x, 0.0, 1.0);
                     float signedEx = clamp(uSummary.y, -1.0, 1.0);
                     float expectation = clamp(uSummary.z, 0.0, 1.0);
                     float prediction = clamp(uSummary.w, 0.0, 1.0);
 
-                    // Step 29: no global time-driven wobble. The camera stays spatially
-                    // stable; only currently active memory fields are allowed to deform it.
+                    // The same state field deforms the camera and anchors the memory tissue.
+                    // No time-driven wobble: static state -> static image.
                     vec2 uv = vTex;
-                    float fieldGlow = 0.0;
-                    for (int i = 0; i < 8; ++i) {
+                    float nodeGlow = 0.0;
+                    float nodeCore = 0.0;
+                    for (int i = 0; i < 7; ++i) {
                         if (i < uFieldCount) {
                             vec4 f = uFields[i];
                             vec2 delta = vTex - f.xy;
                             float d2 = 0.018 + dot(delta, delta);
                             float direction = f.w >= 0.0 ? 1.0 : -1.0;
-                            float exchangeGain = 0.25 + 0.75 * min(1.0, abs(f.w));
+                            float exGain = 0.20 + 0.80 * min(1.0, abs(f.w));
                             vec2 tangent = vec2(-delta.y, delta.x);
 
-                            // Local, state-locked lens/twist. There is deliberately no phase
-                            // term here, so a static scene no longer swims or wobbles by itself.
-                            float localPull = 0.00018 + 0.00105 * f.z;
-                            float localTwist = 0.00012 + 0.00110 * f.z * exchangeGain;
-                            uv -= delta * (localPull / d2);
-                            uv += tangent * (localTwist * direction / d2);
+                            float deform = (0.00010 + 0.00095 * f.z) * (0.45 + 0.55 * reality);
+                            uv -= delta * (deform / d2);
+                            uv += tangent * ((0.00008 + 0.00080 * f.z * exGain) * direction / d2);
 
-                            float d = sqrt(dot(delta, delta));
-                            float radius = 0.035 + 0.040 * f.z;
-                            fieldGlow += (1.0 - smoothstep(radius, radius + 0.012, abs(d - radius))) * f.z;
+                            float d = length(delta);
+                            float radius = 0.025 + 0.035 * f.z;
+                            nodeGlow += (1.0 - smoothstep(radius, radius + 0.035, d)) * f.z;
+                            nodeCore += (1.0 - smoothstep(0.006, 0.018, d)) * (0.35 + 0.65 * f.z);
                         }
                     }
-                    uv = clamp(uv, vec2(0.001), vec2(0.999));
+                    uv = clamp(uv, vec2(0.002), vec2(0.998));
 
-                    vec2 chroma = vec2(0.0025 * signedEx * memory, -0.0018 * signedEx * memory);
+                    vec2 chroma = vec2(0.0017 * signedEx * memory * reality, -0.0012 * signedEx * memory * reality);
                     vec3 center = texture2D(uTexture, uv).rgb;
-                    float rr = texture2D(uTexture, clamp(uv + chroma, vec2(0.001), vec2(0.999))).r;
-                    float bb = texture2D(uTexture, clamp(uv - chroma, vec2(0.001), vec2(0.999))).b;
-                    vec3 c = vec3(rr, center.g, bb);
+                    float rr = texture2D(uTexture, clamp(uv + chroma, vec2(0.002), vec2(0.998))).r;
+                    float bb = texture2D(uTexture, clamp(uv - chroma, vec2(0.002), vec2(0.998))).b;
+                    vec3 camera = vec3(rr, center.g, bb);
+                    camera = (camera - 0.5) * (1.0 + 0.20 * memory * reality) + 0.5;
+                    camera *= 1.0 + 0.07 * expectation * reality;
 
-                    float contrast = 1.0 + 0.30 * memory;
-                    c = (c - 0.5) * contrast + 0.5;
-                    c *= 1.0 + 0.10 * expectation;
+                    // Camera edges become a bridge during the Reality -> Memory transition.
+                    float l = dot(texture2D(uTexture, clamp(uv - vec2(uTexel.x, 0.0), vec2(0.002), vec2(0.998))).rgb, vec3(0.299, 0.587, 0.114));
+                    float r = dot(texture2D(uTexture, clamp(uv + vec2(uTexel.x, 0.0), vec2(0.002), vec2(0.998))).rgb, vec3(0.299, 0.587, 0.114));
+                    float t = dot(texture2D(uTexture, clamp(uv - vec2(0.0, uTexel.y), vec2(0.002), vec2(0.998))).rgb, vec3(0.299, 0.587, 0.114));
+                    float b = dot(texture2D(uTexture, clamp(uv + vec2(0.0, uTexel.y), vec2(0.002), vec2(0.998))).rgb, vec3(0.299, 0.587, 0.114));
+                    float cameraEdge = clamp(abs(r - l) + abs(b - t), 0.0, 1.0);
 
-                    vec3 exchangeTint = signedEx >= 0.0
-                        ? vec3(0.08, 0.30, 0.42)
-                        : vec3(0.42, 0.08, 0.30);
-                    c += exchangeTint * abs(signedEx) * memory * 0.16;
-                    c += exchangeTint * min(1.0, fieldGlow) * 0.10 * memory;
+                    float linkGlow = 0.0;
+                    for (int i = 0; i < 5; ++i) {
+                        if (i < uLinkCount) {
+                            vec4 ln = uLinks[i];
+                            float d = sdSegment(vTex, ln.xy, ln.zw);
+                            linkGlow += 1.0 - smoothstep(0.0025, 0.017, d);
+                        }
+                    }
+                    linkGlow = min(1.4, linkGlow);
+                    nodeGlow = min(1.4, nodeGlow);
+                    nodeCore = min(1.2, nodeCore);
 
-                    // Prediction changes tone locally, not by animating the whole frame.
-                    float predictionPresence = 0.30 + 0.70 * min(1.0, fieldGlow);
-                    c += vec3(0.025, 0.040, 0.052) * predictionPresence * prediction * memory;
+                    vec3 memoryBg = vec3(0.002, 0.004, 0.008);
+                    vec3 tissueCyan = vec3(0.10, 0.78, 0.92);
+                    vec3 tissueGold = vec3(0.95, 0.66, 0.22);
+                    vec3 tissueMagenta = vec3(0.84, 0.18, 0.72);
+                    vec3 exchangeTint = signedEx >= 0.0 ? tissueCyan : tissueMagenta;
 
-                    gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+                    vec3 tissue = memoryBg;
+                    tissue += mix(tissueCyan, tissueGold, prediction) * linkGlow * (0.20 + 0.80 * memory);
+                    tissue += exchangeTint * nodeGlow * (0.18 + 0.60 * memory);
+                    tissue += vec3(1.0, 0.78, 0.36) * nodeCore * (0.20 + 0.75 * expectation);
+
+                    // At mid blend, real camera geometry is allowed to "grow" into the same tissue.
+                    float bridge = 4.0 * blend * (1.0 - blend);
+                    tissue += mix(tissueCyan, tissueGold, 0.42) * cameraEdge * bridge * (0.10 + 0.35 * memory);
+
+                    // One continuous surface: there is no hard LIVE/CANVAS switch anymore.
+                    vec3 finalColor = mix(camera, tissue, blend);
+                    // Keep a whisper of state in Reality and a whisper of camera structure in Hybrid.
+                    finalColor += exchangeTint * nodeGlow * memory * reality * 0.045;
+                    finalColor += mix(tissueCyan, tissueGold, prediction) * linkGlow * memory * reality * 0.035;
+
+                    gl_FragColor = vec4(clamp(finalColor, 0.0, 1.0), 1.0);
                 }
             """
         }

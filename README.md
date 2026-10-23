@@ -21,6 +21,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-eq27-live` | `Eq27_Live.zip` | 43 | 0 | `993bb94ef358a0124ce38e2601a3d09c7e7bfa891de984d8bbb136eaf4e8fe8d` |
 | `android-eq28-gpu` | `Eq28_GPU.zip` | 45 | 0 | `e3a95ccee3a6b254423d47a9bbb0d1ca1269bd4bfa946bbce858228ec46c936d` |
 | `android-eq29-ux` | `Eq29_UX.zip` | 46 | 0 | `506ded303877300600c53b609fb774b934e6f3b2ea8d55ca87d2a26a6b4bbedb` |
+| `android-eq30-unified` | `Eq30_Unified.zip` | 47 | 0 | `5b2f4841edca63cb72d3a8137c0ddb9b9ccf1ec4366a1967bef6ef2cd88b94df` |
 
 ## Security, licensing, and limitations
 

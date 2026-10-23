@@ -1,5 +1,5 @@
-# Equinox v0.6 — Step 29
+# Equinox v0.6 — Step 30 Unified Canvas
 
-Stable Live / Tissue Canvas / Bottom Controls.
+Open this folder directly in Android Studio.
 
-Siehe `README_STEP29.md` sowie die vorherigen Step-Readmes.
+See `README_STEP30.md` for the changes in this step.

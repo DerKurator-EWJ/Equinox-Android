@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 44
-        versionName = "0.6-step29-stable-live-tissue-ui"
+        versionCode = 45
+        versionName = "0.6-step30-unified-canvas"
     }
 
     compileOptions {

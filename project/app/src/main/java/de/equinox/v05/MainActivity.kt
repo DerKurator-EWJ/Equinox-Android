@@ -21,6 +21,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -46,7 +47,6 @@ class MainActivity : ComponentActivity() {
     }
 
     private enum class AppPage { LIVE, HYBRID, MEMORY, LAB }
-    private enum class SurfaceMode { CANVAS, LIVE }
 
     @Volatile private var running = false
     @Volatile private var cameraRunning = false
@@ -66,10 +66,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var memoryPage: LinearLayout
     private lateinit var labPage: LinearLayout
     private var currentPage = AppPage.LIVE
-    private var currentSurface = SurfaceMode.LIVE
     private var settingsOpen = false
     private var lastLabRenderMs = 0L
-    private lateinit var surfaceCanvas: EquinoxOutputView
     private lateinit var surfaceVideo: GpuMemoryVideoView
     private lateinit var settingsOverlay: ScrollView
     private val livePipeline = LowLatencyLivePipeline()
@@ -238,52 +236,50 @@ class MainActivity : ComponentActivity() {
             LowLatencyLivePipeline.DelayPreset.fromName(latencyPrefs.getString("preset", null))
         )
 
-        // Step 27: Step 26's two-surface UI remains; the LIVE surface now receives
-        // synchronized frame/state packets through a bounded low-latency pipeline.
-        // Step 26: the normal app has only two render surfaces. All controls/debug
-        // live behind the settings overlay and therefore do not participate in the
-        // hot render path while the overlay is closed.
+        // Step 30: one physical GPU surface. Reality, Hybrid and Memory are no longer
+        // separate render windows; they are blend states of the same persistent OpenGL canvas.
         val rootFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(6, 8, 12))
         }
 
-        val surfaceHost = FrameLayout(this).apply {
-            setBackgroundColor(Color.rgb(6, 8, 12))
-        }
-        rootFrame.addView(surfaceHost, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-
-        surfaceCanvas = EquinoxOutputView(this).apply {
-            setModeLabel("CANVAS")
-            visibility = View.GONE
-        }
         surfaceVideo = GpuMemoryVideoView(this).apply {
-            setModeLabel("LIVE")
+            setModeLabel("UNIFIED")
+            setMemoryBlend(0.35f)
             visibility = View.VISIBLE
         }
-        surfaceHost.addView(surfaceCanvas, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-        surfaceHost.addView(surfaceVideo, FrameLayout.LayoutParams(
+        rootFrame.addView(surfaceVideo, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
-        // Step 29: the only permanent controls live at the bottom, directly above the
-        // Android navigation area. This keeps the visual field clear and makes the two
-        // primary surfaces reachable with the thumb.
+        // One continuous Reality <-> Memory control instead of CANVAS/LIVE tabs.
+        // 0 = camera pigment dominates, 1 = naked memory tissue. Everything between is Hybrid.
         val controlBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(6), dp(8), dp(6))
+            setPadding(dp(10), dp(5), dp(8), dp(5))
             setBackgroundColor(Color.argb(205, 8, 10, 14))
         }
-        val canvasTab = Button(this).apply { text = "CANVAS" }
-        val liveTab = Button(this).apply { text = "LIVE"; isEnabled = false }
+        val realityLabel = TextView(this).apply {
+            text = "REALITY"
+            textSize = 11f
+            setTextColor(Color.rgb(200, 208, 220))
+            gravity = Gravity.CENTER
+        }
+        val blendSlider = SeekBar(this).apply {
+            max = 100
+            progress = 35
+        }
+        val memoryLabel = TextView(this).apply {
+            text = "MEMORY 35%"
+            textSize = 11f
+            setTextColor(Color.rgb(225, 198, 116))
+            gravity = Gravity.CENTER
+        }
         val settingsButton = Button(this).apply { text = "⚙" }
-        controlBar.addView(canvasTab, weightedButtonParams())
-        controlBar.addView(liveTab, weightedButtonParams())
-        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(64), dp(52)))
+        controlBar.addView(realityLabel, LinearLayout.LayoutParams(dp(58), dp(48)))
+        controlBar.addView(blendSlider, LinearLayout.LayoutParams(0, dp(48), 1f))
+        controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(84), dp(48)))
+        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(58), dp(48)))
         val controlBarParams = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -291,8 +287,6 @@ class MainActivity : ComponentActivity() {
         )
         rootFrame.addView(controlBar, controlBarParams)
 
-        // Some Android versions draw app content edge-to-edge. Keep the control strip
-        // above the system navigation buttons rather than underneath them.
         rootFrame.setOnApplyWindowInsetsListener { _, insets ->
             val lp = controlBar.layoutParams as FrameLayout.LayoutParams
             val bottom = insets.systemWindowInsetBottom
@@ -322,7 +316,7 @@ class MainActivity : ComponentActivity() {
         ))
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 29 — STABLE LIVE / TISSUE CANVAS / BOTTOM CONTROLS", 13f, 4).apply {
+        settingsRoot.addView(label("STEP 30 — UNIFIED CANVAS / REALITY ↔ MEMORY", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -340,9 +334,6 @@ class MainActivity : ComponentActivity() {
         settingsNav.addView(closeSettings, weightedButtonParams())
         settingsRoot.addView(settingsNav, buttonParams(8))
 
-        // Existing control builders are retained so no engine controls are lost.
-        // Their former preview canvases are hidden below; the two hot surfaces above
-        // are the only views that receive continuous render updates.
         livePage = pageContainer()
         hybridPage = pageContainer()
         memoryPage = pageContainer()
@@ -356,7 +347,6 @@ class MainActivity : ComponentActivity() {
         buildMemoryPage()
         buildLabPage()
 
-        // Legacy embedded previews are deliberately disabled in Step 26.
         if (::liveVideoCanvas.isInitialized) liveVideoCanvas.visibility = View.GONE
         if (::outputCanvas.isInitialized) outputCanvas.visibility = View.GONE
         if (::hybridVideoCanvas.isInitialized) hybridVideoCanvas.visibility = View.GONE
@@ -366,21 +356,11 @@ class MainActivity : ComponentActivity() {
         fun showSettingsSection(page: AppPage) {
             currentPage = page
             livePage.visibility = if (page == AppPage.LIVE) View.VISIBLE else View.GONE
-            // Hybrid controls are intentionally grouped with INPUT.
             hybridPage.visibility = if (page == AppPage.LIVE) View.VISIBLE else View.GONE
             memoryPage.visibility = if (page == AppPage.MEMORY) View.VISIBLE else View.GONE
             labPage.visibility = if (page == AppPage.LAB) View.VISIBLE else View.GONE
             if (page == AppPage.LIVE) refreshSensorUiState()
             updateMemoryStats()
-            refreshGraph()
-        }
-
-        fun setSurface(mode: SurfaceMode) {
-            currentSurface = mode
-            surfaceCanvas.visibility = if (mode == SurfaceMode.CANVAS) View.VISIBLE else View.GONE
-            surfaceVideo.visibility = if (mode == SurfaceMode.LIVE) View.VISIBLE else View.GONE
-            canvasTab.isEnabled = mode != SurfaceMode.CANVAS
-            liveTab.isEnabled = mode != SurfaceMode.LIVE
             refreshGraph()
         }
 
@@ -390,8 +370,17 @@ class MainActivity : ComponentActivity() {
             refreshGraph()
         }
 
-        canvasTab.setOnClickListener { setSurface(SurfaceMode.CANVAS) }
-        liveTab.setOnClickListener { setSurface(SurfaceMode.LIVE) }
+        blendSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val blend = progress.coerceIn(0, 100) / 100f
+                surfaceVideo.setMemoryBlend(blend)
+                memoryLabel.text = "MEMORY ${progress.coerceIn(0, 100)}%"
+                refreshGraph()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+        })
+
         settingsButton.setOnClickListener {
             settingsOpen = !settingsOpen
             settingsOverlay.visibility = if (settingsOpen) View.VISIBLE else View.GONE
@@ -405,7 +394,6 @@ class MainActivity : ComponentActivity() {
         setContentView(rootFrame)
         showSettingsSection(AppPage.LIVE)
         closeSettingsOverlay()
-        setSurface(SurfaceMode.LIVE)
     }
 
     private fun buildLivePage() {
@@ -1281,10 +1269,10 @@ class MainActivity : ComponentActivity() {
     private fun refreshHybridPage(ok: Boolean) {
         val w = memory.workingSetSnapshot()
         livePipeline.offerState(w)
-        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS) {
-            surfaceCanvas.setState(outputBridge.snapshot())
+        if (::surfaceVideo.isInitialized) {
+            surfaceVideo.setWorkingState(w)
+            scheduleLowLatencyRender()
         }
-        if (::surfaceVideo.isInitialized && currentSurface == SurfaceMode.LIVE) scheduleLowLatencyRender()
         if (settingsOpen && ::hybridModeStatus.isInitialized) {
             hybridModeStatus.text = if (!ok && w.nodes.none { it.activation > 0.12 }) {
                 "HYBRID: wartet auf Live-Makro"
@@ -1369,7 +1357,7 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshMemoryPage() {
         val state = outputBridge.snapshot()
-        if (::surfaceCanvas.isInitialized && currentSurface == SurfaceMode.CANVAS) surfaceCanvas.setState(state)
+        if (::surfaceVideo.isInitialized) surfaceVideo.setWorkingState(state.working)
         val w = state.working
         if (settingsOpen && ::memoryModeStatus.isInitialized && memoryPlaybackRunning) {
             memoryModeStatus.text = "MEMORY: RUN · ${w.nodes.size} aktiv · ${w.exchanges.size} Austausch"
@@ -1381,34 +1369,24 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun refreshGraph() {
-        val liveVisible = ::surfaceVideo.isInitialized &&
-            currentSurface == SurfaceMode.LIVE &&
-            surfaceVideo.visibility == View.VISIBLE
-
-        // Step 27 hot path: LIVE needs only the compact working set. Do not build the much
-        // heavier graph + sonification snapshots merely to deform the camera image.
-        if (liveVisible) {
-            livePipeline.offerState(memory.workingSetSnapshot())
+        // Step 30: one surface always receives the compact WorkingSet. The camera frame, if
+        // available, is synchronized separately by LowLatencyLivePipeline. Memory-only/Dream
+        // states therefore render on the same GPU canvas without requiring a second View.
+        if (::surfaceVideo.isInitialized) {
+            val working = memory.workingSetSnapshot()
+            surfaceVideo.setWorkingState(working)
+            livePipeline.offerState(working)
             scheduleLowLatencyRender()
         }
 
-        val canvasVisible = ::surfaceCanvas.isInitialized &&
-            currentSurface == SurfaceMode.CANVAS &&
-            surfaceCanvas.visibility == View.VISIBLE
         val labDue = settingsOpen && currentPage == AppPage.LAB &&
             ::graphView.isInitialized && labPage.visibility == View.VISIBLE &&
             System.currentTimeMillis() - lastLabRenderMs >= 250L
+        if (!labDue) return
 
-        if (!canvasVisible && !labDue) return
-
-        // Full projection is materialized only when a consumer actually needs it.
         val state = outputBridge.snapshot()
-        if (canvasVisible) surfaceCanvas.setState(state)
-
-        if (labDue) {
-            lastLabRenderMs = System.currentTimeMillis()
-            graphView.setSnapshot(state.graph)
-        }
+        lastLabRenderMs = System.currentTimeMillis()
+        graphView.setSnapshot(state.graph)
     }
 
     private fun scheduleLowLatencyRender() {
@@ -1417,7 +1395,7 @@ class MainActivity : ComponentActivity() {
 
         uiHandler.post {
             liveRenderPosted.set(false)
-            if (!::surfaceVideo.isInitialized || currentSurface != SurfaceMode.LIVE || surfaceVideo.visibility != View.VISIBLE) return@post
+            if (!::surfaceVideo.isInitialized || surfaceVideo.visibility != View.VISIBLE) return@post
 
             // Feed the controller the cost of the previous draw before selecting the next frame.
             livePipeline.reportRenderCost(surfaceVideo.lastRenderCostMs())
