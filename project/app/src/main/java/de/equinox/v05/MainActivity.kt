@@ -10,6 +10,8 @@ import android.media.audiofx.AcousticEchoCanceler
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Build
+import android.os.PowerManager
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -71,6 +73,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var surfaceVideo: GpuMemoryVideoView
     private lateinit var settingsOverlay: ScrollView
     private val livePipeline = LowLatencyLivePipeline()
+    private val performanceGovernor = PerformanceGovernor()
+    private var visualAnalyzer: VisualGridAnalyzer? = null
+    private var lastGovernorUpdateMs = 0L
     private val liveRenderPosted = AtomicBoolean(false)
     private lateinit var liveDelaySpinner: Spinner
     private lateinit var liveLatencyStatus: TextView
@@ -1401,6 +1406,7 @@ class MainActivity : ComponentActivity() {
 
             // Feed the controller the cost of the previous draw before selecting the next frame.
             livePipeline.reportRenderCost(surfaceVideo.lastRenderCostMs())
+            applyPerformanceGovernor()
             val packet = livePipeline.poll() ?: return@post
             val preset = packet.configuredPreset.label
             val info = if (packet.configuredPreset == LowLatencyLivePipeline.DelayPreset.AUTO) {
@@ -1413,11 +1419,35 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun applyPerformanceGovernor(force: Boolean = false) {
+        if (!::surfaceVideo.isInitialized) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastGovernorUpdateMs < 500L) return
+        lastGovernorUpdateMs = now
+
+        val st = livePipeline.stats()
+        val dropRatio = if (st.offeredFrames <= 0L) 0.0 else
+            (st.droppedFrames.toDouble() / st.offeredFrames.toDouble()).coerceIn(0.0, 1.0)
+        val thermal = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getSystemService(PowerManager::class.java)?.currentThermalStatus ?: 0
+        } else 0
+        val gov = performanceGovernor.update(
+            renderMs = surfaceVideo.lastRenderCostMs(),
+            analysisMs = st.analysisCostEwmaMs,
+            dropRatio = dropRatio,
+            thermalStatus = thermal,
+            nowMs = now
+        )
+        surfaceVideo.setPerformanceProfile(gov.profile)
+        visualAnalyzer?.setPerformanceProfile(gov.profile)
+    }
+
     private fun updateLiveLatencyStatus() {
         if (!::liveLatencyStatus.isInitialized) return
         val st = livePipeline.stats()
+        val g = performanceGovernor.snapshot()
         liveLatencyStatus.text =
-            "Live-Sync: ${st.preset.label} · effektiv ${st.effectiveDelayMs} ms · Analyse Ø ${"%.1f".format(st.analysisCostEwmaMs)} ms · Render Ø ${"%.1f".format(st.renderCostEwmaMs)} ms · Frames ${st.renderedFrames}/${st.offeredFrames} · verworfen ${st.droppedFrames} · Buffer ${st.bufferedFrames}"
+            "Live-Sync: ${st.preset.label} · effektiv ${st.effectiveDelayMs} ms · Analyse Ø ${"%.1f".format(st.analysisCostEwmaMs)} ms · Render Ø ${"%.1f".format(st.renderCostEwmaMs)} ms · Frames ${st.renderedFrames}/${st.offeredFrames} · verworfen ${st.droppedFrames} · Buffer ${st.bufferedFrames} · Governor ${g.profile.label} (${g.profile.fieldBudget}F/${g.profile.linkBudget}L)"
     }
 
     private fun toggleContinuousOrchestra() {
@@ -1740,9 +1770,7 @@ class MainActivity : ComponentActivity() {
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
 
-                analysis.setAnalyzer(
-                    cameraExecutor,
-                    VisualGridAnalyzer(
+                val visualAnalyzerInstance = VisualGridAnalyzer(
                         adaptiveVisualQuantizer,
                         onFrame = { result ->
                             if (!cameraRunning) return@VisualGridAnalyzer
@@ -1773,7 +1801,9 @@ class MainActivity : ComponentActivity() {
                             scheduleLowLatencyRender()
                         }
                     )
-                )
+                visualAnalyzer = visualAnalyzerInstance
+                visualAnalyzerInstance.setPerformanceProfile(performanceGovernor.snapshot().profile)
+                analysis.setAnalyzer(cameraExecutor, visualAnalyzerInstance)
 
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
@@ -1797,6 +1827,7 @@ class MainActivity : ComponentActivity() {
         cameraRunning = false
         try { cameraProvider?.unbindAll() } catch (_: Exception) { }
         cameraProvider = null
+        visualAnalyzer = null
         livePipeline.clearFrames()
         adaptiveVisualQuantizer.saveNow()
         cameraStatus.text = "Kamera: AUS"

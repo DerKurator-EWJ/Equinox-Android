@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 48
-        versionName = "0.6-step33-fluid-hierarchy"
+        versionCode = 49
+        versionName = "0.6-step34-performance-governor"
     }
 
     compileOptions {

@@ -87,6 +87,15 @@ class VisualGridAnalyzer(
     private var adaptivePatchBudget = BASE_GRID_W * BASE_GRID_H * 2
     private var lastMeanFamiliarity = 0.0
     private var lastMaxDepth = 0
+    @Volatile private var governorVideoScale = 1.0
+    @Volatile private var governorLearningScale = 1.0
+    @Volatile private var governorMinVideoIntervalMs = 33L
+
+    fun setPerformanceProfile(profile: PerformanceGovernor.Profile) {
+        governorVideoScale = profile.videoWorkScale.coerceIn(0.35, 1.6)
+        governorLearningScale = profile.learningWorkScale.coerceIn(0.35, 1.5)
+        governorMinVideoIntervalMs = profile.minVideoIntervalMs.coerceIn(16L, 250L)
+    }
 
     override fun analyze(image: ImageProxy) {
         try {
@@ -106,7 +115,7 @@ class VisualGridAnalyzer(
                 lastVideoFrameMs = now
                 val videoStartNs = System.nanoTime()
                 val detailFactor = 1.0 + 1.7 * lastMeanFamiliarity + 0.22 * lastMaxDepth.toDouble()
-                val desiredCells = (adaptiveVideoCellBudget.toDouble() * detailFactor)
+                val desiredCells = (adaptiveVideoCellBudget.toDouble() * detailFactor * governorVideoScale)
                     .toInt()
                     .coerceIn(48 * 27, width * height)
                 val aspect = width.toDouble() / height.coerceAtLeast(1).toDouble()
@@ -136,13 +145,13 @@ class VisualGridAnalyzer(
 
                 // Prefer fresh frames over a backlog. Faster devices automatically approach 30 fps;
                 // slower ones back off before conversion itself starts starving learning.
-                videoFrameIntervalMs = when {
+                videoFrameIntervalMs = (when {
                     lastVideoSampleCostMs <= 10L -> 33L
                     lastVideoSampleCostMs <= 20L -> 50L
                     lastVideoSampleCostMs <= 34L -> 66L
                     lastVideoSampleCostMs <= 55L -> 90L
                     else -> 120L
-                }
+                }).coerceAtLeast(governorMinVideoIntervalMs)
                 onVideoFrame?.invoke(VideoFrameSnapshot(rotated.first, rotated.second, rotated.third, now))
             }
 
@@ -174,7 +183,8 @@ class VisualGridAnalyzer(
             var rgbSumB = 0L
             var processed = 0
 
-            while (queue.isNotEmpty() && processed < adaptivePatchBudget) {
+            val effectivePatchBudget = (adaptivePatchBudget * governorLearningScale).toInt().coerceAtLeast(BASE_GRID_W * BASE_GRID_H)
+            while (queue.isNotEmpty() && processed < effectivePatchBudget) {
                 val region = queue.remove()
                 val sample = sampleRegion(region, yPlane, uPlane, vPlane)
                 val q = quantizer.quantize(sample.features, sample.rgb)

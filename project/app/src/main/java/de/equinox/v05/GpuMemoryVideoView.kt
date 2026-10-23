@@ -70,6 +70,12 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
 
     fun lastRenderCostMs(): Double = gpuRenderer.lastRenderCostMs
 
+    fun setPerformanceProfile(profile: PerformanceGovernor.Profile) {
+        gpuRenderer.fieldBudget = profile.fieldBudget.coerceIn(1, 7)
+        gpuRenderer.linkBudget = profile.linkBudget.coerceIn(0, 5)
+        requestRender()
+    }
+
     private class GpuRenderer(
         private val scheduleNextFrame: () -> Unit
     ) : GLSurfaceView.Renderer {
@@ -91,6 +97,8 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
         @Volatile var lastRenderCostMs: Double = 0.0
         @Volatile var modeLabel: String = "UNIFIED"
         @Volatile var memoryBlend: Float = 0.35f
+        @Volatile var fieldBudget: Int = MAX_FIELDS
+        @Volatile var linkBudget: Int = MAX_LINKS
 
         private val pending = AtomicReference<Packet?>(null)
         private var current: Packet? = null
@@ -207,8 +215,8 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                 // Large organizations: SSS/Ω/Ω+n
                 addBest(nodes.asSequence().filter { it.abstractionTierIndex >= 8 }, 2)
                 // One final strongest state regardless of depth.
-                addBest(nodes.asSequence(), MAX_FIELDS - size)
-            }.take(MAX_FIELDS)
+                addBest(nodes.asSequence(), fieldBudget - size)
+            }.take(fieldBudget)
 
             val positionById = HashMap<Int, Pair<Float, Float>>(strongest.size)
             val fieldData = FloatArray(MAX_FIELDS * 4)
@@ -232,7 +240,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
             // strongest currently materialized nodes, never from the whole long-term graph.
             val linkPairs = ArrayList<Pair<Int, Int>>(MAX_LINKS)
             fun addLink(a: Int, b: Int) {
-                if (linkPairs.size >= MAX_LINKS || a == b) return
+                if (linkPairs.size >= linkBudget || a == b) return
                 if (!positionById.containsKey(a) || !positionById.containsKey(b)) return
                 val key = if (a < b) Pair(a, b) else Pair(b, a)
                 if (linkPairs.none { (if (it.first < it.second) it else Pair(it.second, it.first)) == key }) {
@@ -256,7 +264,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
 
             val linkData = FloatArray(MAX_LINKS * 4)
             val linkKeys = LongArray(MAX_LINKS)
-            linkPairs.take(MAX_LINKS).forEachIndexed { index, pair ->
+            linkPairs.take(linkBudget).forEachIndexed { index, pair ->
                 val a = positionById[pair.first] ?: return@forEachIndexed
                 val b = positionById[pair.second] ?: return@forEachIndexed
                 val lo = min(pair.first, pair.second)
@@ -281,7 +289,7 @@ class GpuMemoryVideoView(context: Context) : GLSurfaceView(context) {
                     fieldCount = strongest.size,
                     links = linkData,
                     linkKeys = linkKeys,
-                    linkCount = linkPairs.size.coerceAtMost(MAX_LINKS),
+                    linkCount = linkPairs.size.coerceAtMost(linkBudget),
                     info = info
                 )
             )

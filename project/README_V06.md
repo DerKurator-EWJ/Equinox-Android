@@ -116,3 +116,6 @@ The unified OpenGL canvas no longer treats every active macro as the same point-
 
 ### Step 33
 Fluid renderer-side hierarchy transitions: persistent macro-ID visual states, eased Reality/Memory blend, fade-in/out for fields and links, continuous tier morphing, and on-demand animation frames only while a transition is active.
+
+### Step 34 — Performance Governor
+Transient GPU/camera/analysis budgets now adapt to measured render cost, analysis cost, dropped frames and Android thermal pressure. Persistent Equinox learning semantics remain unchanged.
