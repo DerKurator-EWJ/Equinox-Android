@@ -32,6 +32,7 @@ Counts and SHA-256 hashes below refer to the original input ZIPs; they are not a
 | `android-eq38-spatialcoupler` | `Eq38_SpatialCoupler.zip` | 60 | 0 | `7d9adbc991d8de4548fb88c0a5e8b7d8daaf2fa963279923aeb71acaefd6b720` |
 | `android-v05-step01` | `Equinox_v05_Step01.zip` | 8 | 0 | `a5f900f4c233e8a38ea5fd8de557b76f7349feb76baf782a91b9904a645bc91e` |
 | `android-v05-step02` | `Equinox_v05_Step02.zip` | 9 | 0 | `6e062406f2261c062b1ba93697926eb0c6255fec861d2bd885fa3d46649af9d7` |
+| `android-v05-step03` | `Equinox_v05_Step03.zip` | 10 | 0 | `d52f21fd153610ba13566e31c492ec5a8584e6ed89d2580bb89d7ae40848be82` |
 
 ## Security, licensing, and limitations
 

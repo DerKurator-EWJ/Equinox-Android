@@ -12,6 +12,8 @@ import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Spinner
+import android.widget.ArrayAdapter
 import kotlin.concurrent.thread
 import kotlin.math.log2
 import kotlin.math.max
@@ -35,9 +37,14 @@ class MainActivity : Activity() {
     private lateinit var frames: TextView
     private lateinit var startButton: Button
     private lateinit var stopButton: Button
+    private lateinit var memoryStats: TextView
+    private lateinit var intervalSpinner: Spinner
+    private lateinit var memory: MemoryModel
+    @Volatile private var lastConsolidationMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        memory = MemoryModel(this)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -55,7 +62,7 @@ class MainActivity : Activity() {
         }
 
         root.addView(label("EQUINOX v0.5", 28f, 0))
-        root.addView(label("STEP 02 — AUDIO / FFT", 18f, 16).apply {
+        root.addView(label("STEP 03 — MEMORY / CONSOLIDATION", 18f, 16).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -69,6 +76,35 @@ class MainActivity : Activity() {
         root.addView(frequencyId)
         root.addView(strength)
         root.addView(frames)
+
+        memoryStats = label(memoryText(), 15f, 22).apply { setTextColor(Color.rgb(180, 220, 215)) }
+        root.addView(memoryStats)
+
+        intervalSpinner = Spinner(this)
+        val intervals = arrayOf("3 Sekunden", "30 Sekunden", "1 Minute", "5 Minuten", "15 Minuten", "30 Minuten")
+        intervalSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, intervals)
+        root.addView(intervalSpinner, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 20 })
+
+        val consolidateButton = Button(this).apply {
+            text = "JETZT KONSOLIDIEREN"
+            setOnClickListener {
+                val n = memory.consolidate()
+                memoryStats.text = memoryText() + "\nGerade gespeichert: $n neue Codes"
+            }
+        }
+        root.addView(consolidateButton, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 10 })
+
+        val resetButton = Button(this).apply {
+            text = "GEDÄCHTNIS LÖSCHEN"
+            setOnClickListener { memory.reset(); memoryStats.text = memoryText() }
+        }
+        root.addView(resetButton, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = 8 })
 
         startButton = Button(this).apply {
             text = "AUDIO STARTEN"
@@ -90,9 +126,9 @@ class MainActivity : Activity() {
         ).apply { topMargin = 12 })
 
         root.addView(label(
-            "Mikrofon → 48 kHz PCM → 2048 Samples → Hann → FFT → dominante Frequenz → logarithmische ID",
-            14f,
-            28
+            "Audio → Frequenz-ID → temporäre Kandidaten → Wiederholung → persistente Codes → gerichtete Relationen",
+            13f,
+            24
         ).apply { setTextColor(Color.LTGRAY) })
 
         setContentView(root)
@@ -162,6 +198,7 @@ class MainActivity : Activity() {
         startButton.isEnabled = false
         stopButton.isEnabled = true
         status.text = "Audio: AKTIV"
+        lastConsolidationMs = System.currentTimeMillis()
 
         recorder.startRecording()
         worker = thread(name = "EquinoxAudioFFT") {
@@ -192,6 +229,13 @@ class MainActivity : Activity() {
                 val hz = bestBin.toDouble() * SAMPLE_RATE / FFT_SIZE
                 val id = if (hz > 0.0) (24.0 * log2(hz / 55.0)).roundToInt() else 0
                 frameCount++
+                memory.observe(id, hz)
+                val now = System.currentTimeMillis()
+                val interval = selectedIntervalMs()
+                if (now - lastConsolidationMs >= interval) {
+                    memory.consolidate()
+                    lastConsolidationMs = now
+                }
 
                 runOnUiThread {
                     if (running) {
@@ -199,10 +243,29 @@ class MainActivity : Activity() {
                         frequencyId.text = "Frequenz-ID: $id"
                         strength.text = "Signalstärke: %.5f".format(bestMag)
                         frames.text = "Frames verarbeitet: $frameCount"
+                        if (frameCount % 5L == 0L) memoryStats.text = memoryText()
                     }
                 }
             }
         }
+    }
+
+
+    private fun selectedIntervalMs(): Long {
+        return when (intervalSpinner.selectedItemPosition) {
+            0 -> 3_000L
+            1 -> 30_000L
+            2 -> 60_000L
+            3 -> 300_000L
+            4 -> 900_000L
+            else -> 1_800_000L
+        }
+    }
+
+    private fun memoryText(): String {
+        val s = memory.stats()
+        return "Gedächtnis: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
+            "Beobachtungen: ${s.observations} | stärkstes Gewicht: ${s.strongestWeight}"
     }
 
     private fun stopAudio() {

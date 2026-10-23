@@ -1,22 +1,14 @@
-# Equinox v0.5 — Step 02
+# Equinox v0.5 — Step 03
 
-Minimaler Audio-Härtetest auf echter Android-Hardware.
+Step 02 plus the first persistent relational memory layer.
 
-Enthalten:
-- RECORD_AUDIO Runtime-Berechtigung
-- AudioRecord, 48 kHz, Mono, PCM 16 Bit
-- 2048-Sample-Frames
-- Hann-Fenster
-- Radix-2-FFT
-- dominante Frequenz 40–18.000 Hz
-- logarithmische Frequenz-ID: round(24 * log2(hz / 55))
-- Live-Anzeige von Hz, ID, Signalstärke und Framezahl
+- live microphone / FFT / logarithmic frequency IDs
+- temporary frequency-code candidates
+- repeated candidates promoted during consolidation
+- selectable consolidation windows: 3 s / 30 s / 1 m / 5 m / 15 m / 30 m
+- persistent code weights
+- sparse directed transition relations
+- JSON persistence across app restarts
+- manual consolidation and memory reset
 
-Noch bewusst NICHT enthalten:
-- persistentes Gedächtnis
-- Relationen
-- Makroknoten
-- Kamera
-- Save/Load
-
-Ziel: Erst beweisen, dass Audioaufnahme + FFT + Quantisierung auf dem echten Telefon stabil laufen.
+The consolidation timer is an engineering cadence, not a timestamp stored on a code.
