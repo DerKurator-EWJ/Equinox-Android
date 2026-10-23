@@ -73,6 +73,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var intervalSpinner: Spinner
     private lateinit var outputCanvas: EquinoxOutputView
     private lateinit var hybridCanvas: EquinoxOutputView
+    private lateinit var liveVideoCanvas: MemoryVideoView
+    private lateinit var hybridVideoCanvas: MemoryVideoView
     private lateinit var memoryCanvas: EquinoxOutputView
     private lateinit var graphView: RelationGraphView
     private lateinit var memoryModeStatus: TextView
@@ -195,7 +197,7 @@ class MainActivity : ComponentActivity() {
         )
 
         root.addView(label("EQUINOX v0.6", 28f, 0))
-        root.addView(label("STEP 18 — ADAPTIVE VISUAL ENCODER", 17f, 8).apply {
+        root.addView(label("STEP 20 — MEMORY-DRIVEN VIDEO ENGINE", 17f, 8).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
 
@@ -322,10 +324,21 @@ class MainActivity : ComponentActivity() {
         memoryStats = label(memoryText(), 13f, 16).apply { setTextColor(Color.rgb(180, 220, 215)) }
         livePage.addView(memoryStats)
 
-        outputCanvas = EquinoxOutputView(this).apply { setModeLabel("LIVE") }
+        livePage.addView(label(
+            "MEMORY VIDEO — Kamera liefert nur Pigment; der gelernte Working-State verformt das Bild read-only.",
+            12f,
+            12
+        ).apply { setTextColor(Color.rgb(170, 205, 245)) })
+        liveVideoCanvas = MemoryVideoView(this).apply { setModeLabel("LIVE") }
+        livePage.addView(
+            liveVideoCanvas,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(520)).apply { topMargin = dp(8) }
+        )
+
+        outputCanvas = EquinoxOutputView(this).apply { setModeLabel("LIVE STATE") }
         livePage.addView(
             outputCanvas,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(500)).apply { topMargin = dp(12) }
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(300)).apply { topMargin = dp(12) }
         )
 
         liveOrchestraStatus = label("Continuous I/O: AUS", 13f, 10).apply {
@@ -385,10 +398,21 @@ class MainActivity : ComponentActivity() {
         }
         hybridPage.addView(hybridModeStatus)
 
-        hybridCanvas = EquinoxOutputView(this).apply { setModeLabel("HYBRID") }
+        hybridPage.addView(label(
+            "MEMORY VIDEO — derselbe Live-Frame wird zusätzlich durch Recall, Prediction und Überaustausch des Hybrid-State verformt.",
+            12f,
+            10
+        ).apply { setTextColor(Color.rgb(170, 225, 205)) })
+        hybridVideoCanvas = MemoryVideoView(this).apply { setModeLabel("HYBRID") }
+        hybridPage.addView(
+            hybridVideoCanvas,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(520)).apply { topMargin = dp(8) }
+        )
+
+        hybridCanvas = EquinoxOutputView(this).apply { setModeLabel("HYBRID STATE") }
         hybridPage.addView(
             hybridCanvas,
-            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(540)).apply { topMargin = dp(12) }
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(300)).apply { topMargin = dp(12) }
         )
 
         val row = LinearLayout(this).apply {
@@ -892,7 +916,7 @@ class MainActivity : ComponentActivity() {
         }, buttonParams(16))
 
         labPage.addView(label(
-            "Step 17 ergänzt echtes gleichzeitiges Audio-In/Output. Das Mikrofon darf weiter lernen, während ein MODE_STREAM-Orchester denselben momentanen Memory-State synthetisiert. Android-AEC wird verwendet, wenn verfügbar; zusätzlich projiziert ein konservativer Eigenklang-Filter die bekannten aktiven Oszillatorfrequenzen vor FFT/DIRECT/ADAPTIVE aus dem Mikrofonframe. Das ist Feedback-Schutz, keine perfekte akustische Trennung — Kopfhörer bleiben der sauberste Test.",
+            "Step 20 ergänzt eine strikt read-only Memory-Video-Engine. Die Kamera liefert dafür einen schnelleren 48×27-Farbstrom als Pigment; Lernen bleibt separat im adaptiven 8×6-Encoder. Live-Aktivierung, Recall, Prediction, Relevanz und Überaustausch verformen nur die Ausgabe. Das ist ein Canvas-Prototyp der Video-Engine — noch kein GPU-/Shader-Renderer.",
             12f,
             14
         ).apply { setTextColor(Color.LTGRAY) })
@@ -981,6 +1005,7 @@ class MainActivity : ComponentActivity() {
         if (!::hybridCanvas.isInitialized) return
         val state = outputBridge.snapshot(maxSoundMacros = 12)
         hybridCanvas.setState(state)
+        if (::hybridVideoCanvas.isInitialized) hybridVideoCanvas.setEngineState(state)
         val w = state.working
         if (::hybridModeStatus.isInitialized) {
             hybridModeStatus.text = if (!ok && w.nodes.none { it.activation > 0.12 }) {
@@ -1001,7 +1026,7 @@ class MainActivity : ComponentActivity() {
         if (::status.isInitialized) status.text = if (running) "Audio: AKTIV" else "Audio: AUS"
         if (::startButton.isInitialized) startButton.isEnabled = !running
         if (::stopButton.isInitialized) stopButton.isEnabled = running
-        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · adaptives 8×6 Raster" else "Kamera: AUS"
+        if (::cameraStatus.isInitialized) cameraStatus.text = if (cameraRunning) "Kamera: AKTIV · Lernen 8×6 · Video 48×27" else "Kamera: AUS"
         if (::cameraButton.isInitialized) cameraButton.isEnabled = !cameraRunning
         if (::cameraStopButton.isInitialized) cameraStopButton.isEnabled = cameraRunning
     }
@@ -1045,7 +1070,9 @@ class MainActivity : ComponentActivity() {
     private fun refreshGraph() {
         val state = outputBridge.snapshot()
         if (::outputCanvas.isInitialized && livePage.visibility == View.VISIBLE) outputCanvas.setState(state)
+        if (::liveVideoCanvas.isInitialized && livePage.visibility == View.VISIBLE) liveVideoCanvas.setEngineState(state)
         if (::hybridCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridCanvas.setState(state)
+        if (::hybridVideoCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridVideoCanvas.setEngineState(state)
         if (::memoryCanvas.isInitialized && memoryPage.visibility == View.VISIBLE) memoryCanvas.setState(state)
         if (::graphView.isInitialized && labPage.visibility == View.VISIBLE) graphView.setSnapshot(state.graph)
     }
@@ -1370,33 +1397,43 @@ class MainActivity : ComponentActivity() {
 
                 analysis.setAnalyzer(
                     cameraExecutor,
-                    VisualGridAnalyzer(adaptiveVisualQuantizer) { result ->
-                        if (!cameraRunning) return@VisualGridAnalyzer
-                        // Frame-local reset prevents one spatial macro candidate from crossing
-                        // the image boundary; learned identities/macros themselves remain intact.
-                        memory.beginAdaptiveVisualFrame()
-                        result.observations.forEach { obs ->
-                            memory.observeAdaptiveVisual(obs.tokenId, obs.packedRgb)
-                        }
-                        visualFrameCount++
-                        visualObservationCount += result.observations.size
+                    VisualGridAnalyzer(
+                        adaptiveVisualQuantizer,
+                        onFrame = { result ->
+                            if (!cameraRunning) return@VisualGridAnalyzer
+                            // Frame-local reset prevents one spatial macro candidate from crossing
+                            // the image boundary; learned identities/macros themselves remain intact.
+                            memory.beginAdaptiveVisualFrame()
+                            result.observations.forEach { obs ->
+                                memory.observeAdaptiveVisual(obs.tokenId, obs.packedRgb)
+                            }
+                            visualFrameCount++
+                            visualObservationCount += result.observations.size
 
-                        runOnUiThread {
-                            cameraFrames.text =
-                                "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · +${result.createdThisFrame} neue IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
-                            adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
-                            if (visualFrameCount % 2L == 0L) {
-                                updateMemoryStats()
-                                refreshGraph()
+                            runOnUiThread {
+                                cameraFrames.text =
+                                    "Visuelle Frames: $visualFrameCount · Beobachtungen: $visualObservationCount · +${result.createdThisFrame} neue IDs · Ød ${"%.3f".format(result.meanMatchDistance)}"
+                                adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
+                                if (visualFrameCount % 2L == 0L) {
+                                    updateMemoryStats()
+                                    refreshGraph()
+                                }
+                            }
+                        },
+                        onVideoFrame = { video ->
+                            if (!cameraRunning) return@VisualGridAnalyzer
+                            runOnUiThread {
+                                if (::liveVideoCanvas.isInitialized && livePage.visibility == View.VISIBLE) liveVideoCanvas.setFrame(video)
+                                if (::hybridVideoCanvas.isInitialized && hybridPage.visibility == View.VISIBLE) hybridVideoCanvas.setFrame(video)
                             }
                         }
-                    }
+                    )
                 )
 
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
                 cameraRunning = true
-                cameraStatus.text = "Kamera: AKTIV · adaptives 8×6 Raster"
+                cameraStatus.text = "Kamera: AKTIV · Lernen 8×6 · Video 48×27"
                 cameraButton.isEnabled = false
                 cameraStopButton.isEnabled = true
                 refreshSensorUiState()

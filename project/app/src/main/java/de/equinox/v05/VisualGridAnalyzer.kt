@@ -23,41 +23,63 @@ data class VisualFrameResult(
 )
 
 /**
- * Step 18 adaptive 8x6 visual sensor encoder.
+ * Step 20 camera analyzer with two strictly separated outputs:
+ * - slow 8x6 adaptive observations for learning,
+ * - faster 48x27 RGB pigment frames for the read-only video renderer.
  *
- * The grid remains only the sensor sampling order. Each cell is described by appearance
- * and local-neighborhood features, then mapped through AdaptiveVisualQuantizer to a learned
- * stable ID. The ID itself does not encode x/y; higher Equinox macros learn the row-major
- * arrangement and recurring combinations.
+ * The video frame is never persisted and never becomes a second memory representation.
  */
 class VisualGridAnalyzer(
     private val quantizer: AdaptiveVisualQuantizer,
-    private val onFrame: (VisualFrameResult) -> Unit
+    private val onFrame: (VisualFrameResult) -> Unit,
+    private val onVideoFrame: ((VideoFrameSnapshot) -> Unit)? = null
 ) : ImageAnalysis.Analyzer {
 
     companion object {
         const val GRID_W = 8
         const val GRID_H = 6
-        private const val MIN_FRAME_INTERVAL_MS = 650L
+        const val VIDEO_W = 48
+        const val VIDEO_H = 27
+        private const val MIN_LEARNING_FRAME_INTERVAL_MS = 650L
+        private const val MIN_VIDEO_FRAME_INTERVAL_MS = 90L
     }
 
-    private var lastFrameMs = 0L
+    private var lastLearningFrameMs = 0L
+    private var lastVideoFrameMs = 0L
 
     override fun analyze(image: ImageProxy) {
         try {
-            val now = System.currentTimeMillis()
-            if (now - lastFrameMs < MIN_FRAME_INTERVAL_MS) return
-            lastFrameMs = now
             if (image.planes.size < 3) return
+            val now = System.currentTimeMillis()
+            val videoDue = onVideoFrame != null && now - lastVideoFrameMs >= MIN_VIDEO_FRAME_INTERVAL_MS
+            val learningDue = now - lastLearningFrameMs >= MIN_LEARNING_FRAME_INTERVAL_MS
+            if (!videoDue && !learningDue) return
 
             val yPlane = image.planes[0]
             val uPlane = image.planes[1]
             val vPlane = image.planes[2]
             val width = image.width
             val height = image.height
+
+            if (videoDue) {
+                lastVideoFrameMs = now
+                val raw = IntArray(VIDEO_W * VIDEO_H)
+                for (gy in 0 until VIDEO_H) {
+                    for (gx in 0 until VIDEO_W) {
+                        val x = (((gx + 0.5) / VIDEO_W) * width).toInt().coerceIn(0, width - 1)
+                        val y = (((gy + 0.5) / VIDEO_H) * height).toInt().coerceIn(0, height - 1)
+                        raw[gy * VIDEO_W + gx] = sampleRgb(x, y, yPlane, uPlane, vPlane)
+                    }
+                }
+                val rotated = rotateGrid(raw, VIDEO_W, VIDEO_H, image.imageInfo.rotationDegrees)
+                onVideoFrame?.invoke(VideoFrameSnapshot(rotated.first, rotated.second, rotated.third, now))
+            }
+
+            if (!learningDue) return
+            lastLearningFrameMs = now
+
             val rgbGrid = IntArray(GRID_W * GRID_H)
             val lum = DoubleArray(GRID_W * GRID_H)
-
             var sumR = 0L
             var sumG = 0L
             var sumB = 0L
@@ -106,32 +128,19 @@ class VisualGridAnalyzer(
                     val gradY = ((down - up) * 0.5 + 0.5).coerceIn(0.0, 1.0)
 
                     val features = doubleArrayOf(
-                        center.coerceIn(0.0, 1.0),
-                        chromaRg,
-                        chromaBg,
-                        saturation.coerceIn(0.0, 1.0),
-                        localContrast,
-                        gradX,
-                        gradY
+                        center.coerceIn(0.0, 1.0), chromaRg, chromaBg,
+                        saturation.coerceIn(0.0, 1.0), localContrast, gradX, gradY
                     )
                     val q = quantizer.quantize(features, rgb)
                     if (q.created) created++
                     if (!q.created) { distanceSum += q.matchDistance; distanceCount++ }
-                    observations += VisualObservation(
-                        tokenId = q.id,
-                        packedRgb = q.displayColor,
-                        cellIndex = idx,
-                        prototypeCreated = q.created,
-                        matchDistance = q.matchDistance
-                    )
+                    observations += VisualObservation(q.id, q.displayColor, idx, q.created, q.matchDistance)
                 }
             }
 
             val count = GRID_W * GRID_H
             val avg = if (count > 0) {
-                ((sumR / count).toInt() shl 16) or
-                    ((sumG / count).toInt() shl 8) or
-                    (sumB / count).toInt()
+                ((sumR / count).toInt() shl 16) or ((sumG / count).toInt() shl 8) or (sumB / count).toInt()
             } else 0
 
             onFrame(
@@ -146,6 +155,33 @@ class VisualGridAnalyzer(
         } finally {
             image.close()
         }
+    }
+
+    private fun rotateGrid(input: IntArray, w: Int, h: Int, degrees: Int): Triple<Int, Int, IntArray> {
+        val rotation = ((degrees % 360) + 360) % 360
+        if (rotation == 0) return Triple(w, h, input)
+        if (rotation == 180) {
+            val out = IntArray(input.size)
+            for (y in 0 until h) for (x in 0 until w) out[(h - 1 - y) * w + (w - 1 - x)] = input[y * w + x]
+            return Triple(w, h, out)
+        }
+        val outW = h
+        val outH = w
+        val out = IntArray(input.size)
+        if (rotation == 90) {
+            for (y in 0 until h) for (x in 0 until w) {
+                val dx = h - 1 - y
+                val dy = x
+                out[dy * outW + dx] = input[y * w + x]
+            }
+        } else { // 270 or uncommon value: use counter-clockwise 90 for 270, identity-ish fallback otherwise
+            for (y in 0 until h) for (x in 0 until w) {
+                val dx = y
+                val dy = w - 1 - x
+                out[dy * outW + dx] = input[y * w + x]
+            }
+        }
+        return Triple(outW, outH, out)
     }
 
     private fun sampleRgb(
