@@ -1,0 +1,53 @@
+{
+  "format": "equinox-external-knowledge-v1",
+  "source": {
+    "id": "example-teacher",
+    "version": "1.0"
+  },
+  "base": {
+    "packId": "example-grounded-base",
+    "version": 1
+  },
+  "options": {
+    "deriveEmbeddingRelations": true,
+    "embeddingThreshold": 0.82,
+    "embeddingNeighbors": 6
+  },
+  "nodes": [
+    {
+      "id": "visual_fragment_a",
+      "level": 1,
+      "modality": "vision",
+      "quantTokens": [12001, 12002, 12003],
+      "weight": 20,
+      "confidence": 0.95,
+      "embedding": [0.92, 0.12, 0.04, 0.01]
+    },
+    {
+      "id": "visual_fragment_b",
+      "level": 1,
+      "modality": "vision",
+      "quantTokens": [12004, 12005, 12006],
+      "weight": 18,
+      "confidence": 0.93,
+      "embedding": [0.89, 0.16, 0.05, 0.02]
+    },
+    {
+      "id": "visual_structure_ab",
+      "level": 2,
+      "modality": "vision",
+      "members": ["visual_fragment_a", "visual_fragment_b"],
+      "weight": 40,
+      "confidence": 0.97,
+      "embedding": [0.91, 0.14, 0.05, 0.02]
+    }
+  ],
+  "relations": [
+    {
+      "from": "visual_fragment_a",
+      "to": "visual_fragment_b",
+      "strength": 0.78,
+      "bidirectional": true
+    }
+  ]
+}

@@ -27,7 +27,6 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -120,6 +119,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val externalKnowledgeImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        if (::externalKnowledgeStatus.isInitialized) externalKnowledgeStatus.text = "External Knowledge: Dry-Run…"
+        thread(name = "Equinox-ExternalKnowledge-DryRun") {
+            val report = runCatching {
+                contentResolver.openInputStream(uri)?.let { ExternalKnowledgeConverter().parseAndCompile(it) }
+            }.getOrNull() ?: ExternalImportReport(
+                valid = false, sourceId = "", sourceVersion = "", packId = "", packVersion = 0,
+                nodesRead = 0, macrosCompiled = 0, explicitRelationsRead = 0, embeddingRelationsDerived = 0, finalRelations = 0,
+                issues = listOf(ImportIssue(ImportIssue.Severity.ERROR, "Datei konnte nicht gelesen werden"))
+            )
+            runOnUiThread { showExternalKnowledgeDryRun(report) }
+        }
+    }
+
     private val livePipeline = LowLatencyLivePipeline()
     private val performanceGovernor = PerformanceGovernor()
     private var visualAnalyzer: VisualGridAnalyzer? = null
@@ -180,6 +194,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var profiles: MemoryProfileManager
     private lateinit var profileSpinner: Spinner
     private lateinit var profileStatus: TextView
+    private lateinit var externalKnowledgeStatus: TextView
     private var profileSpinnerSyncing = false
     private lateinit var diagnostics: DiagnosticsManager
     private lateinit var diagnosticsStatus: TextView
@@ -295,8 +310,8 @@ class MainActivity : ComponentActivity() {
             LowLatencyLivePipeline.DelayPreset.fromName(latencyPrefs.getString("preset", null))
         )
 
-        // Step 30: one physical GPU surface. Reality, Hybrid and Memory are no longer
-        // separate render windows; they are blend states of the same persistent OpenGL canvas.
+        // Step 46.1: HYPNO is the only product renderer. Live sensors may still activate
+        // the Unified State, but raw camera pigment is no longer exposed as a Reality mode.
         val rootFrame = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(6, 8, 12))
         }
@@ -304,44 +319,27 @@ class MainActivity : ComponentActivity() {
         surfaceVideo = GpuMemoryVideoView(this).apply {
             setModeLabel("HYPNO")
             setPresentationMode(UnifiedPresentationMode.HYPNO)
-            setMemoryBlend(0.35f)
-            unifiedAudio.setMemoryBlend(0.35f)
+            // Pure generative HYPNO surface: sensor input influences state, not visible camera pixels.
+            setMemoryBlend(1.0f)
             visibility = View.VISIBLE
         }
+        // Audio still reads the same Unified State. Its internal context weighting is not a product UI mode.
+        unifiedAudio.setMemoryBlend(0.35f)
         rootFrame.addView(surfaceVideo, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
 
-        // One continuous Reality <-> Memory control instead of CANVAS/LIVE tabs.
-        // 0 = camera pigment dominates, 1 = naked memory tissue. Everything between is Hybrid.
+        // Compact product dock. HYPNO itself has no mode switch and no Reality <-> Memory slider.
+        // LIVE/DREAM chooses only the activation source; it never changes the renderer.
         val controlBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(12), dp(8), dp(10), dp(8))
-            background = roundedBackground(Color.argb(232, 12, 14, 20), 24f, Color.argb(46, 255, 255, 255), 1)
+            setPadding(dp(8), dp(7), dp(8), dp(7))
+            background = roundedBackground(Color.argb(218, 12, 14, 20), 24f, Color.argb(42, 255, 255, 255), 1)
             elevation = dp(12).toFloat()
         }
-        val realityLabel = TextView(this).apply {
-            text = "REALITY"
-            textSize = 10f
-            letterSpacing = 0.12f
-            setTextColor(Color.rgb(188, 197, 211))
-            gravity = Gravity.CENTER
-        }
-        val blendSlider = SeekBar(this).apply {
-            max = 100
-            progress = 35
-            splitTrack = false
-        }
-        val memoryLabel = TextView(this).apply {
-            text = "MEMORY 35%"
-            textSize = 10f
-            letterSpacing = 0.06f
-            setTextColor(Color.rgb(233, 211, 143))
-            gravity = Gravity.CENTER
-        }
         productModeButton = TextView(this).apply {
-            text = "PLAY"
+            text = "LIVE"
             textSize = 11f
             letterSpacing = 0.06f
             gravity = Gravity.CENTER
@@ -349,7 +347,7 @@ class MainActivity : ComponentActivity() {
             background = roundedBackground(Color.argb(64, 255, 255, 255), 18f)
             isClickable = true
             isFocusable = true
-            contentDescription = "PLAY oder DREAM"
+            contentDescription = "HYPNO Aktivierungsquelle LIVE oder DREAM"
             attachPressMotion(this)
         }
         productAudioButton = TextView(this).apply {
@@ -384,20 +382,15 @@ class MainActivity : ComponentActivity() {
             isFocusable = true
             attachPressMotion(this)
         }
-        controlBar.addView(realityLabel, LinearLayout.LayoutParams(dp(58), dp(48)))
-        controlBar.addView(blendSlider, LinearLayout.LayoutParams(0, dp(48), 1f))
-        controlBar.addView(memoryLabel, LinearLayout.LayoutParams(dp(72), dp(48)))
-        controlBar.addView(productModeButton, LinearLayout.LayoutParams(dp(58), dp(48)))
-        controlBar.addView(productAudioButton, LinearLayout.LayoutParams(dp(50), dp(48)))
-        controlBar.addView(captureButton, LinearLayout.LayoutParams(dp(54), dp(48)))
-        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(54), dp(48)))
+        controlBar.addView(productModeButton, LinearLayout.LayoutParams(dp(68), dp(46)))
+        controlBar.addView(productAudioButton, LinearLayout.LayoutParams(dp(50), dp(46)).apply { marginStart = dp(6) })
+        controlBar.addView(captureButton, LinearLayout.LayoutParams(dp(58), dp(46)).apply { marginStart = dp(6) })
+        controlBar.addView(settingsButton, LinearLayout.LayoutParams(dp(50), dp(46)).apply { marginStart = dp(6) })
         val controlBarParams = FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
         ).apply {
-            marginStart = dp(12)
-            marginEnd = dp(12)
             bottomMargin = dp(10)
         }
         rootFrame.addView(controlBar, controlBarParams)
@@ -473,7 +466,7 @@ class MainActivity : ComponentActivity() {
         })
 
         settingsRoot.addView(label("EQUINOX v0.6 · SETTINGS", 24f, 4))
-        settingsRoot.addView(label("STEP 43 — HYPNO MODE", 13f, 4).apply {
+        settingsRoot.addView(label("PRODUCT — HYPNO ONLY", 13f, 4).apply {
             setTextColor(Color.rgb(53, 214, 200))
         })
         captureStatus = label("Aufnahme: bereit · MP4 / H.264 + Unified Audio AAC", 12f, 4).apply {
@@ -547,6 +540,9 @@ class MainActivity : ComponentActivity() {
 
         fun closeSettingsOverlay() {
             if (!settingsOpen) return
+            // STRUCTURE is a LAB-only diagnostic preview. The product surface is always HYPNO.
+            surfaceVideo.setPresentationMode(UnifiedPresentationMode.HYPNO)
+            surfaceVideo.setModeLabel("HYPNO")
             settingsOpen = false
             settingsScrim.animate().alpha(0f).setDuration(170L).withEndAction {
                 settingsScrim.visibility = View.GONE
@@ -563,22 +559,6 @@ class MainActivity : ComponentActivity() {
                 }.start()
             refreshGraph()
         }
-
-        blendSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val blend = progress.coerceIn(0, 100) / 100f
-                surfaceVideo.setMemoryBlend(blend)
-                unifiedAudio.setMemoryBlend(blend)
-                memoryLabel.text = "MEMORY ${progress.coerceIn(0, 100)}%"
-                refreshGraph()
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {
-                seekBar?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            }
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                seekBar?.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-            }
-        })
 
         productModeButton.setOnClickListener {
             if (memory.cognitiveMode() == CognitiveMode.DREAM) enterPlayMode() else startDreamPlayback()
@@ -993,6 +973,22 @@ class MainActivity : ComponentActivity() {
             }
         })
 
+        memoryPage.addView(label("EXTERNAL KNOWLEDGE IMPORT", 14f, 10).apply {
+            setTextColor(Color.rgb(205, 182, 245))
+        })
+        memoryPage.addView(label(
+            "Step 46 importiert nur das kanonische equinox-external-knowledge-v1 Schema. Erst Dry-Run/Validierung, dann optionaler atomarer BASE-Install. Embeddings dürfen nur sparse Relationen zwischen bereits geerdeten Makros ableiten.",
+            12f, 4
+        ).apply { setTextColor(Color.LTGRAY) })
+        externalKnowledgeStatus = label("External Knowledge: bereit · noch kein Import", 12f, 5).apply {
+            setTextColor(Color.rgb(190, 205, 235))
+        }
+        memoryPage.addView(externalKnowledgeStatus)
+        memoryPage.addView(Button(this).apply {
+            text = "EXTERNAL KNOWLEDGE DRY-RUN / IMPORT"
+            setOnClickListener { externalKnowledgeImportLauncher.launch(arrayOf("application/json", "text/json", "text/plain", "*/*")) }
+        }, buttonParams(6))
+
         memoryPage.addView(label("MEMORY PROFILES", 16f, 18).apply {
             setTextColor(Color.rgb(233, 211, 143))
         })
@@ -1167,6 +1163,68 @@ class MainActivity : ComponentActivity() {
         if (::adaptiveVisualQuantizerStatus.isInitialized) adaptiveVisualQuantizerStatus.text = adaptiveVisualQuantizerText()
     }
 
+    private fun showExternalKnowledgeDryRun(report: ExternalImportReport) {
+        if (!::externalKnowledgeStatus.isInitialized) return
+        val issuePreview = report.issues.take(5).joinToString("\n") { issue ->
+            "${if (issue.severity == ImportIssue.Severity.ERROR) "ERROR" else "WARN"}: ${issue.message}"
+        }
+        externalKnowledgeStatus.text = if (report.valid) {
+            "Dry-Run OK: ${report.packId} v${report.packVersion} · ${report.macrosCompiled} Makros · ${report.finalRelations} Relationen"
+        } else {
+            "Dry-Run FEHLER: ${report.errors.size} Error(s) · ${report.warnings.size} Warnung(en)"
+        }
+
+        val summary = buildString {
+            append("Quelle: ").append(report.sourceId.ifBlank { "—" })
+            if (report.sourceVersion.isNotBlank()) append(" ").append(report.sourceVersion)
+            append("\nBase: ").append(report.packId.ifBlank { "—" }).append(" v").append(report.packVersion)
+            append("\nNodes: ").append(report.nodesRead)
+            append("\nMakros: ").append(report.macrosCompiled)
+            append("\nExplizite Relationen: ").append(report.explicitRelationsRead)
+            append("\nEmbedding-Relationen: ").append(report.embeddingRelationsDerived)
+            append("\nFinale Relationen: ").append(report.finalRelations)
+            append("\nWarnings: ").append(report.warnings.size).append(" · Errors: ").append(report.errors.size)
+            if (issuePreview.isNotBlank()) append("\n\n").append(issuePreview)
+        }
+
+        val builder = AlertDialog.Builder(this)
+            .setTitle(if (report.valid) "External Knowledge — Dry-Run OK" else "External Knowledge — abgelehnt")
+            .setMessage(summary)
+            .setNegativeButton("Schließen", null)
+
+        val compiledPack = report.compiledPack
+        if (report.valid && compiledPack != null) {
+            val requirement = memory.baseRequirement()
+            val compatible = !requirement.required || (
+                report.packId == requirement.packId && report.packVersion >= requirement.minimumVersion
+            )
+            if (compatible) {
+                builder.setPositiveButton("BASE INSTALLIEREN") { _, _ -> installExternalBasePack(compiledPack) }
+            } else {
+                builder.setMessage(summary + "\n\nINSTALL BLOCKIERT: Aktives Profil benötigt ${requirement.packId} >= v${requirement.minimumVersion}. Ein anderer Base-Pack würde dessen DERIVED-Wissen quarantinen.")
+            }
+        }
+        builder.show()
+    }
+
+    private fun installExternalBasePack(pack: CompiledBasePack) {
+        stopAllForProfileSwitch()
+        saveLiveIdentity()
+        externalKnowledgeStatus.text = "External Knowledge: installiere ${pack.packId} v${pack.version}…"
+        thread(name = "Equinox-BasePack-Install") {
+            val result = BaseKnowledgeRepository(this).install(pack)
+            runOnUiThread {
+                if (result.success) {
+                    reloadLearnedIdentity()
+                    externalKnowledgeStatus.text = "BASE installiert: ${result.manifest.packId} v${result.manifest.version} · ${result.manifest.macroCount} Makros · ${result.manifest.relationCount} Relationen"
+                } else {
+                    externalKnowledgeStatus.text = "BASE-Install fehlgeschlagen: ${result.message}"
+                }
+                updateMemoryStats()
+            }
+        }
+    }
+
     private fun buildLabPage() {
         labPage.addView(label("LAB — DEBUG / SPEICHER / PARAMETER", 20f, 18).apply {
             setTextColor(Color.rgb(150, 175, 210))
@@ -1180,7 +1238,7 @@ class MainActivity : ComponentActivity() {
         }
         labPage.addView(productRendererStatus)
         labPage.addView(label(
-            "HYPNO ist die Consumer-Darstellung. STRUCTURE hält die technische Tier-/Gewebe-Projektion zum Vergleichen bereit. HYPNO und Unified Audio lesen in Step 44 denselben normalisierten Präsentationszustand; bei Live-Kamera sogar denselben verzögerten WorkingSetSnapshot. Nichts davon schreibt in MemoryModel zurück.",
+            "HYPNO ist die einzige Consumer-Darstellung. STRUCTURE ist nur eine temporäre LAB-Vorschau und wird beim Schließen der Einstellungen automatisch auf HYPNO zurückgesetzt. HYPNO und Unified Audio lesen denselben normalisierten Präsentationszustand; bei Live-Kamera sogar denselben verzögerten WorkingSetSnapshot. Nichts davon schreibt in MemoryModel zurück.",
             12f,
             4
         ).apply { setTextColor(Color.LTGRAY) })
@@ -1729,7 +1787,11 @@ class MainActivity : ComponentActivity() {
     private fun syncCognitiveModeUi() {
         val mode = memory.cognitiveMode()
         if (::productModeButton.isInitialized) {
-            productModeButton.text = mode.label
+            productModeButton.text = when (mode) {
+                CognitiveMode.LEARN -> "LEARN"
+                CognitiveMode.PLAY -> "LIVE"
+                CognitiveMode.DREAM -> "DREAM"
+            }
             productModeButton.setTextColor(when (mode) {
                 CognitiveMode.LEARN -> Color.rgb(105, 225, 235)
                 CognitiveMode.PLAY -> Color.rgb(145, 230, 210)

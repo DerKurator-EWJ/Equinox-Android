@@ -215,8 +215,8 @@ class IndexedLongTermStore(context: Context, storeDirName: String = STORE_DIR) {
         exchanges: Collection<StoredExchange>
     ): WriteResult {
         val parent = root.parentFile ?: error("No filesDir parent")
-        val temp = File(parent, "${STORE_DIR}_tmp")
-        val backup = File(parent, "${STORE_DIR}_bak")
+        val temp = File(parent, "${root.name}_tmp")
+        val backup = File(parent, "${root.name}_bak")
         temp.deleteRecursively()
         temp.mkdirs()
 

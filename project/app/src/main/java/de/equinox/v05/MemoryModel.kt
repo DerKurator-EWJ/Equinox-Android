@@ -640,8 +640,15 @@ class MemoryModel(context: Context) {
     @Synchronized
     fun cognitiveMode(): CognitiveMode = cognitiveMode
 
+    data class BaseRequirement(val packId: String, val minimumVersion: Int) {
+        val required: Boolean get() = packId.isNotBlank()
+    }
+
     @Synchronized
     fun baseKnowledgeEnabled(): Boolean = baseKnowledge.isEnabled()
+
+    @Synchronized
+    fun baseRequirement(): BaseRequirement = BaseRequirement(requiredBasePackId, requiredBaseVersion)
 
     /**
      * Disabling BASE is the genuine blank-mode switch. Personal memory stays mounted; BASE and
