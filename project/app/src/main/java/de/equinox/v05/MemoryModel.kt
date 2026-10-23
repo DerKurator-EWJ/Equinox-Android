@@ -5,7 +5,9 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.util.ArrayDeque
+import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 
 private const val MACRO_ID_BASE = 1_000_000
 private const val MAX_ABSTRACTION_LEVEL = 4
@@ -14,17 +16,27 @@ private const val MAX_PATTERN_LENGTH = 6
 private const val MAX_PATTERN_CANDIDATES = 6_000
 private const val MAX_PROMOTIONS_PER_LEVEL = 24
 
+// Step 03: bounded event-driven working set.
+private const val MAX_ACTIVE_MACROS = 48
+private const val MAX_RETRIEVED_NEIGHBORS = 6
+private const val ACTIVE_TTL_OBSERVATIONS = 24L
+private const val ACTUAL_DECAY = 0.82
+private const val EXPECTATION_DECAY = 0.78
+private const val EXCHANGE_EMA_ALPHA = 0.15
+
 /**
- * v0.6 Step 02
+ * v0.6 Step 03
  *
- * Architecture change:
- * - level-0 sensor symbols are a quant alphabet, not a relational graph
- * - only recurring patterns are promoted to persistent macro nodes
- * - only macro nodes create persistent relations
- * - matching is lazy: each new token checks only tails of the currently active stream
- * - higher abstraction levels receive activated macro IDs as their own token stream
+ * Adds an active working set, indexed lazy retrieval and the first bounded
+ * overexchange implementation on top of the Step 02 quant/macro architecture.
  *
- * The public API deliberately stays compatible with the stable Step12 UI.
+ * Operational definitions used here:
+ * - A_i = current/live activation of macro i
+ * - B_i = contextual expectation of macro i retrieved from learned relations
+ * - R_ij = A_i*B_j - B_i*A_j
+ *
+ * Only currently active/retrieved macros participate. The persistent memory can
+ * therefore grow without forcing a full-graph calculation on every sensor event.
  */
 data class MemoryStats(
     val persistentCodes: Int,
@@ -44,7 +56,11 @@ data class MemoryStats(
     val visualPersistentCodes: Int,
     val crossModalRelations: Int,
     val sequenceCapacity: Int,
-    val sequenceCapacityUsedPercent: Double
+    val sequenceCapacityUsedPercent: Double,
+    val activeMacros: Int = 0,
+    val retrievedMacros: Int = 0,
+    val overexchangePairs: Int = 0,
+    val meanAbsOverexchange: Double = 0.0
 )
 
 data class GraphNode(
@@ -55,7 +71,9 @@ data class GraphNode(
     val memberCount: Int = 1,
     val kind: String = "micro",
     val modality: String = "audio",
-    val displayColor: Int = 0
+    val displayColor: Int = 0,
+    val activation: Double = 0.0,
+    val expectation: Double = 0.0
 ) {
     val isMacro: Boolean get() = abstractionLevel > 0
 }
@@ -65,7 +83,8 @@ data class GraphEdge(
     val toId: Int,
     val weight: Long,
     val abstractionLevel: Int = 0,
-    val isMembership: Boolean = false
+    val isMembership: Boolean = false,
+    val overexchange: Double = 0.0
 ) {
     val isMacro: Boolean get() = abstractionLevel > 0 || isMembership
 }
@@ -92,6 +111,27 @@ data class SonificationMacro(
 data class SonificationSnapshot(
     val micro: List<SonificationNode>,
     val macros: List<SonificationMacro>
+)
+
+data class ActiveMacroNode(
+    val id: Int,
+    val abstractionLevel: Int,
+    val modality: String,
+    val activation: Double,
+    val expectation: Double,
+    val exchangeBias: Double,
+    val retrieved: Boolean
+)
+
+data class ActiveExchange(
+    val fromId: Int,
+    val toId: Int,
+    val value: Double
+)
+
+data class WorkingSetSnapshot(
+    val nodes: List<ActiveMacroNode>,
+    val exchanges: List<ActiveExchange>
 )
 
 data class ConsolidationResult(
@@ -126,6 +166,19 @@ class MemoryModel(context: Context) {
         var lastActivatedObservation: Long = 0L
     )
 
+    private data class WorkingMacro(
+        var actual: Double,
+        var expected: Double,
+        var lastTouchedObservation: Long,
+        var retrieved: Boolean,
+        var exchangeBias: Double = 0.0
+    )
+
+    private data class ExchangeMemory(
+        var ema: Double,
+        var samples: Long
+    )
+
     // New file on purpose. Step 02 changes the meaning of the memory graph and
     // therefore does not silently reinterpret Step12/Step01 relations.
     private val file = File(context.filesDir, "equinox_v06_memory.json")
@@ -141,6 +194,16 @@ class MemoryModel(context: Context) {
     private val macroBySignature = mutableMapOf<String, Int>()
     private val macroRelations = mutableMapOf<Long, Long>()
 
+    // Relation lookup index: a macro can retrieve only its known local neighborhood.
+    // The core never scans every relation just to react to a live event.
+    private val relationIndex = mutableMapOf<Int, MutableSet<Long>>()
+
+    // Momentary state is intentionally NOT persisted.
+    private val activeWorking = mutableMapOf<Int, WorkingMacro>()
+
+    // Long-term smoothed overexchange memory. Keys are canonical unordered pairs.
+    private val exchangeMemory = mutableMapOf<Long, ExchangeMemory>()
+
     // One short active stream per modality and abstraction source level.
     private val rolling = mutableMapOf<String, ArrayDeque<Int>>()
     private val previousActiveMacro = mutableMapOf<String, Int>()
@@ -148,6 +211,10 @@ class MemoryModel(context: Context) {
     private var nextMacroId = MACRO_ID_BASE
     private var macroFrozen = false
     private var observations = 0L
+
+    private var lastRetrievedCount = 0
+    private var lastExchangePairs = 0
+    private var lastMeanAbsExchange = 0.0
 
     init { load() }
 
@@ -245,14 +312,58 @@ class MemoryModel(context: Context) {
         macro.weight++
         macro.lastActivatedObservation = observations
 
-        val relationKey = streamKey(macro.level, macro.modality)
-        previousActiveMacro[relationKey]?.let { previous ->
-            if (previous != macro.id) {
-                val key = pairKey(previous, macro.id)
-                macroRelations[key] = (macroRelations[key] ?: 0L) + 1L
-            }
+        decayAndPruneWorkingSet()
+
+        val relationStreamKey = streamKey(macro.level, macro.modality)
+        val previous = previousActiveMacro[relationStreamKey]
+
+        // A-state: this macro actually occurred in the current live stream.
+        val liveState = activeWorking.getOrPut(macro.id) {
+            WorkingMacro(
+                actual = 0.0,
+                expected = 0.0,
+                lastTouchedObservation = observations,
+                retrieved = false
+            )
         }
-        previousActiveMacro[relationKey] = macro.id
+        liveState.actual = 1.0
+        liveState.lastTouchedObservation = observations
+        liveState.retrieved = false
+
+        // Persist only an observed macro-to-macro transition. Index it immediately,
+        // so subsequent events can retrieve it without a global relation scan.
+        if (previous != null && previous != macro.id) {
+            val key = pairKey(previous, macro.id)
+            macroRelations[key] = (macroRelations[key] ?: 0L) + 1L
+            indexRelation(key)
+        }
+        previousActiveMacro[relationStreamKey] = macro.id
+
+        // Lazy retrieval: only the strongest local neighbors of the live macro are
+        // materialized into the working set. Their B-state is contextual expectation.
+        val retrieved = retrieveNeighborsIntoWorkingSet(macro.id, macro.modality)
+
+        val localIds = LinkedHashSet<Int>()
+        localIds += macro.id
+        previous?.takeIf { it != macro.id }?.let {
+            touchAsContext(it, expected = relationConfidence(it, macro.id))
+            localIds += it
+        }
+        localIds.addAll(retrieved)
+
+        // Overexchange exists only in this small event-local frontier.
+        val exchangeValues = ArrayList<Double>()
+        for (otherId in localIds) {
+            if (otherId == macro.id) continue
+            val value = calculateAndRememberOverexchange(macro.id, otherId)
+            if (value != null) exchangeValues += abs(value)
+        }
+
+        lastRetrievedCount = retrieved.size
+        lastExchangePairs = exchangeValues.size
+        lastMeanAbsExchange = if (exchangeValues.isEmpty()) 0.0 else exchangeValues.average()
+
+        enforceWorkingSetLimit()
 
         // The activated macro becomes one token for the next abstraction stream.
         feedToken(
@@ -261,6 +372,110 @@ class MemoryModel(context: Context) {
             tokenId = macro.id
         )
     }
+
+    /** Pull only indexed neighbors of one active macro into momentary context. */
+    private fun retrieveNeighborsIntoWorkingSet(sourceId: Int, modality: String): List<Int> {
+        val keys = relationIndex[sourceId] ?: return emptyList()
+        return keys.asSequence()
+            .mapNotNull { key ->
+                val from = keyFrom(key)
+                val to = keyTo(key)
+                val other = if (from == sourceId) to else from
+                val otherMacro = macros[other] ?: return@mapNotNull null
+                if (otherMacro.modality != modality) return@mapNotNull null
+                val weight = macroRelations[key] ?: return@mapNotNull null
+                Triple(other, weight, relationConfidenceByWeight(weight))
+            }
+            .sortedByDescending { it.second }
+            .take(MAX_RETRIEVED_NEIGHBORS)
+            .map { (id, _, expectation) ->
+                touchAsContext(id, expectation)
+                id
+            }
+            .toList()
+    }
+
+    private fun touchAsContext(id: Int, expected: Double) {
+        if (!macros.containsKey(id)) return
+        val state = activeWorking.getOrPut(id) {
+            WorkingMacro(
+                actual = 0.0,
+                expected = 0.0,
+                lastTouchedObservation = observations,
+                retrieved = true
+            )
+        }
+        state.expected = max(state.expected, expected.coerceIn(0.0, 1.0))
+        state.lastTouchedObservation = observations
+        if (state.actual < 0.5) state.retrieved = true
+
+        // Retrieval is read-only: do not recursively activate or rewrite macro history.
+    }
+
+    private fun relationConfidence(fromId: Int, toId: Int): Double {
+        val direct = macroRelations[pairKey(fromId, toId)] ?: 0L
+        val reverse = macroRelations[pairKey(toId, fromId)] ?: 0L
+        return relationConfidenceByWeight(max(direct, reverse))
+    }
+
+    private fun relationConfidenceByWeight(weight: Long): Double =
+        (weight.toDouble() / (weight.toDouble() + 8.0)).coerceIn(0.0, 1.0)
+
+    private fun calculateAndRememberOverexchange(aId: Int, bId: Int): Double? {
+        if (aId == bId) return null
+        val a = activeWorking[aId] ?: return null
+        val b = activeWorking[bId] ?: return null
+
+        // Operational Step-03 meaning:
+        // A = live activation, B = retrieved contextual expectation.
+        val r = a.actual * b.expected - a.expected * b.actual
+        if (!r.isFinite()) return null
+
+        a.exchangeBias = a.exchangeBias * 0.80 + r * 0.20
+        b.exchangeBias = b.exchangeBias * 0.80 - r * 0.20
+
+        val key = exchangePairKey(aId, bId)
+        val canonicalValue = if (aId <= bId) r else -r
+        val memory = exchangeMemory.getOrPut(key) { ExchangeMemory(ema = 0.0, samples = 0L) }
+        memory.ema = if (memory.samples == 0L) {
+            canonicalValue
+        } else {
+            (1.0 - EXCHANGE_EMA_ALPHA) * memory.ema + EXCHANGE_EMA_ALPHA * canonicalValue
+        }
+        memory.samples++
+        return r
+    }
+
+    private fun decayAndPruneWorkingSet() {
+        val iterator = activeWorking.iterator()
+        while (iterator.hasNext()) {
+            val (_, state) = iterator.next()
+            state.actual *= ACTUAL_DECAY
+            state.expected *= EXPECTATION_DECAY
+            state.exchangeBias *= 0.90
+
+            val age = observations - state.lastTouchedObservation
+            if (age > ACTIVE_TTL_OBSERVATIONS ||
+                (state.actual < 0.01 && state.expected < 0.01 && abs(state.exchangeBias) < 0.01)
+            ) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun enforceWorkingSetLimit() {
+        if (activeWorking.size <= MAX_ACTIVE_MACROS) return
+        val keepIds = activeWorking.entries
+            .sortedByDescending { (_, state) ->
+                state.actual * 2.0 + state.expected + abs(state.exchangeBias) * 0.5 -
+                    (observations - state.lastTouchedObservation).coerceAtLeast(0L) * 0.01
+            }
+            .take(MAX_ACTIVE_MACROS)
+            .map { it.key }
+            .toSet()
+        activeWorking.keys.retainAll(keepIds)
+    }
+
 
     @Synchronized
     fun consolidate(
@@ -376,7 +591,11 @@ class MemoryModel(context: Context) {
             macros.values
                 .filter { it.level == level }
                 .sortedWith(
-                    compareByDescending<MacroCode> { it.lastActivatedObservation }
+                    compareByDescending<MacroCode> {
+                        val state = activeWorking[it.id]
+                        if (state == null) 0.0 else state.actual * 2.0 + state.expected
+                    }
+                        .thenByDescending { it.lastActivatedObservation }
                         .thenByDescending { it.weight }
                 )
                 .take(maxMacroNodesPerLevel)
@@ -410,7 +629,9 @@ class MemoryModel(context: Context) {
                 memberCount = m.tokens.size,
                 kind = "pattern",
                 modality = m.modality,
-                displayColor = 0
+                displayColor = 0,
+                activation = activeWorking[m.id]?.actual ?: 0.0,
+                expectation = activeWorking[m.id]?.expected ?: 0.0
             )
         }
 
@@ -436,7 +657,13 @@ class MemoryModel(context: Context) {
                 val to = keyTo(key)
                 if (from !in macroIds || to !in macroIds) return@mapNotNull null
                 val level = macros[from]?.level ?: return@mapNotNull null
-                GraphEdge(from, to, weight, abstractionLevel = level)
+                GraphEdge(
+                    fromId = from,
+                    toId = to,
+                    weight = weight,
+                    abstractionLevel = level,
+                    overexchange = exchangeValue(from, to)
+                )
             }
             .sortedByDescending { it.weight }
             .take(maxEdges)
@@ -459,7 +686,11 @@ class MemoryModel(context: Context) {
         val macro = macros.values
             .filter { it.modality == "audio" }
             .sortedWith(
-                compareByDescending<MacroCode> { it.lastActivatedObservation }
+                compareByDescending<MacroCode> {
+                    val state = activeWorking[it.id]
+                    if (state == null) 0.0 else state.actual * 2.0 + state.expected
+                }
+                    .thenByDescending { it.lastActivatedObservation }
                     .thenByDescending { it.level }
                     .thenByDescending { it.weight }
             )
@@ -475,6 +706,43 @@ class MemoryModel(context: Context) {
             }
 
         return SonificationSnapshot(micro, macro)
+    }
+
+    @Synchronized
+    fun workingSetSnapshot(maxNodes: Int = MAX_ACTIVE_MACROS): WorkingSetSnapshot {
+        val selected = activeWorking.entries
+            .filter { macros.containsKey(it.key) }
+            .sortedByDescending { (_, state) ->
+                state.actual * 2.0 + state.expected + abs(state.exchangeBias) * 0.5
+            }
+            .take(maxNodes)
+
+        val selectedIds = selected.map { it.key }.toSet()
+        val nodes = selected.mapNotNull { (id, state) ->
+            val macro = macros[id] ?: return@mapNotNull null
+            ActiveMacroNode(
+                id = id,
+                abstractionLevel = macro.level,
+                modality = macro.modality,
+                activation = state.actual,
+                expectation = state.expected,
+                exchangeBias = state.exchangeBias,
+                retrieved = state.retrieved
+            )
+        }
+
+        val exchanges = exchangeMemory.entries.asSequence()
+            .mapNotNull { (key, memory) ->
+                val a = keyFrom(key)
+                val b = keyTo(key)
+                if (a !in selectedIds || b !in selectedIds) return@mapNotNull null
+                ActiveExchange(a, b, memory.ema)
+            }
+            .sortedByDescending { abs(it.value) }
+            .take(maxNodes * 2)
+            .toList()
+
+        return WorkingSetSnapshot(nodes, exchanges)
     }
 
     @Synchronized
@@ -505,7 +773,11 @@ class MemoryModel(context: Context) {
             visualPersistentCodes = quants.values.count { it.modality == "vision" },
             crossModalRelations = 0,
             sequenceCapacity = MAX_PATTERN_CANDIDATES,
-            sequenceCapacityUsedPercent = candidates.size * 100.0 / MAX_PATTERN_CANDIDATES.toDouble()
+            sequenceCapacityUsedPercent = candidates.size * 100.0 / MAX_PATTERN_CANDIDATES.toDouble(),
+            activeMacros = activeWorking.size,
+            retrievedMacros = activeWorking.values.count { it.retrieved },
+            overexchangePairs = lastExchangePairs,
+            meanAbsOverexchange = lastMeanAbsExchange
         )
     }
 
@@ -516,8 +788,14 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         macroRelations.clear()
+        relationIndex.clear()
+        activeWorking.clear()
+        exchangeMemory.clear()
         rolling.clear()
         previousActiveMacro.clear()
+        lastRetrievedCount = 0
+        lastExchangePairs = 0
+        lastMeanAbsExchange = 0.0
         nextMacroId = MACRO_ID_BASE
         macroFrozen = false
         observations = 0L
@@ -534,8 +812,14 @@ class MemoryModel(context: Context) {
         macros.clear()
         macroBySignature.clear()
         macroRelations.clear()
+        relationIndex.clear()
+        activeWorking.clear()
+        exchangeMemory.clear()
         rolling.clear()
         previousActiveMacro.clear()
+        lastRetrievedCount = 0
+        lastExchangePairs = 0
+        lastMeanAbsExchange = 0.0
         nextMacroId = MACRO_ID_BASE
         macroFrozen = false
         observations = 0L
@@ -545,7 +829,7 @@ class MemoryModel(context: Context) {
     private fun save() {
         try {
             val root = JSONObject()
-                .put("formatVersion", 60_02)
+                .put("formatVersion", 60_03)
                 .put("observations", observations)
                 .put("nextMacroId", nextMacroId)
                 .put("macroFrozen", macroFrozen)
@@ -585,6 +869,17 @@ class MemoryModel(context: Context) {
                 relationArray.put(JSONObject().put("key", key).put("weight", weight))
             }
             root.put("macroRelations", relationArray)
+
+            val exchangeArray = JSONArray()
+            exchangeMemory.forEach { (key, memory) ->
+                exchangeArray.put(
+                    JSONObject()
+                        .put("key", key)
+                        .put("ema", memory.ema)
+                        .put("samples", memory.samples)
+                )
+            }
+            root.put("overexchange", exchangeArray)
 
             file.writeText(root.toString())
         } catch (_: Exception) {
@@ -638,17 +933,56 @@ class MemoryModel(context: Context) {
             val relationArray = root.optJSONArray("macroRelations") ?: JSONArray()
             for (i in 0 until relationArray.length()) {
                 val o = relationArray.getJSONObject(i)
-                macroRelations[o.getLong("key")] = o.optLong("weight", 0L)
+                val key = o.getLong("key")
+                macroRelations[key] = o.optLong("weight", 0L)
+                indexRelation(key)
+            }
+
+            val exchangeArray = root.optJSONArray("overexchange") ?: JSONArray()
+            for (i in 0 until exchangeArray.length()) {
+                val o = exchangeArray.getJSONObject(i)
+                exchangeMemory[o.getLong("key")] = ExchangeMemory(
+                    ema = o.optDouble("ema", 0.0),
+                    samples = o.optLong("samples", 0L)
+                )
             }
         } catch (_: Exception) {
         }
     }
 
     private fun pruneMacroRelations() {
-        if (macroRelations.size <= 4096) return
-        val keep = macroRelations.entries.sortedByDescending { it.value }.take(3072)
-        macroRelations.clear()
-        keep.forEach { macroRelations[it.key] = it.value }
+        if (macroRelations.size > 4096) {
+            val keep = macroRelations.entries.sortedByDescending { it.value }.take(3072)
+            macroRelations.clear()
+            relationIndex.clear()
+            keep.forEach {
+                macroRelations[it.key] = it.value
+                indexRelation(it.key)
+            }
+        }
+
+        if (exchangeMemory.size > 4096) {
+            val keepExchange = exchangeMemory.entries
+                .sortedByDescending { abs(it.value.ema) * min(64L, it.value.samples).toDouble() }
+                .take(3072)
+            exchangeMemory.clear()
+            keepExchange.forEach { exchangeMemory[it.key] = it.value }
+        }
+    }
+
+    private fun indexRelation(key: Long) {
+        val from = keyFrom(key)
+        val to = keyTo(key)
+        relationIndex.getOrPut(from) { linkedSetOf() }.add(key)
+        relationIndex.getOrPut(to) { linkedSetOf() }.add(key)
+    }
+
+    private fun exchangePairKey(a: Int, b: Int): Long =
+        if (a <= b) pairKey(a, b) else pairKey(b, a)
+
+    private fun exchangeValue(from: Int, to: Int): Double {
+        val memory = exchangeMemory[exchangePairKey(from, to)] ?: return 0.0
+        return if (from <= to) memory.ema else -memory.ema
     }
 
     private fun streamKey(level: Int, modality: String): String = "$modality|$level"

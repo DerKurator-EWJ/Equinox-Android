@@ -11,8 +11,8 @@ android {
         applicationId = "de.equinox.v05"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.6-step02-quant-macro-lazy"
+        versionCode = 17
+        versionName = "0.6-step03-active-lazy-exchange"
     }
 
     compileOptions {

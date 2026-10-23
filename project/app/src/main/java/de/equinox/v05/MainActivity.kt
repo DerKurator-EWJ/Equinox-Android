@@ -769,6 +769,7 @@ class MainActivity : ComponentActivity() {
         return "Mikro: ${s.persistentCodes} Codes | ${s.temporaryCodes} temporär | ${s.relations} Relationen\n" +
             "Abstraktion: $levelText | höchste Ebene: L${s.maxAbstractionLevel} | Erzeugung: ${if (s.macroFrozen) "GEFROREN" else "AKTIV"}\n" +
             "Makro gesamt: ${s.macroCodes} | Makrorelationen: ${s.macroRelations}\n" +
+            "Working Set: ${s.activeMacros} aktiv | ${s.retrievedMacros} erinnert | Überaustausch: ${s.overexchangePairs} Paare | Ø|R| ${"%.3f".format(s.meanAbsOverexchange)}\n" +
             "Sequenzen: ${s.sequenceCodes} Codes | ${s.promotedSequences} verdichtet | max Länge ${s.longestSequenceLength} | stärkstes Gewicht ${s.strongestSequenceWeight}\n" +
             "Vision: ${s.visualPersistentCodes} persistente Codes | Crossmodal: ${s.crossModalRelations} Relationen\n" +
             "Sequenzspeicher: ${"%.1f".format(s.sequenceCapacityUsedPercent)}% von ${s.sequenceCapacity}\n" +

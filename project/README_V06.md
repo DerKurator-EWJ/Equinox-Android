@@ -1,39 +1,61 @@
-# Equinox v0.6 — Step 02: Quant Alphabet + Macro Memory + Lazy Activation
+# Equinox v0.6 — Step 03: Active Working Set + Lazy Retrieval + Überaustausch
 
-Basis: v0.6 Step 01 Core/Output Split.
+Basis: der korrigierte Step 02 (`QuantMacroLazy_fixed`). Dieser Schritt baut die neue Laufzeitlogik auf, ohne den funktionierenden Audio-/Kamera-/UI-Pfad neu zu schreiben.
 
-## Was sich jetzt wirklich geändert hat
+## Neu in Step 03
 
-- **Level 0 ist nur noch ein Quant-Alphabet.** Audio- und Kamera-IDs werden erkannt und gezählt, aber zwischen Grundquanten wird **kein persistenter Relationsgraph** mehr aufgebaut.
-- **Gedächtnis beginnt bei wiederkehrenden Mustern.** Kurze Folgen von 2–6 Tokens sammeln zunächst nur temporäre Evidenz. Erst bei wiederholtem Auftreten werden sie zu persistenten Makroknoten.
-- **Relationen existieren nur zwischen Makroknoten.** Das verhindert den alten Mikro-Relationsgraphen.
-- **Lazy / event-driven.** Pro neuem Token werden nur die aktuellen kurzen Stream-Enden geprüft. Es gibt keinen Scan über alle gespeicherten Makros.
-- **Rekursive Abstraktion bis L4.** Wird ein Makro erkannt, wird seine ID als einzelnes Token in die nächste Ebene gespeist. So können Muster aus Makros wiederum Makros werden.
-- **Audio und Vision bleiben in Step 02 getrennte Streams.** Crossmodal-Bindung kommt später wieder gezielt hinein.
-- **Neue Memory-Datei `equinox_v06_memory.json`.** Der alte Step12/Step01-Graph wird absichtlich nicht als neues Modell uminterpretiert.
+### 1. Begrenztes Working Set
+Das persistente Gedächtnis rechnet nicht permanent komplett. Nur aktuell erkannte Makros und wenige aus ihrem bekannten Umfeld abgerufene Makros werden kurzfristig materialisiert.
 
-## Warum das kleiner rechnet
+- maximal 48 aktive Makros
+- aktive Zustände verfallen automatisch
+- Working-Set-Zustände werden nicht dauerhaft gespeichert
 
-Die Arbeit pro Input hängt primär von der kleinen aktiven Tail-Länge (max. 6) und den maximal vier Abstraktionsebenen ab. Gespeicherte Makros werden direkt über ihre Signatur adressiert. Das gesamte Gedächtnis muss nicht permanent berechnet werden.
+### 2. Indexed Lazy Retrieval
+Makrorelationen bekommen einen lokalen Index. Bei einem Live-Ereignis werden nur bis zu 6 starke bekannte Nachbarn des gerade aktiven Makros abgerufen.
 
-## Noch nicht enthalten
+Es gibt keinen Vollscan über alle gespeicherten Makros oder Relationen für die Live-Reaktion.
 
-- Doppelrekursiver Überaustausch / Spiegelmatrix
-- mehrdimensionale Gewichte (Spezifität, Entropie usw.)
-- Template-/Slot-Erkennung
-- F → SSS → Ω+n Ranking
-- neuer Vollbild Live/Memory/Hybrid Output
-- neuer Canvas/Orchester-Generator
-- neuer direkter Audioencoder ohne FFT
+### 3. Erster Überaustausch
+Für Step 03 sind A und B bewusst operational definiert:
+
+- `A_i` = aktuelle/live Aktivierung eines Makros
+- `B_i` = aus bekannten Relationen abgerufene Kontext-Erwartung
+- `R_ij = A_i * B_j - B_i * A_j`
+
+Der Überaustausch wird nur innerhalb der kleinen gerade aktiven Frontier berechnet. Ein geglätteter Langzeitwert wird pro Makropaar gespeichert.
+
+Das ist noch keine physikalische Interpretation der Spiegelmatrix, sondern ein testbarer Informationsmechanismus.
+
+### 4. Output-State erweitert
+`EngineOutputState` enthält jetzt zusätzlich einen read-only `WorkingSetSnapshot` mit:
+
+- aktiven Makros
+- tatsächlicher Aktivierung
+- Erwartung
+- Exchange-Bias
+- gespeicherten Überaustauschwerten
+
+Der vorhandene Renderer muss diese Daten noch nicht verwenden; sie stehen ab jetzt sauber für spätere Live-/Memory-Ausgabe bereit.
+
+### 5. Sichtbare Diagnose
+Im bestehenden UI erscheint zusätzlich:
+
+`Working Set: ... aktiv | ... erinnert | Überaustausch: ... Paare | Ø|R| ...`
+
+Damit lässt sich auf dem Telefon prüfen, ob der neue Mechanismus tatsächlich nur lokal arbeitet.
+
+## Speicher-Kompatibilität
+Step 03 verwendet weiterhin `equinox_v06_memory.json`. Ein Step-02-Gedächtnis kann geladen werden; die neuen Überaustauschdaten fehlen dann zunächst und entstehen erst durch weitere Beobachtungen.
 
 ## Build
+Projektordner direkt in Android Studio öffnen:
 
-1. Diesen Ordner als eigenes Projekt in Android Studio öffnen.
-2. Prüfen, dass der Projektpfad `Equinox_v06_Step02_QuantMacroLazy` ist.
-3. `Build > Build APK(s)`.
-4. Wegen gleicher Application-ID aktualisiert die APK die vorhandene App, sofern derselbe Signing-Key verwendet wird.
+`Equinox_v06_Step03_ActiveLazyExchange`
 
-Hinweis: In der Erstellungsumgebung ist kein Android SDK installiert. Der Quellstand wurde statisch geprüft, aber hier nicht als APK kompiliert.
+Dann `Build > Build APK(s)`.
 
-## Step 02 fixed build note
-Fixed the Kotlin named-argument mismatch in `MemoryModel.load()`: `patternSignature()` accepts `level`, not `streamLevel`.
+Version: `0.6-step03-active-lazy-exchange` / VersionCode 17.
+
+## Nächster logischer Schritt
+Wenn dieser Build stabil läuft: Step 04 — Output-Engine. Live-Modus bekommt einen echten read-only Scene/Audio State; Visualisierung und Klang reagieren auf Aktivierung, Erwartung und Überaustausch, ohne das Gedächtnis selbst zu verändern.

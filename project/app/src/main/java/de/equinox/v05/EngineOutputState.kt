@@ -8,7 +8,8 @@ package de.equinox.v05
 data class EngineOutputState(
     val graph: GraphSnapshot,
     val sound: SonificationSnapshot,
-    val stats: MemoryStats
+    val stats: MemoryStats,
+    val working: WorkingSetSnapshot
 )
 
 class EngineOutputBridge(private val memory: MemoryModel) {
@@ -29,6 +30,7 @@ class EngineOutputBridge(private val memory: MemoryModel) {
             maxMicro = maxSoundMicro,
             maxMacros = maxSoundMacros
         ),
-        stats = memory.stats()
+        stats = memory.stats(),
+        working = memory.workingSetSnapshot()
     )
 }
