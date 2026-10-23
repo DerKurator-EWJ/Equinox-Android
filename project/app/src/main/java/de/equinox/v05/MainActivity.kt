@@ -153,7 +153,7 @@ class MainActivity : ComponentActivity() {
         outer.addView(
             buildHeader(
                 "EQUINOX",
-                "NUTZERANSICHT · v0.5 STEP 13",
+                "NUTZERANSICHT · v0.5 STEP 14",
                 onSwitch = {
                     userPanel.visibility = View.GONE
                     labPanel.visibility = View.VISIBLE
@@ -176,7 +176,7 @@ class MainActivity : ComponentActivity() {
         consolidationText = cardText("Konsolidierung: 15 Sekunden\n$lastConsolidationSummary", 14f)
         cameraText = cardText("Kamera: AUS", 14f)
 
-        body.addView(sectionTitle("LIVE"))
+        body.addView(sectionTitle("LIVE · VISUAL ENGINE"))
         body.addView(statusText)
         body.addView(statsText)
 

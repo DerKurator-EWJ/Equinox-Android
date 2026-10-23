@@ -1,56 +1,57 @@
-# Equinox v0.5 — Step 13
+# Equinox v0.5 — Step 14
 
-Step 13 is the UI restructuring pass.
+Step 14 replaces the old graph-style renderer with the first dedicated Equinox visual engine.
 
-## Main goals
-- modernized UI
-- clean separation between User view and Lab view
-- immersive fullscreen
-- fewer debug-style labels in the normal user experience
+## Goal
+The core still stores relations, not physical x/y/z positions.
 
-## User view
-The default screen now focuses on:
-- live system status
-- memory summary
-- graph
-- 2D/3D switch
-- audio controls
-- camera controls
-- sonification
-- consolidation interval
-- manual consolidation
+The renderer now builds a separate visual scene from the relational memory.
 
-## Lab view
-Technical and development controls are moved out of the normal interface:
-- diagnostic samples
-- CSV diagnostics
-- save slots
-- display HEX settings
-- glow toggle
-- geometry summary
+## New visual architecture
+MemoryModel
+→ GraphSnapshot
+→ VisualGraphModel
+→ layout relaxation / hierarchy
+→ fiber generation
+→ RelationGraphView scene renderer
 
-Switch between both modes from the header.
+## Major changes
+- stable display positions retained between graph updates
+- abstraction-aware preferred distances
+- visible-node cap and visible-edge cap for level-of-detail
+- relation fibers use cubic Bezier paths
+- related fibers receive deterministic bundle bias
+- stronger relations become thicker / more luminous
+- macro abstraction becomes organic glyphs rather than labeled boxes
+- vision remains square-like
+- audio remains circular
+- strong nodes and fibers can glow
+- 2D and pseudo-3D use the same scene
+- pinch zoom
+- drag/pan
+- renderer-only depth
+- no x/y/z written into MemoryModel
 
-## Fullscreen
-Step 13 uses immersive sticky fullscreen:
-- status bar hidden
-- navigation bar hidden
-- system bars can still be shown temporarily by swipe
+## What this is
+This is the first actual visualization-engine layer for Equinox.
+
+## What this is not yet
+It is not OpenGL/Vulkan, GPU particle rendering, real volumetric 3D, or a physics engine.
+The renderer is still Android Canvas based.
+
+The next visual iteration can focus on animation, smoothing between states,
+more sophisticated fiber bundling, level-of-detail transitions and eventual
+GPU rendering if performance requires it.
 
 ## Preserved
+- Step 13 User/Lab split + fullscreen
 - Step 12 diagnostics
-- Step 11 save slots / settings
-- Step 10 2D/3D + geometry
-- Step 09 camera + multimodal relations
+- Step 11 save slots/settings
+- Step 10 geometry ground memory
+- Step 09 camera multimodality
 - Step 08 sequence compression
 - Step 07 recursive abstraction
-- sonification
-- persistent memory migration
-
-## Important
-This is still the v0.5 prototype family. The UI is cleaner, but it is not yet a
-polished production design system or signed release package.
+- sonification and consolidation
 
 ## Install
-Open as a fresh Android Studio project, build the APK, and install over the same
-`de.equinox.v05` application.
+Build in Android Studio and install over the existing `de.equinox.v05` app.
